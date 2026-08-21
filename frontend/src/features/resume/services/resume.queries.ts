@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { resumeApi } from '../../../api/resume';
 import { useResumeStore } from '../../../store/resumeStore';
-import { getStoredProfileId } from '../../profile/services/profile.queries';
+import { getStoredProfileId } from '@/lib/session';
 import { toast } from 'sonner';
 
 export const useGetResumeQuery = () => {

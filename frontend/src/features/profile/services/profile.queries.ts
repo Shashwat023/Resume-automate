@@ -1,20 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { profileApi, type BackendProfile } from '../../../api/profile';
 import { useProfileStore } from '../../../store/profileStore';
+import { getStoredProfileId, setStoredProfileId } from '@/lib/session';
 import { toast } from 'sonner';
 import type { ProfileFormValues } from '../schema';
-
-// ── Profile ID persistence ────────────────────────────────────────────
-const PROFILE_ID_KEY = 'career-ops-profile-id';
-
-export function getStoredProfileId(): number | null {
-  const v = localStorage.getItem(PROFILE_ID_KEY);
-  return v ? Number(v) : null;
-}
-
-export function setStoredProfileId(id: number) {
-  localStorage.setItem(PROFILE_ID_KEY, String(id));
-}
 
 // ── Backend → Frontend mapping ────────────────────────────────────────
 function backendToForm(b: BackendProfile): ProfileFormValues {

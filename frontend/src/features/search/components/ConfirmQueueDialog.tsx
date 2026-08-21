@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Play, FileText, User } from 'lucide-react';
-import { getStoredProfileId } from '../../profile/services/profile.queries';
+import { getStoredProfileId } from '@/lib/session';
 import { useResumeStore } from '../../../store/resumeStore';
 
 

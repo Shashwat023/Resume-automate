@@ -239,6 +239,20 @@ Note: using SQLite (`sqlite+aiosqlite`) via SQLAlchemy 2.0 `create_all()`, no Al
 
 ---
 
+## Clean architecture restructure (post Day-2, backend + frontend)
+
+Both codebases were restructured into layered architecture with **zero behavioral or visual change** — verified via full manual smoke tests (backend: profile/resume/jobs/admin/apply/live-view WS; frontend: real browser click-through against the real restructured backend) plus a new backend pytest suite (63 tests, `backend/tests/`).
+
+**Backend** — new layers: `domain/` (pure business rules: status vocabulary, application state-machine transitions, the semantic dictionary), `repositories/` (all SQLAlchemy query construction, one per aggregate), `services/*_service.py` (use-case orchestration), `ports.py` (`QueuePort`, `ResumeStoragePort` — formalizes the informal `set_run_fn` DI that already existed), `api/*.py` (now thin controllers only). `api/deps.py` is the DI hub. Route paths, request/response shapes, and status codes are byte-for-byte unchanged — confirmed against every endpoint including exact `detail` error strings.
+
+**Frontend** — conservative, additive-only: deleted 6 verified-dead files (a duplicate hook set from a prior refactor), added `@/` path aliases (`vite.config.ts` + `tsconfig.app.json`, mirroring the alias that already existed unused in `vitest.config.ts`), fixed the one real layering inversion (`getStoredProfileId`/`setStoredProfileId` moved to `src/lib/session.ts`), gave Admin a real feature folder (`src/api/admin.ts` + `features/admin/services/admin.queries.ts`), and extracted inlined page logic into hooks (`features/profile/hooks/useAutosaveProfile.ts`, `features/search/hooks/useQueueConfirmation.ts`, `src/lib/exportJson.ts`). No JSX/CSS/store-shape/query-key changes anywhere.
+
+**Two pre-existing findings surfaced along the way (neither touched, both out of scope for a zero-behavior-change restructure):**
+- `pages/AdminPage.tsx`'s scrape-results table has a malformed JSX `<a>` tag (attributes floating as literal text instead of inside the tag) — visible garbled text and a non-functional link in the Company URL column. Syntactically valid JSX (why the build never caught it), pre-existing, moved verbatim during the Admin extraction.
+- `domain/semantic_dictionary.py`'s `\baddress\b` pattern matches a relocation *judgment* question ("What is the address from which you plan on working? ... type 'relocating'") as if it were a literal home-address field. Currently harmless (falls through to unmatched whenever `profile.address` is empty) but could produce a wrong autofill if a profile has an address set. Caught while writing `tests/test_domain_semantic_dictionary.py`; not fixed since it's shipped Tier-0 matching behavior, not a restructure regression.
+
+---
+
 ## References
 
 - [Stagehand — connecting to an existing browser (`cdpUrl`)](https://docs.stagehand.dev/v2/configuration/browser)

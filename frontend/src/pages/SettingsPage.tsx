@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useThemeStore } from '../store/themeStore';
 import { useProfileStore } from '../store/profileStore';
+import { downloadJson } from '@/lib/exportJson';
 import { Settings, Moon, Sun, Monitor, PlayCircle, ShieldAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { clsx } from 'clsx';
@@ -21,12 +22,7 @@ export const SettingsPage = () => {
   };
 
   const handleExportData = () => {
-    const dataStr = exportProfile();
-    const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-    const linkElement = document.createElement('a');
-    linkElement.setAttribute('href', dataUri);
-    linkElement.setAttribute('download', 'auto-apply-data-backup.json');
-    linkElement.click();
+    downloadJson(exportProfile(), 'auto-apply-data-backup.json');
     toast.success('Application data exported');
   };
 

@@ -1,5 +1,5 @@
 import api from './axios';
-import { getStoredProfileId } from '../features/profile/services/profile.queries';
+import { getStoredProfileId } from '@/lib/session';
 import type { QueueStateResponse, QueueItem, JobStatus, QueueStatus } from '../types';
 
 // Shape returned by GET /api/apply/history/{profile_id}

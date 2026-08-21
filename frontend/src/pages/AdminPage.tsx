@@ -1,50 +1,18 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import api from '../api/axios';
+import { adminApi, type SyncResult } from '@/api/admin';
+import { useAdminStatsQuery } from '@/features/admin/services/admin.queries';
 import {
   Globe, Play, CheckCircle, XCircle, RefreshCw,
   Database, TrendingUp, Clock, AlertTriangle, Plus, Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-interface SyncResult {
-  company_url: string;
-  success: boolean;
-  jobs_inserted: number;
-  jobs_updated: number;
-  failed: number;
-  timestamp: string;
-}
-
-const adminApi = {
-  syncCompany: async (company_url: string): Promise<SyncResult> => {
-    const data: any = await api.post('/api/admin/sync', { company_url }, {
-      timeout: 15 * 60 * 1000, // 15 minutes — scraping can take a while
-    });
-    return {
-      company_url,
-      success: data?.success ?? false,
-      jobs_inserted: data?.jobs_inserted ?? 0,
-      jobs_updated: data?.jobs_updated ?? 0,
-      failed: data?.failed ?? 0,
-      timestamp: new Date().toISOString(),
-    };
-  },
-};
-
 export const AdminPage = () => {
   const [urls, setUrls] = useState<string[]>(['']);
   const [results, setResults] = useState<SyncResult[]>([]);
   const [isRunning, setIsRunning] = useState(false);
 
-  const { data: stats, refetch: refetchStats } = useQuery({
-    queryKey: ['admin-stats'],
-    queryFn: async () => {
-      const data: any = await api.get('/api/jobs/search', { params: { page: 1, limit: 1 } });
-      return { total_jobs: data?.total ?? 0 };
-    },
-    staleTime: 30_000,
-  });
+  const { data: stats, refetch: refetchStats } = useAdminStatsQuery();
 
   const addUrl = () => setUrls(prev => [...prev, '']);
   const removeUrl = (i: number) => setUrls(prev => prev.filter((_, idx) => idx !== i));

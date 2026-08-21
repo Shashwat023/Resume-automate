@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queueApi } from '../../../api/queue';
 import { useQueueStore } from '../../../store/queueStore';
-import { getStoredProfileId } from '../../profile/services/profile.queries';
+import { getStoredProfileId } from '@/lib/session';
 import { toast } from 'sonner';
 
 export const useQueueStatusQuery = () => {

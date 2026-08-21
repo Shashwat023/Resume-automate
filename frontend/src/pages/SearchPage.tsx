@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { SearchHeader } from '../features/search/components/SearchHeader';
 import { SearchBar } from '../features/search/components/SearchBar';
 import { FilterPanel } from '../features/search/components/FilterPanel';
@@ -14,10 +13,12 @@ import { useFilters } from '../features/search/hooks/useFilters';
 import { usePagination } from '../features/search/hooks/usePagination';
 import { useRowSelection } from '../features/search/hooks/useRowSelection';
 import { useSearchJobsQuery, useCreateQueueMutation } from '../features/search/services/search.queries';
+import {
+  useQueueConfirmation,
+  QUICK_SELECT_OPTIONS,
+} from '@/features/search/hooks/useQueueConfirmation';
 import { useDebounce } from '../hooks/useDebounce';
 import { Play, ListChecks } from 'lucide-react';
-
-const QUICK_SELECT_OPTIONS = [10, 50, 100] as const;
 
 export const SearchPage = () => {
   const { keyword } = useJobSearch();
@@ -36,57 +37,29 @@ export const SearchPage = () => {
 
   const { mutate: createQueue, isPending: isCreatingQueue } = useCreateQueueMutation();
 
-  const [isConfirmOpen, setIsConfirmOpen] = useState(false);
-  const [queueMode, setQueueMode] = useState<'selected' | 'filtered'>('selected');
-  const [quickSelectN, setQuickSelectN] = useState<number | null>(null);
-
   const jobs = response?.data || [];
   const meta = response?.meta || { totalItems: 0, totalPages: 0, page: 1, limit: 10 };
   const selectedCount = Object.keys(rowSelection).filter(k => rowSelection[k]).length;
 
-  // Selects the top N jobs from the current results into rowSelection
-  const handleQuickSelect = (n: number) => {
-    setQuickSelectN(n);
-    const topN = jobs.slice(0, n);
-    const newSelection: Record<string, boolean> = {};
-    topN.forEach(job => { newSelection[String(job.id)] = true; });
-    setSelectedRowIds(newSelection);
-    // Scroll to top of table so user sees the selected rows
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleAutoApplySelected = () => {
-    setQueueMode('selected');
-    setIsConfirmOpen(true);
-  };
-
-  const handleAutoApplyFiltered = () => {
-    setQueueMode('filtered');
-    setIsConfirmOpen(true);
-  };
-
-  const handleConfirmQueue = () => {
-    let jobsToQueue: typeof jobs = [];
-
-    if (queueMode === 'selected') {
-      jobsToQueue = jobs.filter(job => rowSelection[job.id]);
-    } else {
-      jobsToQueue = jobs;
-    }
-
-    createQueue(
-      { jobs: jobsToQueue.map(j => ({ id: j.id, title: j.title, company_name: j.company_name, apply_url: j.apply_url })) },
-      {
-        onSuccess: () => {
-          setIsConfirmOpen(false);
-          setQuickSelectN(null);
-          clearSelection();
-        }
-      }
-    );
-  };
-
-  const queueCount = queueMode === 'selected' ? selectedCount : meta.totalItems;
+  const {
+    isConfirmOpen,
+    setIsConfirmOpen,
+    quickSelectN,
+    setQuickSelectN,
+    handleQuickSelect,
+    handleAutoApplySelected,
+    handleAutoApplyFiltered,
+    handleConfirmQueue,
+    queueCount,
+  } = useQueueConfirmation({
+    jobs,
+    rowSelection,
+    selectedCount,
+    totalItems: meta.totalItems,
+    createQueue,
+    clearSelection,
+    setSelectedRowIds,
+  });
 
   return (
     <div className="flex flex-col h-full max-w-7xl mx-auto space-y-2">
