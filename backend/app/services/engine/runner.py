@@ -7,12 +7,13 @@ Tier 0's result — Tier 0 alone can't safely decide "this application is
 complete," only the higher tiers plus the final-review gate can, so that's
 an honest place to stop until those exist.
 """
+
 import re
 from datetime import datetime, timezone
 
 from stagehand import Stagehand
 
-from app.core import status as st
+from app.domain import status as st
 from app.core.db import async_session_factory
 from app.models.db_models import Application, Job, Profile, RunEvent
 from app.services.browser.chrome_launcher import get_or_launch
@@ -20,7 +21,9 @@ from app.services.engine.llm_client import unreachable_llm
 from app.services.engine.tier0_harvest import harvest_and_fill
 from app.worker.queue_runner import cleanup, is_cancelled
 
-_APPLY_BUTTON = re.compile(r"^\s*\[([\w-]+)\]\s+button:\s*(Apply|Apply Now|Apply for this job)\s*$", re.I)
+_APPLY_BUTTON = re.compile(
+    r"^\s*\[([\w-]+)\]\s+button:\s*(Apply|Apply Now|Apply for this job)\s*$", re.I
+)
 
 
 async def run_application(application_id: str) -> None:
@@ -37,7 +40,9 @@ async def run_application(application_id: str) -> None:
             cleanup(application_id)
             return
 
-        profile_dict = {c.name: getattr(profile, c.name) for c in profile.__table__.columns}
+        profile_dict = {
+            c.name: getattr(profile, c.name) for c in profile.__table__.columns
+        }
 
         application.status = st.RUNNING
         application.started_at = datetime.now(timezone.utc)
@@ -51,7 +56,10 @@ async def run_application(application_id: str) -> None:
     try:
         session = await get_or_launch(str(profile.id))
         sh = await Stagehand.create(browser=session.browser, model=unreachable_llm)
-        page = await sh.browser.context.active_page() or await sh.browser.context.new_page()
+        page = (
+            await sh.browser.context.active_page()
+            or await sh.browser.context.new_page()
+        )
 
         await _log(application_id, f"Navigating to {job.apply_url}")
         await page.goto(job.apply_url)
@@ -64,14 +72,22 @@ async def run_application(application_id: str) -> None:
 
         clicked_apply = await _click_apply_if_present(page)
         if clicked_apply:
-            await _log(application_id, "Clicked an 'Apply' button to reveal the application form")
+            await _log(
+                application_id,
+                "Clicked an 'Apply' button to reveal the application form",
+            )
             await page.wait_for_timeout(1500)
 
         result = await harvest_and_fill(page, profile_dict)
         for label, value in result.filled:
             await _log(application_id, f"Tier 0 filled '{label}'", tier="tier0")
         for label, err in result.errored:
-            await _log(application_id, f"Tier 0 matched '{label}' but fill failed: {err}", level="warn", tier="tier0")
+            await _log(
+                application_id,
+                f"Tier 0 matched '{label}' but fill failed: {err}",
+                level="warn",
+                tier="tier0",
+            )
         if result.unmatched:
             await _log(
                 application_id,
@@ -110,7 +126,13 @@ async def run_application(application_id: str) -> None:
                 application.status = st.FAILED
                 application.error = str(exc)
                 application.finished_at = datetime.now(timezone.utc)
-                db.add(RunEvent(application_id=application_id, message=f"Failed: {exc}", level="error"))
+                db.add(
+                    RunEvent(
+                        application_id=application_id,
+                        message=f"Failed: {exc}",
+                        level="error",
+                    )
+                )
                 await db.commit()
 
     cleanup(application_id)
@@ -147,7 +169,13 @@ async def _click_apply_if_present(page) -> bool:
     return False
 
 
-async def _log(application_id: str, message: str, *, level: str = "info", tier: str | None = None) -> None:
+async def _log(
+    application_id: str, message: str, *, level: str = "info", tier: str | None = None
+) -> None:
     async with async_session_factory() as db:
-        db.add(RunEvent(application_id=application_id, message=message, level=level, tier=tier))
+        db.add(
+            RunEvent(
+                application_id=application_id, message=message, level=level, tier=tier
+            )
+        )
         await db.commit()

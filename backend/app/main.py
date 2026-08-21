@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import admin, apply, jobs, profile, resume, ws
 from app.core.config import get_settings
 from app.core.db import init_db
+from app.core.exceptions import ConflictError, NotFoundError
 
 settings = get_settings()
 
@@ -40,6 +42,17 @@ app.mount(
     StaticFiles(directory=str(settings.resume_storage_dir)),
     name="resume-storage",
 )
+
+
+@app.exception_handler(NotFoundError)
+async def not_found_handler(request: Request, exc: NotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(ConflictError)
+async def conflict_handler(request: Request, exc: ConflictError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
 
 app.include_router(profile.router)
 app.include_router(resume.router)

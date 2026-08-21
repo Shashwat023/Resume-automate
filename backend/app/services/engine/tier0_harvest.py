@@ -9,12 +9,13 @@ are Tier 1 (batched LLM) / Tier 2 (Stagehand observe/act) / Tier 3 (human)
 territory per PLAN.md's tier boundaries. Tier 0's job is the ~70-80% of
 fields that don't need any of that.
 """
+
 import re
 from dataclasses import dataclass
 
 from stagehand import Page
 
-from app.services.engine.semantic_dictionary import match_field, resolve_value
+from app.domain.semantic_dictionary import match_field, resolve_value
 
 _TEXTBOX_LINE = re.compile(r"^\s*\[([\w-]+)\]\s+textbox:\s*(.+?)\s*$")
 
@@ -23,7 +24,9 @@ _TEXTBOX_LINE = re.compile(r"^\s*\[([\w-]+)\]\s+textbox:\s*(.+?)\s*$")
 class HarvestResult:
     filled: list[tuple[str, str]]  # (label, value) actually written
     unmatched: list[str]  # labels with no semantic dictionary match
-    errored: list[tuple[str, str]]  # (label, error) - matched but the fill itself failed
+    errored: list[
+        tuple[str, str]
+    ]  # (label, error) - matched but the fill itself failed
 
 
 async def harvest_and_fill(page: Page, profile: dict) -> HarvestResult:

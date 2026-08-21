@@ -14,6 +14,7 @@ still control port/user_data_dir/keep_alive, which is what the architecture
 actually needs; local_browser.launch() just handles the extension bootstrap
 correctly instead of us reimplementing it.
 """
+
 import socket
 from dataclasses import dataclass
 
@@ -30,7 +31,9 @@ _sessions: dict[str, "ChromeSession"] = {}
 class ChromeSession:
     profile_key: str
     port: int
-    browser: StagehandBrowser  # pass this into Stagehand.create(browser=...) for automation
+    browser: (
+        StagehandBrowser  # pass this into Stagehand.create(browser=...) for automation
+    )
 
     @property
     def cdp_url(self) -> str:

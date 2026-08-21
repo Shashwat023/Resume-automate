@@ -27,7 +27,13 @@ class Settings(BaseSettings):
     # `python -m playwright install chromium`, which downloads a CfT build to
     # %LOCALAPPDATA%\ms-playwright on Windows (~/.cache/ms-playwright on Linux/Mac).
     chrome_executable_path: str = str(
-        Path.home() / "AppData" / "Local" / "ms-playwright" / "chromium-1234" / "chrome-win64" / "chrome.exe"
+        Path.home()
+        / "AppData"
+        / "Local"
+        / "ms-playwright"
+        / "chromium-1234"
+        / "chrome-win64"
+        / "chrome.exe"
     )
     chrome_profiles_dir: Path = BACKEND_DIR / ".chrome-profiles"
     chrome_debug_port_base: int = 9222

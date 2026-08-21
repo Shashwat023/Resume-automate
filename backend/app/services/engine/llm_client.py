@@ -9,6 +9,7 @@ never calls this — `unreachable_llm` is passed to Stagehand.create() during
 Tier 0 runs specifically so any accidental LLM invocation fails loudly
 instead of silently costing money.
 """
+
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -23,7 +24,6 @@ async def unreachable_llm(params):
 
 async def openrouter_llm(params):
     """Real OpenRouter-backed callback for Tier 1/2 (Day 3)."""
-    import httpx
 
     if not settings.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")

@@ -55,7 +55,9 @@ class Profile(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
-    resume: Mapped["Resume | None"] = relationship(back_populates="profile", uselist=False)
+    resume: Mapped["Resume | None"] = relationship(
+        back_populates="profile", uselist=False
+    )
     applications: Mapped[list["Application"]] = relationship(back_populates="profile")
 
 
@@ -82,7 +84,9 @@ class Job(Base):
     title: Mapped[str] = mapped_column(Text)
     company_name: Mapped[str] = mapped_column(Text)
     location: Mapped[str] = mapped_column(Text, default="")
-    location_type: Mapped[str | None] = mapped_column(Text, default=None)  # Remote/Hybrid/Onsite
+    location_type: Mapped[str | None] = mapped_column(
+        Text, default=None
+    )  # Remote/Hybrid/Onsite
     industry: Mapped[str | None] = mapped_column(Text, default=None)
     posted_text: Mapped[str | None] = mapped_column(Text, default=None)
     posted_date: Mapped[str | None] = mapped_column(Text, default=None)
@@ -113,8 +117,12 @@ class Application(Base):
 
     __tablename__ = "applications"
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid)  # application_id, external
-    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"))
+    id: Mapped[str] = mapped_column(
+        Text, primary_key=True, default=_uuid
+    )  # application_id, external
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE")
+    )
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
 
     status: Mapped[str] = mapped_column(Text, default="queued")
@@ -138,10 +146,14 @@ class RunEvent(Base):
     __tablename__ = "run_events"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    application_id: Mapped[str] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE")
+    )
     level: Mapped[str] = mapped_column(Text, default="info")  # info | warn | error
     message: Mapped[str] = mapped_column(Text)
-    tier: Mapped[str | None] = mapped_column(Text, default=None)  # tier0|tier1|tier2|tier3
+    tier: Mapped[str | None] = mapped_column(
+        Text, default=None
+    )  # tier0|tier1|tier2|tier3
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     application: Mapped["Application"] = relationship(back_populates="events")

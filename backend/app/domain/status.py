@@ -4,6 +4,10 @@ mapBackendStatusToJobStatus exactly, plus the one addition (NEEDS_INPUT)
 that the frontend's mapping function is also updated to recognize.
 Emitting anything outside this vocabulary silently falls into "waiting"
 on the frontend and hides the moment a human needs to act.
+
+Moved here (from core/status.py) as part of the clean-architecture
+restructure: status vocabulary is a pure business concept, not
+infrastructure — it belongs in the domain layer.
 """
 
 QUEUED = "queued"

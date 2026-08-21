@@ -7,6 +7,7 @@ Job discovery/scraper. Cascading, same philosophy as the form-filling engine:
 This module currently implements tier 1 only (Day 1 scaffold); tiers 2/3
 land Day 3 per PLAN.md.
 """
+
 import re
 
 import httpx
@@ -15,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db_models import Job
 
-GREENHOUSE_BOARD_RE = re.compile(r"(?:job-boards\.greenhouse\.io|boards\.greenhouse\.io)/([\w-]+)")
+GREENHOUSE_BOARD_RE = re.compile(
+    r"(?:job-boards\.greenhouse\.io|boards\.greenhouse\.io)/([\w-]+)"
+)
 LEVER_RE = re.compile(r"jobs\.lever\.co/([\w-]+)")
 
 
@@ -30,7 +33,12 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             inserted, updated = await _sync_greenhouse(board_token, db)
         except Exception:
             failed += 1
-        return {"success": failed == 0, "jobs_inserted": inserted, "jobs_updated": updated, "failed": failed}
+        return {
+            "success": failed == 0,
+            "jobs_inserted": inserted,
+            "jobs_updated": updated,
+            "failed": failed,
+        }
 
     lever_token = _detect_lever(company_url)
     if lever_token:
@@ -38,7 +46,12 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             inserted, updated = await _sync_lever(lever_token, db)
         except Exception:
             failed += 1
-        return {"success": failed == 0, "jobs_inserted": inserted, "jobs_updated": updated, "failed": failed}
+        return {
+            "success": failed == 0,
+            "jobs_inserted": inserted,
+            "jobs_updated": updated,
+            "failed": failed,
+        }
 
     # Tier 2 (Stagehand extract) and tier 3 (WebSearch) land Day 3.
     return {"success": False, "jobs_inserted": 0, "jobs_updated": 0, "failed": 1}

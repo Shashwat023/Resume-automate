@@ -1,13 +1,12 @@
 import asyncio
-import base64
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
 
 from app.core.db import async_session_factory
-from app.models.db_models import Application, RunEvent
-from app.services.browser.chrome_launcher import get_or_launch
-from app.services.browser.live_view import LiveViewProxy
+from app.core.exceptions import NotFoundError
+from app.repositories.application_repository import ApplicationRepository
+from app.services.live_view_service import LiveViewService
+from app.services.log_stream_service import LogStreamService
 
 router = APIRouter()
 
@@ -16,17 +15,16 @@ router = APIRouter()
 async def live_view_ws(websocket: WebSocket, application_id: str) -> None:
     await websocket.accept()
 
-    async with async_session_factory() as db:
-        application = await db.get(Application, application_id)
-        if application is None:
-            await websocket.close(code=4404)
-            return
-        profile_id = application.profile_id
-
-    session = await get_or_launch(str(profile_id))
-    proxy = LiveViewProxy(session)
-    await proxy.connect()
-    await proxy.start_screencast()
+    # Scoped narrowly to the lookup, same as before this restructure — the
+    # session must not stay open for the whole (potentially long-lived)
+    # live-view connection, only for the initial application lookup.
+    try:
+        async with async_session_factory() as db:
+            live_view = LiveViewService(ApplicationRepository(db))
+            proxy = await live_view.connect(application_id)
+    except NotFoundError:
+        await websocket.close(code=4404)
+        return
 
     async def pump_frames():
         async for frame_b64 in proxy.frames():
@@ -38,7 +36,9 @@ async def live_view_ws(websocket: WebSocket, application_id: str) -> None:
             msg = await websocket.receive_json()
             msg_type = msg.get("type")
             if msg_type == "mouse":
-                await proxy.dispatch_mouse(msg["event"], msg["x"], msg["y"], msg.get("button", "left"))
+                await proxy.dispatch_mouse(
+                    msg["event"], msg["x"], msg["y"], msg.get("button", "left")
+                )
             elif msg_type == "key":
                 await proxy.dispatch_key(msg["event"], msg.get("text"), msg.get("key"))
     except WebSocketDisconnect:
@@ -54,13 +54,12 @@ async def logs_ws(websocket: WebSocket, application_id: str) -> None:
     last_id = 0
     try:
         while True:
+            # A fresh session per poll (not FastAPI Depends, which resolves once
+            # per connection) is deliberate: it's what guarantees each iteration
+            # sees data committed by other sessions since the last poll.
             async with async_session_factory() as db:
-                stmt = (
-                    select(RunEvent)
-                    .where(RunEvent.application_id == application_id, RunEvent.id > last_id)
-                    .order_by(RunEvent.id.asc())
-                )
-                events = (await db.execute(stmt)).scalars().all()
+                service = LogStreamService(ApplicationRepository(db))
+                events = await service.events_after(application_id, last_id)
             for event in events:
                 await websocket.send_json(
                     {

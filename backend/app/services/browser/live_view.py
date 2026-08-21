@@ -15,6 +15,7 @@ raises ConcurrencyError if two coroutines call recv() on the same
 connection at once (send() waiting for a reply, and a frames() generator
 consuming the stream, would otherwise race for every incoming message).
 """
+
 import asyncio
 import itertools
 import json
@@ -40,7 +41,9 @@ class LiveViewProxy:
     async def connect(self) -> None:
         import urllib.request
 
-        with urllib.request.urlopen(f"{self._session.cdp_url}/json/version", timeout=2) as resp:
+        with urllib.request.urlopen(
+            f"{self._session.cdp_url}/json/version", timeout=2
+        ) as resp:
             info = json.loads(resp.read())
         self._ws = await websockets.connect(info["webSocketDebuggerUrl"], max_size=None)
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -83,7 +86,9 @@ class LiveViewProxy:
                     session_scoped=True,
                 )
 
-    async def _send_no_wait(self, method: str, params: dict, *, session_scoped: bool) -> None:
+    async def _send_no_wait(
+        self, method: str, params: dict, *, session_scoped: bool
+    ) -> None:
         assert self._ws is not None
         envelope: dict[str, Any] = {
             "id": next(self._id_counter),
@@ -94,12 +99,18 @@ class LiveViewProxy:
             envelope["sessionId"] = self._page_session_id
         await self._ws.send(json.dumps(envelope))
 
-    async def _call(self, method: str, params: dict | None = None, *, session_scoped: bool = False) -> dict:
+    async def _call(
+        self, method: str, params: dict | None = None, *, session_scoped: bool = False
+    ) -> dict:
         assert self._ws is not None
         msg_id = next(self._id_counter)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[msg_id] = future
-        envelope: dict[str, Any] = {"id": msg_id, "method": method, "params": params or {}}
+        envelope: dict[str, Any] = {
+            "id": msg_id,
+            "method": method,
+            "params": params or {},
+        }
         if session_scoped:
             envelope["sessionId"] = self._page_session_id
         await self._ws.send(json.dumps(envelope))
@@ -112,7 +123,13 @@ class LiveViewProxy:
     async def start_screencast(self) -> None:
         await self.send(
             "Page.startScreencast",
-            {"format": "jpeg", "quality": 60, "maxWidth": 1280, "maxHeight": 800, "everyNthFrame": 1},
+            {
+                "format": "jpeg",
+                "quality": 60,
+                "maxWidth": 1280,
+                "maxHeight": 800,
+                "everyNthFrame": 1,
+            },
         )
 
     async def frames(self) -> AsyncIterator[str]:
@@ -120,13 +137,17 @@ class LiveViewProxy:
         while True:
             yield await self._frame_queue.get()
 
-    async def dispatch_mouse(self, event_type: str, x: float, y: float, button: str = "left") -> None:
+    async def dispatch_mouse(
+        self, event_type: str, x: float, y: float, button: str = "left"
+    ) -> None:
         await self.send(
             "Input.dispatchMouseEvent",
             {"type": event_type, "x": x, "y": y, "button": button, "clickCount": 1},
         )
 
-    async def dispatch_key(self, event_type: str, text: str | None, key: str | None) -> None:
+    async def dispatch_key(
+        self, event_type: str, text: str | None, key: str | None
+    ) -> None:
         params: dict[str, Any] = {"type": event_type}
         if text is not None:
             params["text"] = text

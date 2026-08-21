@@ -9,6 +9,8 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 @router.post("/sync", response_model=AdminSyncOut)
-async def sync_jobs(payload: AdminSyncIn, db: AsyncSession = Depends(get_db)) -> AdminSyncOut:
+async def sync_jobs(
+    payload: AdminSyncIn, db: AsyncSession = Depends(get_db)
+) -> AdminSyncOut:
     result = await sync_company(payload.company_url, db)
     return AdminSyncOut(**result)
