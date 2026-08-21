@@ -1,0 +1,3178 @@
+# Portal Scanner Configuration
+# Used by /career-ops scan to discover new offers automatically.
+#
+# Strategy (3 levels):
+#   1. Playwright → careers_url of each company (real-time, reliable)
+#   2. Greenhouse API → structured JSON (fast, Greenhouse-only)
+#   3. WebSearch with site: filters (broad discovery, may be stale)
+#
+# IMPORTANT: Each company in tracked_companies MUST have careers_url.
+#   Prefer the BRANDED company careers URL whenever available; use ATS-hosted URL only as fallback.
+#   ✅ https://careers.mastercard.com   ⚠️ https://mastercard.wd1.myworkdayjobs.com (fallback only)
+#   ✅ https://openai.com/careers       ⚠️ https://job-boards.greenhouse.io/openai (fallback only)
+#   Exception: ATS-hosted careers_url is acceptable when no branded careers page exists.
+#   Using raw ATS URLs when a branded page exists can cause false 410 errors (job ID mismatch).
+#
+# HOW TO CUSTOMIZE:
+#   1. Copy this file to portals.yml in the project root
+#   2. Edit title_filter.positive with YOUR target role keywords
+#   3. Add/remove companies in tracked_companies
+#   4. Adjust search_queries for your preferred job boards
+#   5. Set enabled: false on companies you don't care about
+
+# -- Location filter (optional) --
+# Filter scanned jobs by location. Applied AFTER title filter, BEFORE dedup.
+# If this entire block is absent, all locations pass (current default behavior).
+#
+# Semantics:
+#   - Empty location string on a job → pass (don't penalize missing data)
+#   - Any `block` keyword present → reject (takes precedence over allow)
+#   - `allow` empty → pass (already cleared block)
+#   - `allow` non-empty → must match at least one keyword
+# All matches are case-insensitive substring.
+#
+# Example below targets US-based remote + a couple of US metros, blocking
+# common foreign hubs. Customize to your geography.
+
+# location_filter:
+#   allow:
+#     - "Remote"
+#     - "United States"
+#     - "USA"
+#     - "Atlanta"
+#     - "New York"
+#   block:
+#     - "India"
+#     - "Bengaluru"
+#     - "United Kingdom"
+#     - "London"
+#     - "Germany"
+#     - "France"
+#     - "Singapore"
+#     - "Japan"
+#     - "Brazil"
+#     - "Australia"
+
+# -- Title filter --
+# The scanner uses these keywords to decide if a title is relevant.
+# At least 1 positive must match AND 0 negatives must match (case-insensitive).
+
+title_filter:
+  positive:
+    # [CUSTOMIZE] Add keywords matching YOUR target roles
+    # -- AI/ML roles --
+    - "AI"
+    - "ML"
+    - "LLM"
+    - "Agent"
+    - "Agentic"
+    - "GenAI"
+    - "Generative AI"
+    - "NLP"
+    - "LLMOps"
+    - "MLOps"
+    - "Voice AI"
+    - "Conversational AI"
+    - "Speech"
+    # -- German AI/ML keywords (DACH market) --
+    - "KI"
+    - "Künstliche Intelligenz"
+    - "KI Engineer"
+    - "KI Trainer"
+    - "Dozent"
+    - "Weiterbildung"
+    # -- Engineering roles --
+    - "Platform Engineer"
+    - "Solutions Architect"
+    - "Solutions Engineer"
+    - "Forward Deployed"
+    - "Deployed Engineer"
+    - "Customer Engineer"
+    - "Integration Engineer"
+    # -- Product roles --
+    - "Product Manager"
+    - "Technical PM"
+    # -- Automation roles --
+    - "Automation"
+    - "Hyperautomation"
+    - "Low-Code"
+    - "No-Code"
+    - "GTM Engineer"
+    - "RevOps"
+    - "Business Systems"
+    - "Internal Tools"
+    - "Transformation"
+  negative:
+    # [CUSTOMIZE] Add keywords for roles you want to exclude
+    - "Junior"
+    - "Intern"
+    - ".NET"
+    - "Java "
+    - "iOS"
+    - "Android"
+    - "PHP"
+    - "Ruby"
+    - "Embedded"
+    - "Firmware"
+    - "FPGA"
+    - "ASIC"
+    - "Blockchain"
+    - "Web3"
+    - "Crypto"
+    - "Salesforce Admin"
+    - "SAP "
+    - "Oracle EBS"
+    - "Mainframe"
+    - "COBOL"
+  seniority_boost:
+    # These prefixes add relevance but are not required
+    - "Senior"
+    - "Staff"
+    - "Principal"
+    - "Lead"
+    - "Head"
+    - "Director"
+
+# -- Search queries --
+# Each query triggers a WebSearch. Use site: to filter by portal.
+# The scanner extracts title, URL, and company from results.
+
+search_queries:
+  # -- Ashby --
+  - name: Ashby — AI PM
+    query: 'site:jobs.ashbyhq.com "AI Product Manager" OR "Senior Product Manager AI" remote'
+    enabled: true
+
+  - name: Ashby — Solutions Architect
+    query: 'site:jobs.ashbyhq.com "Solutions Architect" AI OR automation remote'
+    enabled: true
+
+  - name: Ashby — AI Engineer
+    query: 'site:jobs.ashbyhq.com "AI Engineer" OR "LLM Engineer" OR "Forward Deployed" remote'
+    enabled: true
+
+  - name: Ashby — Agentic
+    query: 'site:jobs.ashbyhq.com "Agentic" OR "AI Agent" OR "Automation Architect" remote'
+    enabled: true
+
+  # -- Greenhouse --
+  - name: Greenhouse — AI PM
+    query: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io "AI Product Manager" OR "Senior Product Manager" AI remote'
+    enabled: true
+
+  - name: Greenhouse — SA & FDE
+    query: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io "Solutions Architect" OR "Forward Deployed" AI remote'
+    enabled: true
+
+  - name: Greenhouse — AI Engineer
+    query: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io "AI Engineer" OR "LLM" OR "Agentic" remote'
+    enabled: true
+
+  # -- Workable --
+  - name: Workable — AI Roles
+    query: 'site:apply.workable.com "AI" "Product Manager" OR "Solutions Architect" OR "AI Engineer" remote'
+    enabled: true
+
+  # -- No-Code / Low-Code / Automation --
+  - name: Ashby — No-Code & Automation
+    query: 'site:jobs.ashbyhq.com "no-code" OR "low-code" OR "automation engineer" OR "n8n" OR "Make" OR "Airtable" remote senior'
+    enabled: true
+
+  - name: Greenhouse — No-Code & Automation
+    query: 'site:job-boards.greenhouse.io "no-code" OR "low-code" OR "automation engineer" OR "business systems" senior remote'
+    enabled: true
+
+  - name: GTM Engineer — All portals
+    query: '"GTM Engineer" OR "RevOps Engineer" OR "Growth Engineer" automation Airtable OR Make OR Clay remote'
+    enabled: true
+
+  # -- Voice AI & Conversational AI --
+  - name: Voice AI — FDE & SA
+    query: 'site:job-boards.greenhouse.io OR site:jobs.ashbyhq.com "Voice AI" OR "Conversational AI" OR "Speech" "Solutions" OR "Forward Deployed" OR "Customer Engineer"'
+    enabled: true
+
+  - name: Voice AI — AI Engineer
+    query: 'site:job-boards.greenhouse.io OR site:jobs.ashbyhq.com "Voice" OR "Speech" "AI Engineer" OR "Deployment" OR "Integration"'
+    enabled: true
+
+  # -- Contact Center AI --
+  - name: Contact Center AI — SA & SE
+    query: '"contact center" OR "customer service" "AI" "Solutions Architect" OR "Solutions Engineer" OR "Forward Deployed" remote'
+    enabled: true
+
+  # -- FDE specific (cross-portal) --
+  - name: FDE & Deployed Engineer — All portals
+    query: '"Forward Deployed Engineer" OR "Deployed Engineer" OR "Deployment Engineer" AI site:job-boards.greenhouse.io OR site:jobs.ashbyhq.com OR site:jobs.lever.co'
+    enabled: true
+
+  # -- Remote-friendly Europe boards --
+
+  - name: Remotive — AI/DevRel/SA/FDE
+    query: 'site:remotive.com "AI Engineer" OR "Developer Advocate" OR "Solutions Architect" OR "Forward Deployed" OR "DevRel" Europe'
+    enabled: true
+
+  - name: WeWorkRemotely — AI & DX
+    query: 'site:weworkremotely.com "AI" OR "DevRel" OR "Solutions Engineer" OR "Forward Deployed" OR "Founding Engineer"'
+    enabled: true
+
+  - name: Working Nomads — AI/DevRel/SA
+    query: 'site:workingnomads.com "AI Engineer" OR "Developer Advocate" OR "Solutions Architect" OR "Forward Deployed"'
+    enabled: true
+
+  - name: EU Remote Jobs — AI/DevRel/SA
+    query: 'site:euremotejobs.com "AI" OR "DevRel" OR "Solutions Architect" OR "Forward Deployed" OR "Founding Engineer"'
+    enabled: true
+
+  - name: RemoteOK — AI/DevRel/SA
+    query: 'site:remoteok.com "AI Engineer" OR "Developer Advocate" OR "Solutions Architect" OR "Forward Deployed" OR "Founding Engineer"'
+    enabled: true
+
+  # -- Specialized AI / Dev-Tools / FDE boards --
+
+  - name: ai-jobs.net — DevRel/SA/FDE
+    query: 'site:ai-jobs.net "Developer Advocate" OR "Solutions Architect" OR "Forward Deployed" OR "DevRel" remote Europe'
+    enabled: true
+
+  - name: ai-jobs.net — Founding/Applied AI
+    query: 'site:ai-jobs.net "Founding Engineer" OR "Applied AI Engineer" OR "Founding" remote'
+    enabled: true
+
+  - name: fwddeploy.com — Forward Deployed roles
+    query: 'site:fwddeploy.com "Forward Deployed" OR "Deployed Engineer" remote Europe OR EMEA'
+    enabled: true
+
+  - name: YC Jobs — DevRel/SA/FDE/Founding
+    query: 'site:ycombinator.com/jobs OR site:workatastartup.com "Forward Deployed" OR "Developer Advocate" OR "Founding Engineer" OR "Solutions Architect" remote'
+    enabled: true
+
+  - name: YC Jobs — Applied AI
+    query: 'site:workatastartup.com "Applied AI" OR "AI Engineer" OR "AI Agent" remote Europe'
+    enabled: true
+
+  # -- Spanish market specialized (high-value for Madrid/Barcelona-based candidates) --
+
+  - name: Manfred — Tech Senior España
+    query: 'site:getmanfred.com/en/job-offers "Solutions Architect" OR "DevRel" OR "Forward Deployed" OR "AI Engineer" OR "Founding"'
+    enabled: true
+
+  - name: Manfred — Remote AI/Senior
+    query: 'site:getmanfred.com "remote" "AI" OR "Senior" OR "Staff" OR "Lead"'
+    enabled: true
+
+  - name: Tecnoempleo — España IT
+    query: 'site:tecnoempleo.com "AI Engineer" OR "Solutions Architect" OR "DevRel" OR "Forward Deployed" OR "Founding Engineer"'
+    enabled: true
+
+  - name: Tecnoempleo — Remoto Senior
+    query: 'site:tecnoempleo.com "remoto" OR "remote" Senior "AI" OR "Architect" OR "Lead"'
+    enabled: true
+
+  - name: JobFluent — Spain startups
+    query: 'site:jobfluent.com Madrid OR Barcelona "AI" OR "Engineer" OR "Solutions" OR "DevRel"'
+    enabled: true
+
+  - name: Welcome to the Jungle — Spain tech
+    query: 'site:welcometothejungle.com Spain OR Madrid OR Barcelona "AI Engineer" OR "Solutions Architect" OR "DevRel" OR "Forward Deployed"'
+    enabled: true
+
+  # -- DevRel-specific boards --
+
+  - name: DevRelX Jobs
+    query: 'site:devrelx.com/jobs remote OR Europe OR EMEA'
+    enabled: true
+
+  - name: TrueUp — DevRel roles
+    query: 'site:trueup.io/devrel OR site:trueup.io "Developer Advocate" OR "DevRel" remote Europe'
+    enabled: true
+
+  - name: Remote Rocketship — DevRel
+    query: 'site:remoterocketship.com/jobs/developer-relations OR site:remoterocketship.com "DevRel" remote'
+    enabled: true
+
+  - name: DevRel Job board
+    query: 'site:devreljob.com remote OR Europe OR EMEA'
+    enabled: true
+
+  # -- European / global aggregators --
+
+  - name: Himalayas — Remote AI/Dev-tools
+    query: 'site:himalayas.app "AI Engineer" OR "Solutions Architect" OR "Developer Advocate" OR "Forward Deployed" OR "Founding Engineer" Europe'
+    enabled: true
+
+  - name: Jooble — España Tech Senior
+    query: 'site:jooble.org "AI Engineer" OR "Solutions Architect" OR "DevRel" Madrid OR remote España'
+    enabled: true
+
+  - name: EU Data Jobs — AI/ML Europe
+    query: 'site:eudatajobs.com "AI" OR "ML" OR "Data" "Engineer" OR "Architect" remote Europe'
+    enabled: true
+
+  - name: HN Who's Hiring — Remote AI
+    query: 'site:news.ycombinator.com OR site:hnrss.org "AI Engineer" OR "Forward Deployed" OR "DevRel" OR "Founding Engineer" remote'
+    enabled: true
+
+  # -- Türkiye / Turkey job portals --
+  # WebSearch queries for Turkish job boards (no public ATS APIs).
+  # [CUSTOMIZE] Replace keywords with your target roles in Turkish.
+
+  - name: Kariyer.net — Backend / Software Engineer
+    query: 'site:kariyer.net "Backend Developer" OR "Software Engineer" OR "Yazılım Geliştirici" OR "Backend Geliştirici" Ankara OR Istanbul OR uzaktan'
+    enabled: false
+
+  - name: Kariyer.net — Frontend Engineer
+    query: 'site:kariyer.net "Frontend Developer" OR "React Developer" OR "Frontend Geliştirici" Ankara OR Istanbul OR uzaktan'
+    enabled: false
+
+  - name: Yenibiris.com — Software Engineer
+    query: 'site:yenibiris.com "Software Engineer" OR "Backend Developer" OR "Frontend Developer" OR "Yazılım Geliştirici"'
+    enabled: false
+
+  - name: Secretcv.com — Tech Roles
+    query: 'site:secretcv.com "Software Engineer" OR "Backend" OR "Frontend" OR "Full Stack"'
+    enabled: false
+
+  - name: İşin Olsun — Startup / Tech
+    query: 'site:isinolsun.com "Yazılım" OR "Software" OR "Backend" OR "Frontend" OR "Full Stack"'
+    enabled: false
+
+  - name: LinkedIn — Turkey Tech Roles
+    query: 'site:linkedin.com/jobs "Software Engineer" OR "Backend Engineer" OR "Frontend Engineer" Turkey OR Türkiye OR Ankara OR Istanbul'
+    enabled: false
+
+# -- Tracked companies --
+# Companies whose career pages are checked directly.
+# scan_method: playwright (default), websearch, greenhouse_api
+# For Greenhouse companies, add api: field for faster structured JSON access.
+#
+# Provider routing (scan.mjs):
+#   By default each entry is auto-detected from `careers_url` against the
+#   loaded providers in providers/*.mjs (ashby, greenhouse, lever — the
+#   first one whose detect() matches wins, alphabetical order).
+#
+#   Optional fields on a tracked_companies entry:
+#     provider: <id>     — force a specific provider, skipping detect().
+#                          Useful when careers_url is ambiguous or you want
+#                          to pin behavior. Value must match a loaded
+#                          provider's `id`.
+#     transport: http    — reserved for future transports. Defaults to http.
+
+tracked_companies:
+
+  - name: 4Liberty
+    careers_url: https://www.4liberty.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.4liberty.com careers OR jobs'
+
+  - name: Accenture
+    careers_url: https://www.accenture.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.accenture.com careers OR jobs'
+
+  - name: ACCIONA
+    careers_url: https://www.acciona.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.acciona.com careers OR jobs'
+
+  - name: ACS Professional Staffing
+    careers_url: https://www.acsprostaffing.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.acsprostaffing.com careers OR jobs'
+
+  - name: Actalent
+    careers_url: https://www.actalentservices.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.actalentservices.com careers OR jobs'
+
+  - name: Adapture Renewables
+    careers_url: https://adapturerenewables.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://adapturerenewables.com careers OR jobs'
+
+  - name: AECOM
+    careers_url: https://aecom.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://aecom.com careers OR jobs'
+
+  - name: Aegis Project Controls
+    careers_url: https://www.consultaegis.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.consultaegis.com careers OR jobs'
+
+  - name: Airswift
+    careers_url: https://www.airswift.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.airswift.com careers OR jobs'
+
+  - name: Akima
+    careers_url: https://www.akima.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.akima.com careers OR jobs'
+
+  - name: Alberici
+    careers_url: https://www.alberici.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.alberici.com careers OR jobs'
+
+  - name: Allied Reliability
+    careers_url: https://www.alliedreliability.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.alliedreliability.com careers OR jobs'
+
+  - name: Allére
+    careers_url: https://allere.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://allere.com careers OR jobs'
+
+  - name: Alpine Solutions Group
+    careers_url: https://alpinesolves.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://alpinesolves.com careers OR jobs'
+
+  - name: Alterman
+    careers_url: https://www.altermangroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.altermangroup.com careers OR jobs'
+
+  - name: Amentum
+    careers_url: https://www.amentum.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.amentum.com careers OR jobs'
+
+  - name: American Electric Power
+    careers_url: https://www.aep.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.aep.com careers OR jobs'
+
+  - name: American Real Estate Partners
+    careers_url: https://www.arep.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.arep.com careers OR jobs'
+
+  - name: American Structurepoint
+    careers_url: https://www.structurepoint.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.structurepoint.com careers OR jobs'
+
+  - name: Americaribe
+    careers_url: https://www.americaribe.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.americaribe.com careers OR jobs'
+
+  - name: Ampirical
+    careers_url: https://www.ampirical.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ampirical.com careers OR jobs'
+
+  - name: Amtrak
+    careers_url: https://www.amtrak.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.amtrak.com careers OR jobs'
+
+  - name: AngloGold Ashanti
+    careers_url: https://www.anglogoldashanti.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.anglogoldashanti.com careers OR jobs'
+
+  - name: Anord Mardix
+    careers_url: https://www.anordmardix.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.anordmardix.com careers OR jobs'
+
+  - name: APSI Construction Management
+    careers_url: https://www.apsicm.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.apsicm.com careers OR jobs'
+
+  - name: APT Companies
+    careers_url: https://aptcompanies.io/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://aptcompanies.io careers OR jobs'
+
+  - name: ArchKey Solutions
+    careers_url: https://www.archkey.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.archkey.com careers OR jobs'
+
+  - name: Ardmore Roderick
+    careers_url: https://ardmoreroderick.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://ardmoreroderick.com careers OR jobs'
+
+  - name: Asplundh Engineering Services
+    careers_url: https://asplundhengineering.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://asplundhengineering.com careers OR jobs'
+
+  - name: ATCS
+    careers_url: https://www.atcsplc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.atcsplc.com careers OR jobs'
+
+  - name: AtkinsRéalis
+    careers_url: https://www.atkinsrealis.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.atkinsrealis.com careers OR jobs'
+
+  - name: Ausenco
+    careers_url: https://www.ausenco.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ausenco.com careers OR jobs'
+
+  - name: Austin Powder
+    careers_url: https://www.austinpowder.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.austinpowder.com careers OR jobs'
+
+  - name: AZCO
+    careers_url: https://www.azco-inc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.azco-inc.com careers OR jobs'
+
+  - name: B&D Industries
+    careers_url: https://www.banddindustries.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.banddindustries.com careers OR jobs'
+
+  - name: BAE Systems
+    careers_url: https://www.baesystems.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.baesystems.com careers OR jobs'
+
+  - name: Barnard Construction
+    careers_url: https://barnard-inc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://barnard-inc.com careers OR jobs'
+
+  - name: Barnhart Energy Company
+    careers_url: https://www.barnhartec.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.barnhartec.com careers OR jobs'
+
+  - name: Barton Malow
+    careers_url: https://www.bartonmalow.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.bartonmalow.com careers OR jobs'
+
+  - name: BE&K Building Group
+    careers_url: https://www.bekbg.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.bekbg.com careers OR jobs'
+
+  - name: Bechtel
+    careers_url: https://www.bechtel.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.bechtel.com careers OR jobs'
+
+  - name: Beck & Pollitzer
+    careers_url: https://www.beck-pollitzer.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.beck-pollitzer.com careers OR jobs'
+
+  - name: Beyond New Horizons
+    careers_url: https://bnh-jv.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://bnh-jv.com careers OR jobs'
+
+  - name: BHMG Engineers
+    careers_url: https://bhmg.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://bhmg.com careers OR jobs'
+
+  - name: BLACKBOX AI
+    careers_url: https://www.blackbox.ai/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.blackbox.ai careers OR jobs'
+
+  - name: BlackRock Resources
+    careers_url: https://blackrockres.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://blackrockres.com careers OR jobs'
+
+  - name: Blue Origin
+    careers_url: https://www.blueorigin.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.blueorigin.com careers OR jobs'
+
+  - name: Blue Stone Management
+    careers_url: https://www.bluestonemanagement.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.bluestonemanagement.com careers OR jobs'
+
+  - name: BMC LLC Group
+    careers_url: https://bmcllcgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://bmcllcgroup.com careers OR jobs'
+
+  - name: Bowman Consulting Group
+    careers_url: https://bowman.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://bowman.com careers OR jobs'
+
+  - name: Brasfield & Gorrie
+    careers_url: https://www.brasfieldgorrie.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.brasfieldgorrie.com careers OR jobs'
+
+  - name: Bullhorn
+    careers_url: https://www.bullhorn.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.bullhorn.com careers OR jobs'
+
+  - name: Bureau Veritas North America
+    careers_url: https://www.bvna.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.bvna.com careers OR jobs'
+
+  - name: Burnett's Staffing
+    careers_url: https://www.burnetts.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.burnetts.com careers OR jobs'
+
+  - name: CACI International
+    careers_url: https://www.caci.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.caci.com careers OR jobs'
+
+  - name: Calm Water Bath
+    careers_url: https://www.calmwaterbath.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.calmwaterbath.com careers OR jobs'
+
+  - name: Canadian Breaks Consulting
+    careers_url: https://www.canadianbreaksconsulting.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.canadianbreaksconsulting.com careers OR jobs'
+
+  - name: CareerBuilder
+    careers_url: https://www.careerbuilder.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.careerbuilder.com careers OR jobs'
+
+  - name: CareerPlug
+    careers_url: https://www.careerplug.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.careerplug.com careers OR jobs'
+
+  - name: Castillo Engineering
+    careers_url: https://www.castilloengineering.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.castilloengineering.com careers OR jobs'
+
+  - name: CB Smart Recruit
+    careers_url: https://www.cbsmartrecruit.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cbsmartrecruit.com careers OR jobs'
+
+  - name: CBRE
+    careers_url: https://www.cbre.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cbre.com careers OR jobs'
+
+  - name: Central Ohio Transit Authority
+    careers_url: https://www.cota.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cota.com careers OR jobs'
+
+  - name: Centrus Energy
+    careers_url: https://www.centrusenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.centrusenergy.com careers OR jobs'
+
+  - name: Ciprani Consulting
+    careers_url: https://www.cipraniconsulting.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cipraniconsulting.com careers OR jobs'
+
+  - name: CIS Office Installers
+    careers_url: https://cisinstallers.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://cisinstallers.com careers OR jobs'
+
+  - name: Clark Construction
+    careers_url: https://www.clarkconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.clarkconstruction.com careers OR jobs'
+
+  - name: Clark Energies
+    careers_url: https://clarkenergies.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://clarkenergies.com careers OR jobs'
+
+  - name: ClearCompany
+    careers_url: https://www.clearcompany.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.clearcompany.com careers OR jobs'
+
+  - name: Clune Construction
+    careers_url: https://www.clunegc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.clunegc.com careers OR jobs'
+
+  - name: CMTS
+    careers_url: https://www.cmtsllc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cmtsllc.com careers OR jobs'
+
+  - name: ComEd
+    careers_url: https://www.comed.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.comed.com careers OR jobs'
+
+  - name: Commonwealth Associates
+    careers_url: https://www.cai-engr.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cai-engr.com careers OR jobs'
+
+  - name: Concentrix
+    careers_url: https://www.concentrix.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.concentrix.com careers OR jobs'
+
+  - name: Constellation Energy
+    careers_url: https://www.constellationenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.constellationenergy.com careers OR jobs'
+
+  - name: Contrack Watts
+    careers_url: https://www.contrackwatts.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.contrackwatts.com careers OR jobs'
+
+  - name: Cordoba Corporation
+    careers_url: https://www.cordobacorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cordobacorp.com careers OR jobs'
+
+  - name: Cortina Solutions
+    careers_url: https://www.cortinasolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cortinasolutions.com careers OR jobs'
+
+  - name: COWI
+    careers_url: https://www.cowi.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cowi.com careers OR jobs'
+
+  - name: Craig Technologies
+    careers_url: https://www.craigtechinc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.craigtechinc.com careers OR jobs'
+
+  - name: Cross Resource Group
+    careers_url: https://www.crossresourcegroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.crossresourcegroup.com careers OR jobs'
+
+  - name: Cubic Corporation
+    careers_url: https://www.cubic.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cubic.com careers OR jobs'
+
+  - name: Cumming Group
+    careers_url: https://cumming-group.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://cumming-group.com careers OR jobs'
+
+  - name: Cushman & Wakefield
+    careers_url: https://www.cushmanwakefield.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cushmanwakefield.com careers OR jobs'
+
+  - name: CyberCoders
+    careers_url: https://www.cybercoders.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.cybercoders.com careers OR jobs'
+
+  - name: DaBella
+    careers_url: https://www.dabella.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.dabella.com careers OR jobs'
+
+  - name: Daikin Applied
+    careers_url: https://www.daikinapplied.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.daikinapplied.com careers OR jobs'
+
+  - name: Danaher Corporation
+    careers_url: https://www.danaher.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.danaher.com careers OR jobs'
+
+  - name: Day & Zimmermann
+    careers_url: https://www.dayzim.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.dayzim.com careers OR jobs'
+
+  - name: Dilectus Workforce Solutions
+    careers_url: https://www.careers-page.com/dilectus-workforce-solutions
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.careers-page.com/dilectus-workforce-solutions careers OR jobs'
+
+  - name: DLR Group
+    careers_url: https://www.dlrgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.dlrgroup.com careers OR jobs'
+
+  - name: DPR Construction
+    careers_url: https://www.dpr.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.dpr.com careers OR jobs'
+
+  - name: DTE Energy
+    careers_url: https://www.dteenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.dteenergy.com careers OR jobs'
+
+  - name: Edgewater Technical Associates
+    careers_url: https://edgewatertech.net/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://edgewatertech.net careers OR jobs'
+
+  - name: Eichleay
+    careers_url: https://www.eichleay.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.eichleay.com careers OR jobs'
+
+  - name: ENFRA
+    careers_url: https://enfrasolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://enfrasolutions.com careers OR jobs'
+
+  - name: ENTEK
+    careers_url: https://www.entek.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.entek.com careers OR jobs'
+
+  - name: ENTRUST Solutions Group
+    careers_url: https://www.entrustsol.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.entrustsol.com careers OR jobs'
+
+  - name: EPC Services Company
+    careers_url: https://eciusa.com/epc-services-company/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://eciusa.com/epc-services-company careers OR jobs'
+
+  - name: EPI Power
+    careers_url: https://www.epipower.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.epipower.com careers OR jobs'
+
+  - name: ESI Electrical Construction
+    careers_url: https://esielectrical.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://esielectrical.com careers OR jobs'
+
+  - name: ESP Associates
+    careers_url: https://www.espassociates.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.espassociates.com careers OR jobs'
+
+  - name: Eversource
+    careers_url: https://www.eversource.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.eversource.com careers OR jobs'
+
+  - name: EVS Engineering
+    careers_url: https://evs-eng.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://evs-eng.com careers OR jobs'
+
+  - name: Excel Talent Solutions
+    careers_url: https://www.exceltalentsolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.exceltalentsolutions.com careers OR jobs'
+
+  - name: Exelon Corporation
+    careers_url: https://www.exeloncorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.exeloncorp.com careers OR jobs'
+
+  - name: F.H. Paschen
+    careers_url: https://www.fhpaschen.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.fhpaschen.com careers OR jobs'
+
+  - name: Faith Technologies Incorporated
+    careers_url: https://www.faithtechinc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.faithtechinc.com careers OR jobs'
+
+  - name: Ferrovial
+    careers_url: https://www.ferrovial.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ferrovial.com careers OR jobs'
+
+  - name: FindTalent
+    careers_url: https://www.findtalent.net/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.findtalent.net careers OR jobs'
+
+  - name: FirstEnergy
+    careers_url: https://www.firstenergycorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.firstenergycorp.com careers OR jobs'
+
+  - name: FlatironDragados
+    careers_url: https://www.flatirondragados.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.flatirondragados.com careers OR jobs'
+
+  - name: Flex
+    careers_url: https://www.flex.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.flex.com careers OR jobs'
+
+  - name: FlexGen
+    careers_url: https://www.flexgen.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.flexgen.com careers OR jobs'
+
+  - name: Flora Food Group
+    careers_url: https://www.florafoodgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.florafoodgroup.com careers OR jobs'
+
+  - name: Fluor Corporation
+    careers_url: https://www.fluor.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.fluor.com careers OR jobs'
+
+  - name: Flux
+    careers_url: https://www.workwithflux.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.workwithflux.com careers OR jobs'
+
+  - name: Fortis Construction
+    careers_url: https://www.fortisconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.fortisconstruction.com careers OR jobs'
+
+  - name: FOX-1 Resources
+    careers_url: https://www.fox-1.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.fox-1.com careers OR jobs'
+
+  - name: Freese and Nichols
+    careers_url: https://www.freese.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.freese.com careers OR jobs'
+
+  - name: Front Line Advisory Group (FLAG)
+    careers_url: https://frontlineadvisorygroup.com/
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://frontlineadvisorygroup.com careers OR jobs'
+
+  - name: Fronza & Francis
+    careers_url: https://fronzafrancis.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://fronzafrancis.com careers OR jobs'
+
+  - name: G-TECH Services
+    careers_url: https://gogtech.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://gogtech.com careers OR jobs'
+
+  - name: GAI Consultants
+    careers_url: https://gaiconsultants.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://gaiconsultants.com careers OR jobs'
+
+  - name: Garman Partners
+    careers_url: https://garmanpartners.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://garmanpartners.com careers OR jobs'
+
+  - name: GE Vernova
+    careers_url: https://www.gevernova.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gevernova.com careers OR jobs'
+
+  - name: GEA
+    careers_url: https://www.gea.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gea.com careers OR jobs'
+
+  - name: GEM Technologies, Inc.
+    careers_url: https://gemtechnologiesinc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://gemtechnologiesinc.com careers OR jobs'
+
+  - name: Gilbane Building Company
+    careers_url: https://www.gilbaneco.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gilbaneco.com careers OR jobs'
+
+  - name: Global Technical Talent
+    careers_url: https://gttit.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://gttit.com careers OR jobs'
+
+  - name: GoldCoast Energy
+    careers_url: https://www.goldcoastenergygroup.com/
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.goldcoastenergygroup.com careers OR jobs'
+
+  - name: Goodwin Recruiting
+    careers_url: https://www.goodwinrecruiting.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.goodwinrecruiting.com careers OR jobs'
+
+  - name: Graham & Associates / Graham Project Management
+    careers_url: https://grahampm.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://grahampm.com careers OR jobs'
+
+  - name: Granite Construction
+    careers_url: https://www.graniteconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.graniteconstruction.com careers OR jobs'
+
+  - name: Gray Construction
+    careers_url: https://www.gray.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gray.com careers OR jobs'
+
+  - name: Green Thumb Industries
+    careers_url: https://www.gtigrows.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gtigrows.com careers OR jobs'
+
+  - name: GSI Technology
+    careers_url: https://www.gsitechnology.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gsitechnology.com careers OR jobs'
+
+  - name: Gulf Coast Construction
+    careers_url: https://www.gulfcoastconstruction.com/
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.gulfcoastconstruction.com careers OR jobs'
+
+  - name: Halocarbon
+    careers_url: https://halocarbon.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://halocarbon.com careers OR jobs'
+
+  - name: Hargrove Engineers & Constructors
+    careers_url: https://www.hargrove-epc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.hargrove-epc.com careers OR jobs'
+
+  - name: Hatch
+    careers_url: https://www.hatch.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.hatch.com careers OR jobs'
+
+  - name: Haydon Companies
+    careers_url: https://haydon.com/
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://haydon.com careers OR jobs'
+
+  - name: Hays Electrical Services
+    careers_url: https://www.hayselectrical.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.hayselectrical.com careers OR jobs'
+
+  - name: Hewitt Young Electric
+    careers_url: https://hewittyoung.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://hewittyoung.com careers OR jobs'
+
+  - name: Hill International
+    careers_url: https://www.hillintl.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.hillintl.com careers OR jobs'
+
+  - name: Hoffman Construction
+    careers_url: https://www.hoffmancorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.hoffmancorp.com careers OR jobs'
+
+  - name: Holder Construction
+    careers_url: https://www.holderconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.holderconstruction.com careers OR jobs'
+
+  - name: HomePro
+    careers_url: https://www.homeprotech.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.homeprotech.com careers OR jobs'
+
+  - name: Hooper Corporation
+    careers_url: https://www.hoopercorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.hoopercorp.com careers OR jobs'
+
+  - name: iCIMS
+    careers_url: https://www.icims.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.icims.com careers OR jobs'
+
+  - name: Industry IoT Consortium
+    careers_url: https://www.iiconsortium.org/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.iiconsortium.org careers OR jobs'
+
+  - name: Insight Global
+    careers_url: https://www.insightglobal.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.insightglobal.com careers OR jobs'
+
+  - name: Insituform Technologies
+    careers_url: https://www.insituform.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.insituform.com careers OR jobs'
+
+  - name: Intel Corporation
+    careers_url: https://www.intel.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.intel.com careers OR jobs'
+
+  - name: Intermountain Electric
+    careers_url: https://www.imelect.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.imelect.com careers OR jobs'
+
+  - name: Interstates
+    careers_url: https://www.interstates.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.interstates.com careers OR jobs'
+
+  - name: Invenergy
+    careers_url: https://invenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://invenergy.com careers OR jobs'
+
+  - name: IPS-Integrated Project Services
+    careers_url: https://www.ipsdb.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ipsdb.com careers OR jobs'
+
+  - name: IREN
+    careers_url: https://iren.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://iren.com careers OR jobs'
+
+  - name: ISC Constructors
+    careers_url: https://www.iscgrp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.iscgrp.com careers OR jobs'
+
+  - name: Jacuzzi Group
+    careers_url: https://www.jacuzzi.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.jacuzzi.com careers OR jobs'
+
+  - name: Jaquith Consulting Group
+    careers_url: https://jaquithconsultinggroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://jaquithconsultinggroup.com careers OR jobs'
+
+  - name: JE Dunn Construction
+    careers_url: https://www.jedunn.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.jedunn.com careers OR jobs'
+
+  - name: Jedson Engineering
+    careers_url: https://www.jedson.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.jedson.com careers OR jobs'
+
+  - name: Jet Health
+    careers_url: https://jethealthinc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://jethealthinc.com careers OR jobs'
+
+  - name: JGM
+    careers_url: https://jgmusa.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://jgmusa.com careers OR jobs'
+
+  - name: JLL United States
+    careers_url: https://www.us.jll.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.us.jll.com careers OR jobs'
+
+  - name: Jones Bros Contractors
+    careers_url: https://www.jonesbroscont.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.jonesbroscont.com careers OR jobs'
+
+  - name: JTS Construction
+    careers_url: https://www.jtsconstruction.com/
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.jtsconstruction.com careers OR jobs'
+
+  - name: K&A Engineering Consulting
+    careers_url: https://www.kapower.us/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kapower.us careers OR jobs'
+
+  - name: KALCON
+    careers_url: https://www.kalconusa.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kalconusa.com careers OR jobs'
+
+  - name: KayCee Tech Solutions
+    careers_url: https://kayceetechsolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://kayceetechsolutions.com careers OR jobs'
+
+  - name: Kearfott Corporation
+    careers_url: https://www.kearfott.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kearfott.com careers OR jobs'
+
+  - name: KellyMitchell
+    careers_url: https://www.kellymitchell.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kellymitchell.com careers OR jobs'
+
+  - name: KENPAT Central Florida
+    careers_url: https://kenpat.net/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://kenpat.net careers OR jobs'
+
+  - name: Kiewit
+    careers_url: https://www.kiewit.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kiewit.com careers OR jobs'
+
+  - name: Kimley-Horn
+    careers_url: https://www.kimley-horn.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kimley-horn.com careers OR jobs'
+
+  - name: Kimmel & Associates
+    careers_url: https://kimmel.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://kimmel.com careers OR jobs'
+
+  - name: Kirschner Contractors
+    careers_url: https://kirschnercontractors.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://kirschnercontractors.com careers OR jobs'
+
+  - name: Kokosing
+    careers_url: https://www.kokosing.biz/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kokosing.biz careers OR jobs'
+
+  - name: Korn Ferry
+    careers_url: https://www.kornferry.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kornferry.com careers OR jobs'
+
+  - name: Kratos Defense & Security Solutions
+    careers_url: https://www.kratosdefense.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.kratosdefense.com careers OR jobs'
+
+  - name: L3Harris Technologies
+    careers_url: https://www.l3harris.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.l3harris.com careers OR jobs'
+
+  - name: LaBella Associates
+    careers_url: https://www.labellapc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.labellapc.com careers OR jobs'
+
+  - name: Layton Construction
+    careers_url: https://www.laytonconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.laytonconstruction.com careers OR jobs'
+
+  - name: Ledcor Group of Companies
+    careers_url: https://www.ledcor.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ledcor.com careers OR jobs'
+
+  - name: Legado Talent
+    careers_url: https://www.legadotalent.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.legadotalent.com careers OR jobs'
+
+  - name: Leidos
+    careers_url: https://www.leidos.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.leidos.com careers OR jobs'
+
+  - name: Lemartec
+    careers_url: https://www.lemartec.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.lemartec.com careers OR jobs'
+
+  - name: Linesight
+    careers_url: https://www.linesight.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.linesight.com careers OR jobs'
+
+  - name: Lombardia Consulting Group
+    careers_url: https://www.lombardiaconsulting.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.lombardiaconsulting.com careers OR jobs'
+
+  - name: Los Angeles Unified School District
+    careers_url: https://www.lausd.org/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.lausd.org careers OR jobs'
+
+  - name: LotusWorks
+    careers_url: https://www.lotusworks.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.lotusworks.com careers OR jobs'
+
+  - name: LUZCO
+    careers_url: https://www.luzco.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.luzco.com careers OR jobs'
+
+  - name: Lydian Energy
+    careers_url: https://www.lydianenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.lydianenergy.com careers OR jobs'
+
+  - name: M.C. Dean
+    careers_url: https://www.mcdean.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mcdean.com careers OR jobs'
+
+  - name: ManpowerGroup
+    careers_url: https://www.manpowergroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.manpowergroup.com careers OR jobs'
+
+  - name: Matrix Service Company
+    careers_url: https://matrixservicecompany.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://matrixservicecompany.com careers OR jobs'
+
+  - name: Matrix Technologies
+    careers_url: https://www.matrixti.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.matrixti.com careers OR jobs'
+
+  - name: McCarthy Building Companies
+    careers_url: https://www.mccarthy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mccarthy.com careers OR jobs'
+
+  - name: McFarland Construction
+    careers_url: https://mcfarlandconstructionus.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://mcfarlandconstructionus.com careers OR jobs'
+
+  - name: McKinsey & Company
+    careers_url: https://www.mckinsey.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mckinsey.com careers OR jobs'
+
+  - name: McPhee Electric Ltd.
+    careers_url: https://www.mcpheeusa.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mcpheeusa.com careers OR jobs'
+
+  - name: Metra
+    careers_url: https://www.metra.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.metra.com careers OR jobs'
+
+  - name: Metropolitan Transportation Authority
+    careers_url: https://new.mta.info/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://new.mta.info careers OR jobs'
+
+  - name: Michael Page
+    careers_url: https://www.michaelpage.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.michaelpage.com careers OR jobs'
+
+  - name: Michels Corporation
+    careers_url: https://www.michels.us/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.michels.us careers OR jobs'
+
+  - name: Michels Road & Stone
+    careers_url: https://www.michels.us/michels-road-stone-inc/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.michels.us/michels-road-stone-inc careers OR jobs'
+
+  - name: MIGSO-PCUBED
+    careers_url: https://www.migso-pcubed.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.migso-pcubed.com careers OR jobs'
+
+  - name: Milevista
+    careers_url: https://www.milevista.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.milevista.com careers OR jobs'
+
+  - name: Miller Electric Company
+    careers_url: https://mecojax.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://mecojax.com careers OR jobs'
+
+  - name: Mission Technical Integration Contract / Barrios Technology
+    careers_url: https://www.barrios.com/
+    notes: 'Confidence: Low, Status: Ambiguous or weak match; review required'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.barrios.com careers OR jobs'
+
+  - name: Mitsubishi Power
+    careers_url: https://power.mhi.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://power.mhi.com careers OR jobs'
+
+  - name: MMR Group
+    careers_url: https://www.mmrgrp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mmrgrp.com careers OR jobs'
+
+  - name: Mortenson
+    careers_url: https://www.mortenson.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mortenson.com careers OR jobs'
+
+  - name: MWH Constructors
+    careers_url: https://www.mwhconstructors.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mwhconstructors.com careers OR jobs'
+
+  - name: MWResource
+    careers_url: https://mwresource.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://mwresource.com careers OR jobs'
+
+  - name: MYR Group
+    careers_url: https://www.myrgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.myrgroup.com careers OR jobs'
+
+  - name: NASA
+    careers_url: https://www.nasa.gov/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.nasa.gov careers OR jobs'
+
+  - name: National Technologies
+    careers_url: https://www.ntitech.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ntitech.com careers OR jobs'
+
+  - name: Nesco Resource
+    careers_url: https://www.nescoresource.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.nescoresource.com careers OR jobs'
+
+  - name: Nevada National Security Site
+    careers_url: https://nnss.gov/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://nnss.gov careers OR jobs'
+
+  - name: New Jersey Natural Gas
+    careers_url: https://www.njng.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.njng.com careers OR jobs'
+
+  - name: Newkirk Electric
+    careers_url: https://www.newkirkelectric.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.newkirkelectric.com careers OR jobs'
+
+  - name: Nexus Engineering Group
+    careers_url: https://nexusegroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://nexusegroup.com careers OR jobs'
+
+  - name: NineDot Energy
+    careers_url: https://www.ninedotenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ninedotenergy.com careers OR jobs'
+
+  - name: NiSource
+    careers_url: https://www.nisource.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.nisource.com careers OR jobs'
+
+  - name: nou Systems
+    careers_url: https://nou-systems.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://nou-systems.com careers OR jobs'
+
+  - name: NYISO
+    careers_url: https://www.nyiso.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.nyiso.com careers OR jobs'
+
+  - name: O'Connell Electric Company
+    careers_url: https://www.oconnellelectric.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.oconnellelectric.com careers OR jobs'
+
+  - name: OCMI
+    careers_url: https://www.ocmi.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ocmi.com careers OR jobs'
+
+  - name: Okland Construction
+    careers_url: https://www.okland.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.okland.com careers OR jobs'
+
+  - name: On Grid Infrastructure Services
+    careers_url: https://ongridis.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://ongridis.com careers OR jobs'
+
+  - name: One Tech Engineering
+    careers_url: https://www.onetechstaffing.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.onetechstaffing.com careers OR jobs'
+
+  - name: Oneida ESC Group
+    careers_url: https://oescgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://oescgroup.com careers OR jobs'
+
+  - name: OnQGlobal
+    careers_url: https://www.onqglobal.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.onqglobal.com careers OR jobs'
+
+  - name: ORAU
+    careers_url: https://www.orau.org/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.orau.org careers OR jobs'
+
+  - name: P1 Construction
+    careers_url: https://p1group.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://p1group.com careers OR jobs'
+
+  - name: Pacifico Energy
+    careers_url: https://www.pacificoenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pacificoenergy.com careers OR jobs'
+
+  - name: PAR Electrical Contractors
+    careers_url: https://www.parelectric.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.parelectric.com careers OR jobs'
+
+  - name: Parametrix
+    careers_url: https://www.parametrix.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.parametrix.com careers OR jobs'
+
+  - name: Paseo Construction
+    careers_url: https://paseoconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://paseoconstruction.com careers OR jobs'
+
+  - name: PC Construction
+    careers_url: https://www.pcconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pcconstruction.com careers OR jobs'
+
+  - name: PCL Construction
+    careers_url: https://www.pcl.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pcl.com careers OR jobs'
+
+  - name: Peak Performers
+    careers_url: https://www.peakperformers.org/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.peakperformers.org careers OR jobs'
+
+  - name: Pennsylvania Transformer Technology
+    careers_url: https://www.patransformer.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.patransformer.com careers OR jobs'
+
+  - name: Permasteelisa North America | Benson
+    careers_url: https://www.permasteelisagroup.com/brands/permasteelisa-north-america/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.permasteelisagroup.com/brands/permasteelisa-north-america careers OR jobs'
+
+  - name: Persons Services Corp
+    careers_url: https://personsservices.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://personsservices.com careers OR jobs'
+
+  - name: PG&E
+    careers_url: https://www.pge.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pge.com careers OR jobs'
+
+  - name: Pike Corporation
+    careers_url: https://www.pike.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pike.com careers OR jobs'
+
+  - name: PPC Partners
+    careers_url: https://www.ppcpartnersinc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ppcpartnersinc.com careers OR jobs'
+
+  - name: Primoris Renewable Energy
+    careers_url: https://www.prim.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.prim.com careers OR jobs'
+
+  - name: Professional Partners Group
+    careers_url: https://www.professionalpartnersgroup.net/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.professionalpartnersgroup.net careers OR jobs'
+
+  - name: PSEG Long Island
+    careers_url: https://www.psegliny.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.psegliny.com careers OR jobs'
+
+  - name: PTAG
+    careers_url: https://www.ptaginc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ptaginc.com careers OR jobs'
+
+  - name: PTS Advance
+    careers_url: https://www.ptsadvance.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ptsadvance.com careers OR jobs'
+
+  - name: Pulse Jobs
+    careers_url: https://www.pulsejobs.net/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pulsejobs.net careers OR jobs'
+
+  - name: Pursuit Aerospace
+    careers_url: https://www.pursuitaero.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.pursuitaero.com careers OR jobs'
+
+  - name: Q Works Group
+    careers_url: https://www.qworksgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.qworksgroup.com careers OR jobs'
+
+  - name: QCS Staffing
+    careers_url: https://www.qcsstaffing.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.qcsstaffing.com careers OR jobs'
+
+  - name: Qualus
+    careers_url: https://www.qualuscorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.qualuscorp.com careers OR jobs'
+
+  - name: Quanta Infrastructure Solutions Group
+    careers_url: https://quantaisg.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://quantaisg.com careers OR jobs'
+
+  - name: RadNet
+    careers_url: https://www.radnet.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.radnet.com careers OR jobs'
+
+  - name: RailWorks Corporation
+    careers_url: https://www.railworks.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.railworks.com careers OR jobs'
+
+  - name: Raya Workforce
+    careers_url: https://rayaworkforce.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://rayaworkforce.com careers OR jobs'
+
+  - name: RealTruck
+    careers_url: https://realtruck.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://realtruck.com careers OR jobs'
+
+  - name: Renu Energy Solutions
+    careers_url: https://renuenergysolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://renuenergysolutions.com careers OR jobs'
+
+  - name: Rippling
+    careers_url: https://www.rippling.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.rippling.com careers OR jobs'
+
+  - name: Rocket Lab
+    careers_url: https://www.rocketlabusa.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.rocketlabusa.com careers OR jobs'
+
+  - name: Roers Companies
+    careers_url: https://www.roerscompanies.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.roerscompanies.com careers OR jobs'
+
+  - name: Rosendin
+    careers_url: https://www.rosendin.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.rosendin.com careers OR jobs'
+
+  - name: Ross Group
+    careers_url: https://www.withrossgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.withrossgroup.com careers OR jobs'
+
+  - name: Ryan Companies
+    careers_url: https://www.ryancompanies.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ryancompanies.com careers OR jobs'
+
+  - name: Sazan Group
+    careers_url: https://www.sazan.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.sazan.com careers OR jobs'
+
+  - name: Schneider Electric USA
+    careers_url: https://www.se.com/us/en/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.se.com/us/en careers OR jobs'
+
+  - name: SciTec
+    careers_url: https://www.scitec.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.scitec.com careers OR jobs'
+
+  - name: Scuttlebutt Services
+    careers_url: https://scuttlebuttsvc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://scuttlebuttsvc.com careers OR jobs'
+
+  - name: SEC Program & Construction Management
+    careers_url: https://secgroupco.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://secgroupco.com careers OR jobs'
+
+  - name: Service Pros Installation Group
+    careers_url: https://serviceprosig.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://serviceprosig.com careers OR jobs'
+
+  - name: Shiel Sexton
+    careers_url: https://www.shielsexton.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.shielsexton.com careers OR jobs'
+
+  - name: SHINE Technologies
+    careers_url: https://www.shinefusion.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.shinefusion.com careers OR jobs'
+
+  - name: Sirch Incorporated
+    careers_url: https://sirch-inc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://sirch-inc.com careers OR jobs'
+
+  - name: Skanska USA
+    careers_url: https://www.usa.skanska.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.usa.skanska.com careers OR jobs'
+
+  - name: Slifco Electric
+    careers_url: https://slifcoelectric.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://slifcoelectric.com careers OR jobs'
+
+  - name: SoftBank Robotics America
+    careers_url: https://us.softbankrobotics.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://us.softbankrobotics.com careers OR jobs'
+
+  - name: Solar Landscape
+    careers_url: https://www.solarlandscape.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.solarlandscape.com careers OR jobs'
+
+  - name: SOLV Energy
+    careers_url: https://www.solvenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.solvenergy.com careers OR jobs'
+
+  - name: SPECTRAFORCE
+    careers_url: https://www.spectraforce.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.spectraforce.com careers OR jobs'
+
+  - name: Spire Consulting Group
+    careers_url: https://www.spireconsultinggroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.spireconsultinggroup.com careers OR jobs'
+
+  - name: Stelic
+    careers_url: https://www.stelic.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.stelic.com careers OR jobs'
+
+  - name: STO Building Group
+    careers_url: https://stobuildinggroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://stobuildinggroup.com careers OR jobs'
+
+  - name: Strata Clean Energy
+    careers_url: https://stratacleanenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://stratacleanenergy.com careers OR jobs'
+
+  - name: Strategic Management Solutions
+    careers_url: https://www.smsi.us/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.smsi.us careers OR jobs'
+
+  - name: SubCom
+    careers_url: https://www.subcom.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.subcom.com careers OR jobs'
+
+  - name: Suffolk Construction
+    careers_url: https://www.suffolk.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.suffolk.com careers OR jobs'
+
+  - name: Summit Line Construction
+    careers_url: https://www.summitlineconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.summitlineconstruction.com careers OR jobs'
+
+  - name: Sundt Construction
+    careers_url: https://www.sundt.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.sundt.com careers OR jobs'
+
+  - name: Sunset Search
+    careers_url: https://sunset-search.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://sunset-search.com careers OR jobs'
+
+  - name: Swinerton
+    careers_url: https://swinerton.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://swinerton.com careers OR jobs'
+
+  - name: Synectics
+    careers_url: https://www.synectics.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.synectics.com careers OR jobs'
+
+  - name: TAKKION
+    careers_url: https://www.takkion.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.takkion.com careers OR jobs'
+
+  - name: Talent Solutions Group
+    careers_url: https://talentsolutionsgroup.net/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://talentsolutionsgroup.net careers OR jobs'
+
+  - name: TalentBurst
+    careers_url: https://www.talentburst.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.talentburst.com careers OR jobs'
+
+  - name: Tata Consulting Engineers
+    careers_url: https://www.tce.co.in/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.tce.co.in careers OR jobs'
+
+  - name: TD Thornton
+    careers_url: https://tdthornton.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://tdthornton.com careers OR jobs'
+
+  - name: Technical Source
+    careers_url: https://technicalsource.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://technicalsource.com careers OR jobs'
+
+  - name: Techno Consult / Techno Engineering
+    careers_url: https://techno-eng.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://techno-eng.com careers OR jobs'
+
+  - name: TerraPower
+    careers_url: https://www.terrapower.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.terrapower.com careers OR jobs'
+
+  - name: Terravanta
+    careers_url: https://www.terravanta.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.terravanta.com careers OR jobs'
+
+  - name: Tesla
+    careers_url: https://www.tesla.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.tesla.com careers OR jobs'
+
+  - name: The Chemours Company
+    careers_url: https://www.chemours.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.chemours.com careers OR jobs'
+
+  - name: The Churchill Companies
+    careers_url: https://www.churchillcompanies.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.churchillcompanies.com careers OR jobs'
+
+  - name: The Greenridge Group
+    careers_url: https://www.greenridgegroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.greenridgegroup.com careers OR jobs'
+
+  - name: The Jamar Company
+    careers_url: https://jamarcompany.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://jamarcompany.com careers OR jobs'
+
+  - name: The JPI Group
+    careers_url: https://www.thejpigroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.thejpigroup.com careers OR jobs'
+
+  - name: The Lane Construction Corporation
+    careers_url: https://www.laneconstruct.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.laneconstruct.com careers OR jobs'
+
+  - name: The McDonnel Group
+    careers_url: https://www.mcdonnel.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.mcdonnel.com careers OR jobs'
+
+  - name: The Nuclear Company
+    careers_url: https://www.thenuclearcompany.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.thenuclearcompany.com careers OR jobs'
+
+  - name: The Vertex Companies
+    careers_url: https://vertexeng.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://vertexeng.com careers OR jobs'
+
+  - name: The Walsh Group
+    careers_url: https://www.walshgroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.walshgroup.com careers OR jobs'
+
+  - name: The Weitz Company
+    careers_url: https://www.weitz.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.weitz.com careers OR jobs'
+
+  - name: Thompson Construction Group
+    careers_url: https://www.thompsonconstructiongroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.thompsonconstructiongroup.com careers OR jobs'
+
+  - name: Toscano Clements Taylor
+    careers_url: https://www.tctcost.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.tctcost.com careers OR jobs'
+
+  - name: Tract Capital
+    careers_url: https://tractcapital.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://tractcapital.com careers OR jobs'
+
+  - name: Tri-City Electric
+    careers_url: https://www.tricityelectric.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.tricityelectric.com careers OR jobs'
+
+  - name: Trident Construction
+    careers_url: https://tridentconstruction.com/
+    notes: 'Confidence: Medium, Status: Likely official match; review recommended'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://tridentconstruction.com careers OR jobs'
+
+  - name: TriSearch
+    careers_url: https://www.trisearch.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.trisearch.com careers OR jobs'
+
+  - name: TRS Staffing Solutions
+    careers_url: https://www.trsstaffing.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.trsstaffing.com careers OR jobs'
+
+  - name: TruGrid
+    careers_url: https://trugridpower.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://trugridpower.com careers OR jobs'
+
+  - name: TTM Technologies
+    careers_url: https://www.ttm.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ttm.com careers OR jobs'
+
+  - name: Turner & Townsend
+    careers_url: https://www.turnerandtownsend.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.turnerandtownsend.com careers OR jobs'
+
+  - name: Turner Construction Company
+    careers_url: https://www.turnerconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.turnerconstruction.com careers OR jobs'
+
+  - name: Type One Energy
+    careers_url: https://typeoneenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://typeoneenergy.com careers OR jobs'
+
+  - name: Tyson Foods
+    careers_url: https://www.tysonfoods.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.tysonfoods.com careers OR jobs'
+
+  - name: U.S. Department of Homeland Security
+    careers_url: https://www.dhs.gov/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.dhs.gov careers OR jobs'
+
+  - name: UFP Industries
+    careers_url: https://www.ufpi.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ufpi.com careers OR jobs'
+
+  - name: United Global Technologies
+    careers_url: https://www.ugtechnologies.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ugtechnologies.com careers OR jobs'
+
+  - name: United Wholesale Mortgage
+    careers_url: https://www.uwm.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.uwm.com careers OR jobs'
+
+  - name: US Enhanced
+    careers_url: https://www.us-enhanced.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.us-enhanced.com careers OR jobs'
+
+  - name: US Tech Solutions
+    careers_url: https://www.ustechsolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.ustechsolutions.com careers OR jobs'
+
+  - name: Vantage Data Centers
+    careers_url: https://vantage-dc.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://vantage-dc.com careers OR jobs'
+
+  - name: VINCI Construction
+    careers_url: https://www.vinci-construction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.vinci-construction.com careers OR jobs'
+
+  - name: Vistra Corp
+    careers_url: https://vistracorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://vistracorp.com careers OR jobs'
+
+  - name: Volarify
+    careers_url: https://www.volarify.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.volarify.com careers OR jobs'
+
+  - name: VoltaGrid
+    careers_url: https://www.voltagrid.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.voltagrid.com careers OR jobs'
+
+  - name: Voltyx
+    careers_url: https://www.voltyx.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.voltyx.com careers OR jobs'
+
+  - name: Voyager Technologies
+    careers_url: https://voyagertechnologies.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://voyagertechnologies.com careers OR jobs'
+
+  - name: Weckworth Manufacturing
+    careers_url: https://weckworth.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://weckworth.com careers OR jobs'
+
+  - name: Welty Energy
+    careers_url: https://www.weltyenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.weltyenergy.com careers OR jobs'
+
+  - name: Wieland
+    careers_url: https://wielandbuilds.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://wielandbuilds.com careers OR jobs'
+
+  - name: William Charles Construction
+    careers_url: https://www.williamcharlesconstruction.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.williamcharlesconstruction.com careers OR jobs'
+
+  - name: Wood, Patel & Associates
+    careers_url: https://www.woodpatel.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.woodpatel.com careers OR jobs'
+
+  - name: World Wide Professional Solutions
+    careers_url: https://www.wwprosolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.wwprosolutions.com careers OR jobs'
+
+  - name: WSP
+    careers_url: https://www.wsp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.wsp.com careers OR jobs'
+
+  - name: X-energy
+    careers_url: https://x-energy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://x-energy.com careers OR jobs'
+
+  - name: Xcel Energy
+    careers_url: https://www.xcelenergy.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.xcelenergy.com careers OR jobs'
+
+  - name: YA Group
+    careers_url: https://www.yagroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.yagroup.com careers OR jobs'
+
+  - name: Zachry Construction Corporation
+    careers_url: https://www.zachryconstructioncorp.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.zachryconstructioncorp.com careers OR jobs'
+
+  - name: Zachry Group
+    careers_url: https://www.zachrygroup.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.zachrygroup.com careers OR jobs'
+
+  - name: Zekelman Industries
+    careers_url: https://www.zekelman.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.zekelman.com careers OR jobs'
+
+  - name: Zeno Power
+    careers_url: https://www.zenopower.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.zenopower.com careers OR jobs'
+
+  - name: Zero Impact Solutions
+    careers_url: https://www.zeroimpactsolutions.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.zeroimpactsolutions.com careers OR jobs'
+
+  - name: Zion Contracting
+    careers_url: https://www.zioncontracting.com/
+    notes: 'Confidence: High, Status: Verified or clear official match'
+    enabled: true
+    scan_method: websearch
+    scan_query: 'site:https://www.zioncontracting.com careers OR jobs'
+
+  # -- ATS portal targets from new_portals.yml --
+
+  - name: Greenhouse Old Boards
+    careers_url: https://boards.greenhouse.io/
+    notes: "Tier 1 ATS target - Greenhouse old boards"
+    scan_method: websearch
+    enabled: true
+
+  - name: Greenhouse New Boards
+    careers_url: https://job-boards.greenhouse.io/
+    notes: "Tier 1 ATS target - Greenhouse new boards"
+    scan_method: websearch
+    enabled: true
+
+  - name: Lever
+    careers_url: https://jobs.lever.co/
+    notes: "Tier 1 ATS target - Lever"
+    scan_method: websearch
+    enabled: true
+
+  - name: Lever EU
+    careers_url: https://jobs.eu.lever.co/
+    notes: "Tier 1 ATS target - Lever EU mirror"
+    scan_method: websearch
+    enabled: true
+
+  - name: Ashby
+    careers_url: https://jobs.ashbyhq.com/
+    notes: "Tier 1 ATS target - Ashby"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workday Classic
+    careers_url: https://myworkdayjobs.com/
+    notes: "Tier 1 ATS target - Workday classic"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workday New
+    careers_url: https://myworkdaysite.com/
+    notes: "Tier 1 ATS target - Workday newer career sites"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workday WD1
+    careers_url: https://wd1.myworkdaysite.com/
+    notes: "Tier 1 ATS target - Workday shard 1"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workday WD3
+    careers_url: https://wd3.myworkdaysite.com/
+    notes: "Tier 1 ATS target - Workday shard 3"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workday WD5
+    careers_url: https://wd5.myworkdaysite.com/
+    notes: "Tier 1 ATS target - Workday shard 5"
+    scan_method: websearch
+    enabled: true
+
+  - name: SmartRecruiters
+    careers_url: https://jobs.smartrecruiters.com/
+    notes: "Tier 1 ATS target - SmartRecruiters"
+    scan_method: websearch
+    enabled: true
+
+  - name: Jobvite
+    careers_url: https://jobs.jobvite.com/
+    notes: "Tier 1 ATS target - Jobvite"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workable Apply
+    careers_url: https://apply.workable.com/
+    notes: "Tier 1 ATS target - Workable apply pages"
+    scan_method: websearch
+    enabled: true
+
+  - name: Workable Jobs
+    careers_url: https://jobs.workable.com/
+    notes: "Tier 1 ATS target - Workable jobs"
+    scan_method: websearch
+    enabled: true
+
+  - name: JazzHR
+    careers_url: https://applytojob.com/
+    notes: "Tier 1 ATS target - JazzHR"
+    scan_method: websearch
+    enabled: true
+
+  - name: Breezy HR
+    careers_url: https://breezy.hr/
+    notes: "Tier 1 ATS target - Breezy HR"
+    scan_method: websearch
+    enabled: true
+
+  - name: Recruitee
+    careers_url: https://recruitee.com/
+    notes: "Tier 1 ATS target - Recruitee / Tellent"
+    scan_method: websearch
+    enabled: true
+
+  - name: Pinpoint ATS
+    careers_url: https://pinpointhq.com/
+    notes: "Tier 1 ATS target - Pinpoint ATS"
+    scan_method: websearch
+    enabled: true
+
+  - name: Comeet
+    careers_url: https://www.comeet.com/jobs/
+    notes: "Tier 1 ATS target - Comeet / Spark Hire Recruit"
+    scan_method: websearch
+    enabled: true
+
+  - name: ADP Workforce Now
+    careers_url: https://workforcenow.adp.com/
+    notes: "Tier 1 ATS target - ADP Workforce Now"
+    scan_method: websearch
+    enabled: true
+
+  - name: Paylocity Recruiting
+    careers_url: https://recruiting.paylocity.com/
+    notes: "Tier 1 ATS target - Paylocity Recruiting"
+    scan_method: websearch
+    enabled: true
+
+  - name: UKG UltiPro
+    careers_url: https://recruiting.ultipro.com/
+    notes: "Tier 1 ATS target - UKG / UltiPro"
+    scan_method: websearch
+    enabled: true
+
+  - name: Dayforce
+    careers_url: https://jobs.dayforcehcm.com/
+    notes: "Tier 1 ATS target - Dayforce"
+    scan_method: websearch
+    enabled: true
+
+  - name: Oracle Taleo
+    careers_url: https://taleo.net/
+    notes: "Tier 1 ATS target - Oracle Taleo"
+    scan_method: websearch
+    enabled: true
+
+  - name: Oracle Taleo Business Edition
+    careers_url: https://tbe.taleo.net/
+    notes: "Tier 1 ATS target - Oracle Taleo Business Edition"
+    scan_method: websearch
+    enabled: true
+
+  - name: Oracle Cloud Recruiting
+    careers_url: https://www.oraclecloud.com/
+    notes: "Tier 1 ATS target - Oracle Cloud Recruiting"
+    scan_method: websearch
+    enabled: true
+
+  - name: SAP SuccessFactors
+    careers_url: https://www.successfactors.com/
+    notes: "Tier 1 ATS target - SAP SuccessFactors"
+    scan_method: websearch
+    enabled: true
+
+  - name: SAP SF Hosted
+    careers_url: https://www.sapsf.com/
+    notes: "Tier 1 ATS target - SAP SuccessFactors hosted"
+    scan_method: websearch
+    enabled: true
+
+  - name: Zoho Recruit
+    careers_url: https://www.zohorecruit.com/
+    notes: "Tier 1 ATS target - Zoho Recruit"
+    scan_method: websearch
+    enabled: true
+
+  - name: Rippling ATS
+    careers_url: https://ats.rippling.com/
+    notes: "Tier 1 ATS target - Rippling Recruiting"
+    scan_method: websearch
+    enabled: true
+
+  - name: HRM Direct
+    careers_url: https://jobs.hrmdirect.com/
+    notes: "Tier 1 ATS target - ClearCompany / HRM Direct"
+    scan_method: websearch
+    enabled: true
+
+  - name: Government Jobs
+    careers_url: https://www.governmentjobs.com/careers
+    notes: "Public sector ATS target - GovernmentJobs"
+    scan_method: websearch
+    enabled: true
+
+  - name: USAJobs
+    careers_url: https://www.usajobs.gov/
+    notes: "Public sector ATS target - USAJobs"
+    scan_method: websearch
+    enabled: true
+
+  - name: Bullhorn Jobs
+    careers_url: https://jobs.bullhorncloud.com/
+    notes: "Tier 3 staffing ATS target - Bullhorn jobs"
+    scan_method: websearch
+    enabled: true
+
+  - name: CEIPAL
+    careers_url: https://jobs.ceipal.com/
+    notes: "Tier 3 staffing ATS target - CEIPAL"
+    scan_method: websearch
+    enabled: true
+
+  - name: JobDiva
+    careers_url: https://www.jobdiva.com/
+    notes: "Tier 3 staffing ATS target - JobDiva"
+    scan_method: websearch
+    enabled: true
+
+  - name: Crelate
+    careers_url: https://jobs.crelate.com/
+    notes: "Tier 3 staffing ATS target - Crelate"
+    scan_method: websearch
+    enabled: true
+
+  - name: Loxo
+    careers_url: https://jobs.loxo.co/
+    notes: "Tier 3 staffing ATS target - Loxo"
+    scan_method: websearch
+    enabled: true
+
+  - name: Recruit CRM
+    careers_url: https://jobs.recruitcrm.io/
+    notes: "Tier 3 staffing ATS target - Recruit CRM"
+    scan_method: websearch
+    enabled: true
+
+  - name: Avionte
+    careers_url: https://jobs.avionte.com/
+    notes: "Tier 3 staffing ATS target - Avionté"
+    scan_method: websearch
+    enabled: true
+
+  - name: Vincere
+    careers_url: https://vincere.io/jobs/
+    notes: "Tier 3 staffing ATS target - Vincere"
+    scan_method: websearch
+    enabled: true
+
+  - name: Recruiterflow
+    careers_url: https://recruiterflow.com/jobs/
+    notes: "Tier 3 staffing ATS target - Recruiterflow"
+    scan_method: websearch
+    enabled: true
+
+  - name: RecruitBPM
+    careers_url: https://recruitbpm.com/jobs/
+    notes: "Tier 3 staffing ATS target - RecruitBPM"
+    scan_method: websearch
+    enabled: true
+
+  - name: CATS ATS
+    careers_url: https://catsone.com/careers/
+    notes: "Tier 3 staffing ATS target - CATS ATS"
+    scan_method: websearch
+    enabled: true
+
+  - name: PCRecruiter
+    careers_url: https://www.pcrecruiter.net/
+    notes: "Tier 3 staffing ATS target - PCRecruiter"
+    scan_method: websearch
+    enabled: true
+
+  - name: TrackerRMS
+    careers_url: https://jobs.tracker-rms.com/
+    notes: "Tier 3 staffing ATS target - TrackerRMS"
+    scan_method: websearch
+    enabled: true
