@@ -15,8 +15,14 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model_tier1: str = "openai/gpt-4o-mini"
-    openrouter_model_tier2: str = "openai/gpt-4o-mini"
+    # tier1: high-volume, structured JSON field mapping, cost-sensitive.
+    # tier2: harder reasoning about custom widgets, called far less often.
+    # Both verified present on OpenRouter's /api/v1/models (419 models) as
+    # of Day 3. openai/gpt-4o-mini also verified valid, kept as a cheap
+    # fallback reference in comments in case these need reverting.
+    openrouter_model_tier1: str = "anthropic/claude-haiku-4.5"
+    openrouter_model_tier2: str = "anthropic/claude-sonnet-4.5"
+    tier1_confidence_threshold: float = 0.6
 
     twocaptcha_api_key: str | None = None
 
