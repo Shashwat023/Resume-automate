@@ -22,9 +22,23 @@ class Settings(BaseSettings):
     # fallback reference in comments in case these need reverting.
     openrouter_model_tier1: str = "anthropic/claude-haiku-4.5"
     openrouter_model_tier2: str = "anthropic/claude-sonnet-4.5"
-    tier1_confidence_threshold: float = 0.6
+    # Day 4 scope correction: no longer gates whether a field gets filled
+    # (Tier 1 always answers) — gates only whether an answer is cached into
+    # the answers library. See tier1_map.py::map_fields.
+    tier1_confidence_threshold: float = 0.5
 
     twocaptcha_api_key: str | None = None
+    # Deviation flagged in FLAGGED.md: the Day-4 scope says CAPTCHA never
+    # involves a human, but the browser is already open if 2captcha fails
+    # twice — escalating to needs_input beats failing the application
+    # outright. Easy to flip to False if the senior wants a hard fail instead.
+    captcha_failure_escalates: bool = True
+
+    # Dev-safety gate: with this False (the default), the full cascade runs
+    # and stops one click short of Submit — every live test against a real
+    # ATS form otherwise files a real job application at a real employer.
+    # Flip to True only deliberately (demo, or the mock ATS form in tests).
+    submit_enabled: bool = False
 
     # MUST be a "Chrome for Testing" build, not consumer Chrome Stable.
     # Consumer Chrome does not support the CDP `Extensions.loadUnpacked` method

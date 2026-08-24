@@ -36,36 +36,67 @@ export const useCreateQueueMutation = () => {
   });
 };
 
-// Backend has no pause/resume/cancel endpoints — these just refetch for now
+// Day 4: real pause/resume/cancel, targeting the queue's currently-running
+// application (the only one with anything to pause). Per-row control on
+// every queued job — not just the current one — is a separate, larger
+// piece of work (its own `paused` status to avoid colliding with the
+// `needs_input` = 2FA meaning) and isn't wired here yet.
 export const usePauseQueueMutation = () => {
   const queryClient = useQueryClient();
+  const queueState = useQueueStore((state) => state.queueState);
+
   return useMutation({
-    mutationFn: async () => {},
+    mutationFn: async () => {
+      const applicationId = queueState?.currentJobId;
+      if (!applicationId) throw new Error('No running application to pause');
+      return queueApi.pauseApply(applicationId);
+    },
     onSuccess: () => {
-      toast.info('Pause is not yet supported by the backend.');
+      toast.success('Paused. Resume when you\'re ready to continue.');
       queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to pause');
     },
   });
 };
 
 export const useResumeQueueMutation = () => {
   const queryClient = useQueryClient();
+  const queueState = useQueueStore((state) => state.queueState);
+
   return useMutation({
-    mutationFn: async () => {},
+    mutationFn: async () => {
+      const applicationId = queueState?.currentJobId;
+      if (!applicationId) throw new Error('No paused application to resume');
+      return queueApi.resumeApply(applicationId);
+    },
     onSuccess: () => {
-      toast.info('Resume is not yet supported by the backend.');
+      toast.success('Resumed.');
       queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to resume');
     },
   });
 };
 
 export const useCancelQueueMutation = () => {
   const queryClient = useQueryClient();
+  const queueState = useQueueStore((state) => state.queueState);
+
   return useMutation({
-    mutationFn: async () => {},
+    mutationFn: async () => {
+      const applicationId = queueState?.currentJobId;
+      if (!applicationId) throw new Error('No running application to cancel');
+      return queueApi.cancelApply(applicationId);
+    },
     onSuccess: () => {
-      toast.info('Cancel is not yet supported by the backend.');
+      toast.success('Cancelled.');
       queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to cancel');
     },
   });
 };

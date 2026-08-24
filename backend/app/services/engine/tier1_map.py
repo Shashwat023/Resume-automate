@@ -27,6 +27,7 @@ from app.core.config import get_settings
 from app.domain.answer_key import question_hash
 from app.repositories.answer_library_repository import AnswerLibraryRepository
 from app.services.engine.openrouter_client import OpenRouterError, chat_json
+from app.services.engine.resume_parse import ResumeFacts
 from app.services.engine.tier0_harvest import FormField
 
 settings = get_settings()
@@ -73,12 +74,16 @@ class Tier1Result:
     for_tier2: list[
         tuple[FormField, str]
     ]  # (field, decided value) handed off for Stagehand to execute
-    low_confidence: list[str]  # left alone entirely -> Tier 3 (human)
+    # Filled (not skipped) but below the cache-gate threshold, so the guess
+    # was used once and NOT written to the answers library — see map_fields.
+    low_confidence_filled: list[str]
     errored: list[tuple[str, str]]
     usage: dict
 
 
-def build_prompt(profile: dict, fields: list[FormField]) -> list[dict]:
+def build_prompt(
+    profile: dict, fields: list[FormField], resume_facts: ResumeFacts | None = None
+) -> list[dict]:
     field_payload = [
         {
             "id": f.node_id,
@@ -89,16 +94,23 @@ def build_prompt(profile: dict, fields: list[FormField]) -> list[dict]:
         for f in fields
     ]
     profile_summary = {k: v for k, v in profile.items() if v not in (None, "", [])}
+    resume_summary = (
+        resume_facts.model_dump(exclude_defaults=True) if resume_facts else {}
+    )
 
     system = (
         "You are filling out a job application form on behalf of a candidate. "
-        "For each field below, decide the best value using ONLY the candidate profile "
-        "provided. If a field has an 'options' list, your value MUST be exactly one of "
-        "those option strings, verbatim. If a field has no options (a free-text question "
-        "or a custom dropdown/checkbox with unknown choices), write a concise, honest "
-        "value inferred from the profile. Give a confidence from 0 to 1 for every answer: "
-        "use a LOW confidence (below 0.5) whenever the profile genuinely doesn't contain "
-        "the information needed — do not fabricate specifics that aren't in the profile."
+        "For each field below, decide the best value using the candidate profile "
+        "and resume facts provided — personal details come from the profile; "
+        "academic and professional details (employers, titles, dates, degrees, "
+        "skills, certifications) come from the resume facts when the profile "
+        "doesn't already have them. If a field has an 'options' list, your value "
+        "MUST be exactly one of those option strings, verbatim. Every field must "
+        "get an answer: always give your single best guess, even when the "
+        "profile and resume don't fully cover it — never leave a field "
+        "unanswered. Give a confidence from 0 to 1 for every answer, using a LOW "
+        "confidence (below 0.5) to signal a guess rather than as a reason to "
+        "decline — confidence is informational only, not permission to skip."
     )
     # default=str: profile_summary comes straight from ORM column values
     # (runner.py builds it via `getattr(profile, c.name)` for every column),
@@ -106,7 +118,12 @@ def build_prompt(profile: dict, fields: list[FormField]) -> list[dict]:
     # hand-maintained field-name filter that breaks every time the schema
     # gains a new non-JSON-native column type.
     user = json.dumps(
-        {"profile": profile_summary, "fields": field_payload}, default=str
+        {
+            "profile": profile_summary,
+            "resume": resume_summary,
+            "fields": field_payload,
+        },
+        default=str,
     )
     return [
         {"role": "system", "content": system},
@@ -120,11 +137,12 @@ async def map_fields(
     profile: dict,
     profile_id: int,
     answer_repo: AnswerLibraryRepository,
+    resume_facts: ResumeFacts | None = None,
 ) -> Tier1Result:
     filled: list[tuple[str, str]] = []
     from_library: list[tuple[str, str]] = []
     for_tier2: list[tuple[FormField, str]] = []
-    low_confidence: list[str] = []
+    low_confidence_filled: list[str] = []
     errored: list[tuple[str, str]] = []
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
@@ -142,18 +160,19 @@ async def map_fields(
 
     if not remaining:
         return Tier1Result(
-            filled, from_library, for_tier2, low_confidence, errored, usage
+            filled, from_library, for_tier2, low_confidence_filled, errored, usage
         )
 
     if not settings.openrouter_api_key:
         # Kill switch: no key configured -> the app must stay runnable
-        # without one. Everything left over falls through to Tier 3.
-        low_confidence.extend(f.label for f in remaining)
+        # without one. Nothing to fill these with, so they're genuinely
+        # left blank (not a confidence decision — there's no LLM call at all).
+        low_confidence_filled.extend(f.label for f in remaining)
         return Tier1Result(
-            filled, from_library, for_tier2, low_confidence, errored, usage
+            filled, from_library, for_tier2, low_confidence_filled, errored, usage
         )
 
-    messages = build_prompt(profile, remaining)
+    messages = build_prompt(profile, remaining, resume_facts)
     parsed, call_usage = await _chat_with_repair(messages)
     usage = call_usage
 
@@ -162,15 +181,22 @@ async def map_fields(
         field = by_id.get(answer.field_id)
         if field is None:
             continue
-        if answer.confidence < settings.tier1_confidence_threshold:
-            low_confidence.append(field.label)
-            continue
 
+        # Every answer gets filled regardless of confidence — accepted
+        # tradeoff (PLAN.md Day 4): a wrong answer beats a blank required
+        # field now that submission is fully automated. Confidence is used
+        # ONLY below to decide whether the answer is trustworthy enough to
+        # cache and replay into future applications, never to gate filling.
         await _apply(page, field, answer.value, filled, for_tier2, errored)
+        if answer.confidence < settings.tier1_confidence_threshold:
+            low_confidence_filled.append(field.label)
 
-        if not field.options:
-            # Cache free-text / unknown-option answers only — this is the
-            # "novel question" case the answers library exists for.
+        if not field.options and answer.confidence >= settings.tier1_confidence_threshold:
+            # Cache free-text / unknown-option answers only, and only when
+            # confident — this is the "novel question" case the answers
+            # library exists for. A low-confidence guess is used once here
+            # but never written back, so it can't propagate into every
+            # future application that asks the same question.
             await answer_repo.upsert(
                 profile_id,
                 question_hash(field.label),
@@ -180,7 +206,9 @@ async def map_fields(
                 confidence=answer.confidence,
             )
 
-    return Tier1Result(filled, from_library, for_tier2, low_confidence, errored, usage)
+    return Tier1Result(
+        filled, from_library, for_tier2, low_confidence_filled, errored, usage
+    )
 
 
 async def _apply(

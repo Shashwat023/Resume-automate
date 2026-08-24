@@ -30,26 +30,47 @@ from stagehand import Page
 
 from app.domain.semantic_dictionary import match_field, resolve_value
 
-# Role is a single bare word in every case observed in the real tree
-# (StaticText/ListMarker/etc use the same shape). Label is everything after
-# the colon; roles with no name (body, main, div, scrollable, html, ...)
-# have no colon at all and are simply skipped by TARGET_ROLES filtering.
+# Role is USUALLY a single bare word (StaticText/ListMarker/textbox/...),
+# but the file-upload control on a real Greenhouse form renders as a
+# comma-joined role: `[3-78] input, file: Attach` (confirmed live — see
+# PLAN.md Day 4 recon notes). The role group accepts that comma-separated
+# form generally rather than special-casing "file" in the regex itself.
+# Label is everything after the colon; roles with no name (body, main, div,
+# scrollable, html, ...) have no colon at all and are simply skipped by
+# TARGET_ROLES filtering.
 _FIELD_LINE = re.compile(
-    r"^(?P<indent>\s*)\[(?P<id>[\w-]+)\]\s+(?P<role>[A-Za-z]+)(?::\s*(?P<label>.*?))?\s*$"
+    r"^(?P<indent>\s*)\[(?P<id>[\w-]+)\]\s+"
+    r"(?P<role>[A-Za-z]+(?:,\s*[A-Za-z]+)*)(?::\s*(?P<label>.*?))?\s*$"
 )
 
-TARGET_ROLES = {"textbox", "combobox", "checkbox", "radio"}
+TARGET_ROLES = {"textbox", "combobox", "checkbox", "radio", "file"}
+
+# The only grouping construct confirmed to carry a required-field marker on
+# a real form: `[id] group: Resume/CV*` — the enclosing group's OWN label
+# ends in "*", not the input's. Only this one pattern is implemented; a
+# required marker attached some other way (e.g. a sibling "*" StaticText
+# with no enclosing group) would not be caught — flagged as a known gap
+# rather than guessed at without live confirmation.
+_GROUP_ROLE = "group"
+
+# A real form can have more than one file input (confirmed live: Resume/CV
+# AND Cover Letter as separate fields, see PLAN.md Day 4 recon notes). The
+# stored resume must only be attached to the one that's actually asking for
+# a resume/CV — attaching it everywhere would silently submit it as a cover
+# letter too.
+_RESUME_FIELD_LABEL = re.compile(r"resum[eé]|\bcv\b", re.I)
 
 
 @dataclass
 class FormField:
     node_id: str
-    role: str  # textbox | combobox | checkbox | radio
+    role: str  # textbox | combobox | checkbox | radio | file
     label: str
     xpath: str | None
     options: list[str] = field(
         default_factory=list
     )  # only populated if the tree exposes option: children
+    required: bool = False
 
     @property
     def is_native_select(self) -> bool:
@@ -85,11 +106,13 @@ def collect_fields(formatted_tree: str, xpath_map: dict[str, str]) -> list[FormF
         m = _FIELD_LINE.match(line)
         if not m:
             continue
+        # role_tokens: "input, file" -> {"input", "file"}; "textbox" -> {"textbox"}.
+        role_tokens = {r.strip() for r in m.group("role").split(",")}
         nodes.append(
             (
                 len(m.group("indent")),
                 m.group("id"),
-                m.group("role"),
+                _effective_role(role_tokens),
                 (m.group("label") or "").strip(),
             )
         )
@@ -107,33 +130,93 @@ def collect_fields(formatted_tree: str, xpath_map: dict[str, str]) -> list[FormF
                 options.append(nodes[j][3])
             j += 1
 
+        group_label, required = _enclosing_group(nodes, i, indent)
+        # The file input's own label ("Attach") isn't meaningful for
+        # matching or for disambiguating multiple file fields on one form
+        # (e.g. "Resume/CV" vs "Cover Letter") — the enclosing group's
+        # label is the real field name. Other roles keep their own label
+        # unchanged (verified Day 3 matching behavior, not touched here).
+        effective_label = group_label if (role == "file" and group_label) else label
+
         fields.append(
             FormField(
                 node_id=node_id,
                 role=role,
-                label=label,
+                label=effective_label,
                 xpath=xpath_map.get(node_id),
                 options=options,
+                required=required,
             )
         )
 
     return fields
 
 
+def _effective_role(role_tokens: set[str]) -> str:
+    """A comma-joined role (`input, file`) collapses to whichever token is
+    an actual target role; anything else keeps its first token so non-field
+    lines (StaticText, div, ...) are unaffected and still filtered out by
+    TARGET_ROLES."""
+    for token in role_tokens:
+        if token in TARGET_ROLES:
+            return token
+    return next(iter(role_tokens))
+
+
+def _enclosing_group(
+    nodes: list[tuple[int, str, str, str]], index: int, indent: int
+) -> tuple[str | None, bool]:
+    """Walks backward to the nearest preceding node at a smaller indent
+    whose role is `group` — the only confirmed carrier of both the real
+    field label and the required-field `*` marker (see module docstring)."""
+    for j in range(index - 1, -1, -1):
+        node_indent, _node_id, node_role, node_label = nodes[j]
+        if node_indent >= indent:
+            continue
+        if node_role == _GROUP_ROLE:
+            required = node_label.endswith("*")
+            clean_label = node_label[:-1].strip() if required else node_label
+            return clean_label or None, required
+        indent = node_indent  # keep climbing past this ancestor too
+    return None, False
+
+
 async def fill_deterministic(
-    page: Page, fields: list[FormField], profile: dict
+    page: Page,
+    fields: list[FormField],
+    profile: dict,
+    resume_file_path: str | None = None,
 ) -> HarvestResult:
     """
-    Textbox fields only — the exact behavior of the original single-phase
-    harvest_and_fill, now operating on an already-collected field list
-    instead of re-parsing the tree itself. Combobox/checkbox/radio fields
-    are left entirely alone here; they're Tier 1/2 territory.
+    Textbox fields via the semantic dictionary (unchanged Day 3 behavior),
+    plus file-upload fields (Day 4) — attaching the candidate's stored
+    resume needs no LLM call and no widget resolution, so it belongs here
+    rather than Tier 1/2, same reasoning as textbox matching. Combobox/
+    checkbox/radio fields are left entirely alone; they're Tier 1/2
+    territory.
     """
     filled: list[tuple[str, str]] = []
     unmatched: list[str] = []
     errored: list[tuple[str, str]] = []
 
     for f in fields:
+        if f.role == "file":
+            if not _RESUME_FIELD_LABEL.search(f.label):
+                # A non-resume file field (Cover Letter, "Other Documents",
+                # ...) — deliberately left alone. Attaching the resume here
+                # too would misrepresent it as a different document.
+                unmatched.append(f.label)
+                continue
+            if resume_file_path is None or f.xpath is None:
+                unmatched.append(f.label)
+                continue
+            try:
+                await page.locator(f.xpath).set_input_files(resume_file_path)
+                filled.append((f.label, resume_file_path))
+            except Exception as exc:  # noqa: BLE001
+                errored.append((f.label, str(exc)))
+            continue
+
         if f.role != "textbox":
             continue
 
@@ -163,8 +246,10 @@ async def fill_deterministic(
     return HarvestResult(filled=filled, unmatched=unmatched, errored=errored)
 
 
-async def harvest_and_fill(page: Page, profile: dict) -> HarvestResult:
+async def harvest_and_fill(
+    page: Page, profile: dict, resume_file_path: str | None = None
+) -> HarvestResult:
     """Convenience wrapper: snapshot + collect + fill in one call (Tier-0-only callers)."""
     snapshot = await page.snapshot()
     fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
-    return await fill_deterministic(page, fields, profile)
+    return await fill_deterministic(page, fields, profile, resume_file_path)

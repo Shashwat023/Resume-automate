@@ -13,7 +13,7 @@ infrastructure — it belongs in the domain layer.
 QUEUED = "queued"
 CHECKING_URL = "checking_url"
 RUNNING = "running"
-NEEDS_INPUT = "needs_input"  # new: login wall / 2FA / captcha / low-confidence field
+NEEDS_INPUT = "needs_input"  # Day 4 scope correction: 2FA only — everything else is automated
 COMPLETED = "completed"
 FAILED = "failed"
 CANCELLED = "cancelled"

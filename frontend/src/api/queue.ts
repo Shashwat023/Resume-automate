@@ -89,8 +89,12 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
 
   const total = items.length;
   const completed = items.filter((i) => i.status === 'completed' || i.status === 'failed').length;
-  const running = items.find((i) => i.status === 'running');
-  const hasRunning = !!running;
+  // "Current" job includes waiting_for_user (needs_input/2FA) — it's still
+  // the job actively being worked, just blocked on the user. Excluding it
+  // here would hide CurrentJobCard (and the live-view entry point) at
+  // exactly the moment the user most needs to see it.
+  const running = items.find((i) => i.status === 'running' || i.status === 'waiting_for_user');
+  const hasRunning = running?.status === 'running';
   const hasWaiting = items.some((i) => i.status === 'waiting');
 
   let overallStatus: QueueStatus = 'idle';
@@ -140,6 +144,15 @@ export const queueApi = {
 
   getDetails: (applicationId: string) =>
     api.get(`/api/apply/details/${applicationId}`),
+
+  pauseApply: (applicationId: string) =>
+    api.post(`/api/apply/${applicationId}/pause`),
+
+  resumeApply: (applicationId: string) =>
+    api.post(`/api/apply/${applicationId}/resume`),
+
+  cancelApply: (applicationId: string) =>
+    api.post(`/api/apply/${applicationId}/cancel`),
 
   createQueue: async (payload: {
     jobs: { id: string; title: string; company_name: string; apply_url: string }[];

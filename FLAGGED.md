@@ -51,6 +51,29 @@ The `build` script is `tsc -b && vite build`. On this machine, `npm`'s configure
 
 ## 7. Tier 1 (LLM) confidence and cost, in practice
 
-`settings.tier1_confidence_threshold` defaults to `0.6` — chosen as a starting point, not empirically tuned against real forms yet. Worth revisiting once there's a broader sample of live runs across more than one ATS/company.
+`settings.tier1_confidence_threshold` is `0.5` (Day 4, per direction). As of Day 4 it **only gates the answers-library cache**, not whether a field gets filled — Tier 1 now fills every field regardless of confidence (accepted tradeoff, see PLAN.md Day 4 Part C). Not empirically tuned against a broad sample of real forms yet.
 
 Cost is logged per application (`RunEvent` with token counts), but there's no aggregate dashboard or budget alerting yet — worth having before this runs unattended at any real volume.
+
+## 8. File-upload attach (Tier 0) is implemented and unit-tested, but NOT confirmed working live — real discrepancy found, unresolved
+
+`fill_deterministic()` calls `Locator.set_input_files()` (Stagehand) against the real `<input type=file>` for the "Resume/CV" field on Anthropic's live Greenhouse form. The call returns **no error**. But live verification (raw JS `evaluate()` against the actual DOM, not just our own log) shows:
+
+- Before the call: 2 `<input type=file>` elements exist on the page (Resume/CV, Cover Letter), both `files.length === 0`.
+- Immediately after the call (same script run, no delay): querying the *exact same xpath* Stagehand itself just used, via native `document.evaluate()`, returns **not found**. The same xpath resolves fine via `document.evaluate()` *before* the call, so the xpath format itself isn't the issue.
+- After a short wait, the file-input count on the page drops from 2 to 1, and the Resume/CV section's node IDs change entirely on re-snapshot — but it re-renders back into the same **unattached "Attach" state**, not a "file selected" state. No filename, no "remove" affordance, no visible error either.
+
+Working theory, not confirmed: Greenhouse's upload widget's own change handler (likely `react-dropzone` or similar) doesn't recognize the CDP-injected file selection as a trusted enough event and silently resets, or Stagehand-python's RPC-based `set_input_files` handler behaves differently from Playwright's native implementation for this specific widget shape. Root cause not isolated — would need either manual `change`/`input` event dispatch experiments, or trying Tier 2's `observe()`/`act()` path (a real synthetic click that opens the OS file picker) as the more reliable alternative, mirroring the two-step fix Day 3 needed for custom comboboxes.
+
+**Do not treat file attachment as working until this is resolved and re-verified with the same "check the real DOM, not the log" discipline.** Code and tests describe the intended behavior; the live form does not yet confirm it happens.
+
+## 9. CAPTCHA, 2FA, and submission are implemented and unit-tested but NOT live-verified end to end
+
+Day 4 Parts D/E/F were built and verified only at the unit-test level (fake 2captcha client, hand-written accessibility-tree fragments). None of the following has been exercised against a real browser session:
+
+- **CAPTCHA solving.** A real solve costs 2captcha balance and can take up to 10 minutes; Anthropic's live form uses an *invisible* reCAPTCHA Enterprise widget (confirmed present via Day-4 recon), which may only render once a real submit is attempted — not safe to trigger without also risking a real submission. Detection's iframe-URL regex is grounded in that real, captured iframe source; solving and token injection are not.
+- **2FA detection.** No form encountered anywhere in this project's live testing (Day 1 through Day 4) has actually presented a 2FA/OTP challenge, so `twofa_detect.py`'s label-pattern regex has never matched a real one. It's a reasonable pattern set, not a confirmed one.
+- **Automated submission.** `submit_enabled` defaults to `False` specifically so this stays true — no real ATS form has been submitted through this pipeline. The bounded validation-error repair pass (rerun the fill cascade once, retry submit once) has likewise never run against a real validation error.
+- **The planned local mock ATS form** (PLAN.md Part F) — the one thing that would let the submit path be tested deterministically and repeatably instead of "unit-tested logic + never exercised live" — was not built this pass. It's the single highest-value next step before trusting F at all.
+
+None of this should be treated as working until it's actually been run once, deliberately and supervised, against something real (the mock form first, then one real ATS form with `submit_enabled=True`).
