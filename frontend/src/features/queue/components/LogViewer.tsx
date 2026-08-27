@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueueStore } from '../../../store/queueStore';
+import { useApplicationLogs } from '../hooks/useApplicationLogs';
 import { Terminal, Download, Search, Maximize2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const EMPTY_LOGS: any[] = [];
-
 export const LogViewer = () => {
-  const logs = useQueueStore((state) => state.queueState?.logs || EMPTY_LOGS);
+  const currentJobId = useQueueStore((state) => state.queueState?.currentJobId);
+  const logs = useApplicationLogs(currentJobId);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);

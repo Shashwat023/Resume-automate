@@ -185,7 +185,14 @@ async def test_custom_combobox_with_no_options_goes_to_tier2(
     assert cached.answer == "No"
 
 
-async def test_low_confidence_answer_is_left_for_tier3(async_session, monkeypatch):
+async def test_low_confidence_answer_is_filled_but_not_cached(async_session, monkeypatch):
+    """
+    Day 4 scope correction: Tier 1 never abstains. A low-confidence answer
+    is still written to the field (accepted tradeoff, see PLAN.md) — the
+    confidence threshold now only gates whether the answer is cached into
+    the answers library, so a bad guess isn't replayed into future
+    applications asking the same question.
+    """
     monkeypatch.setattr(
         tier1_map,
         "chat_json",
@@ -204,15 +211,20 @@ async def test_low_confidence_answer_is_left_for_tier3(async_session, monkeypatc
 
     result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
 
-    assert result.low_confidence == ["Obscure question"]
-    assert result.filled == []
-    assert page.calls == []
+    assert result.low_confidence_filled == ["Obscure question"]
+    assert result.filled == [("Obscure question", "Guess")]
+    assert page.calls == [("fill", "//textarea[1]", "Guess")]
     assert (
         await repo.get(profile.id, tier1_map.question_hash("Obscure question")) is None
     )
 
 
-async def test_no_api_key_leaves_everything_for_tier3(async_session, monkeypatch):
+async def test_no_api_key_leaves_everything_unfilled(async_session, monkeypatch):
+    """
+    The kill switch (no OpenRouter key) is the ONE remaining case where a
+    field genuinely gets no answer — there's no LLM call to produce one at
+    all, unlike a low-confidence answer which is still filled.
+    """
     async def _boom(*args, **kwargs):
         raise AssertionError("chat_json must not be called when no key is configured")
 
@@ -228,7 +240,7 @@ async def test_no_api_key_leaves_everything_for_tier3(async_session, monkeypatch
 
     result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
 
-    assert result.low_confidence == ["Why Anthropic?"]
+    assert result.low_confidence_filled == ["Why Anthropic?"]
     assert page.calls == []
 
 
