@@ -36,11 +36,58 @@ export const useCreateQueueMutation = () => {
   });
 };
 
-// Day 4: real pause/resume/cancel, targeting the queue's currently-running
-// application (the only one with anything to pause). Per-row control on
-// every queued job — not just the current one — is a separate, larger
-// piece of work (its own `paused` status to avoid colliding with the
-// `needs_input` = 2FA meaning) and isn't wired here yet.
+// Day 4 Part H: per-row pause/resume, targeting an EXPLICIT application id
+// rather than only the queue's current job — this is what QueueTable's
+// per-row buttons use, so a mistakenly-queued job can be stopped before it
+// ever starts, not just while it's the one actively running.
+export const usePauseJobMutation = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (applicationId: string) => queueApi.pauseApply(applicationId),
+    onSuccess: () => {
+      toast.success('Paused. Press play to continue.');
+      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to pause');
+    },
+  });
+};
+
+export const useResumeJobMutation = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (applicationId: string) => queueApi.resumeApply(applicationId),
+    onSuccess: () => {
+      toast.success('Resumed.');
+      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to resume');
+    },
+  });
+};
+
+export const useCancelJobMutation = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (applicationId: string) => queueApi.cancelApply(applicationId),
+    onSuccess: () => {
+      toast.success('Cancelled.');
+      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to cancel');
+    },
+  });
+};
+
+// Targets the queue's currently-running/waiting-for-user application only
+// (QueueControls' global bar) — kept alongside the per-row mutations above,
+// which target an explicit application id instead.
 export const usePauseQueueMutation = () => {
   const queryClient = useQueryClient();
   const queueState = useQueueStore((state) => state.queueState);

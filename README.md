@@ -151,5 +151,6 @@ This is an actively-developed project, not a finished product. Two documents tra
 
 - **[PLAN.md](PLAN.md)** — the full day-by-day build log: what's built, what's been verified against real live forms vs. unit-tested only, and every real bug found (and how) along the way.
 - **[FLAGGED.md](FLAGGED.md)** — open items that need a product/scope decision, plus a few things implemented but **not yet confirmed working live** (most notably: file-upload attachment has a live discrepancy under investigation, and CAPTCHA/2FA/submission are unit-tested but have never been exercised against a real challenge end-to-end).
+- **[DEMO.md](DEMO.md)** — a ~10-minute walkthrough script for showing the system in action, and what not to demo live (real submission, a live CAPTCHA/2FA solve).
 
 If you're picking this project up, read those two before assuming any given feature is production-ready — the code and tests describe intent; PLAN.md and FLAGGED.md describe what's actually been proven.
