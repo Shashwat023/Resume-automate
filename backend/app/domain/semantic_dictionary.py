@@ -58,7 +58,24 @@ _PATTERNS: list[tuple[re.Pattern, FieldMatch]] = [
         re.compile(r"\bpostal\s*code\b|\bzip\s*code\b|\bzip\b"),
         FieldMatch("postal_code"),
     ),
-    (re.compile(r"\baddress\b"), FieldMatch("address")),
+    # A bare `\baddress\b` over-matched a relocation JUDGMENT question on a
+    # real form — "What is the address from which you plan on working? ...
+    # type 'relocating'" — filling the candidate's literal home address into
+    # a field that is really asking a yes/no relocation question (FLAGGED.md
+    # #5). Narrowed to the shapes where "address" is genuinely the noun
+    # naming the field: a qualifier immediately before it, an "address line
+    # N", or the label starting with it. A question phrased ABOUT an address
+    # ("What is the address from which...") no longer matches, and correctly
+    # falls through to Tier 1, which can actually reason about it.
+    (
+        re.compile(
+            r"\b(?:street|home|mailing|postal|permanent|current|residential"
+            r"|present)\s*address\b"
+            r"|\baddress\s*(?:line)?\s*\d*\s*$"
+            r"|^address\b"
+        ),
+        FieldMatch("address"),
+    ),
     (re.compile(r"\bcity\b"), FieldMatch("city")),
     (re.compile(r"\bstate\b|\bprovince\b"), FieldMatch("state")),
     (re.compile(r"\bcountry\b"), FieldMatch("country")),
