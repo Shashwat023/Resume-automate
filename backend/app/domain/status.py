@@ -14,6 +14,7 @@ QUEUED = "queued"
 CHECKING_URL = "checking_url"
 RUNNING = "running"
 NEEDS_INPUT = "needs_input"  # Day 4 scope correction: 2FA only — everything else is automated
+PAUSED = "paused"  # Day 4 Part H: user-initiated pause, distinct from needs_input (2FA)
 COMPLETED = "completed"
 FAILED = "failed"
 CANCELLED = "cancelled"

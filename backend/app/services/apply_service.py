@@ -16,6 +16,7 @@ from app.models.schemas import (
     ApplyDetailsOut,
     ApplyHistoryItemOut,
     ApplyStatusOut,
+    RunEventOut,
 )
 from app.ports import QueuePort
 from app.repositories.application_repository import ApplicationRepository
@@ -70,6 +71,7 @@ class ApplyService:
         return [
             ApplyHistoryItemOut(
                 application_id=app.id,
+                job_id=job.id,
                 company_name=job.company_name,
                 job_title=job.title,
                 status=app.status,
@@ -83,6 +85,7 @@ class ApplyService:
         application = await self._require(application_id)
         profile = await self._profiles.get(application.profile_id)
         job = await self._jobs.get(application.job_id)
+        events = await self._applications.events_after(application_id, 0)
         return ApplyDetailsOut(
             application_id=application.id,
             profile={"id": profile.id, "full_name": profile.full_name}
@@ -95,15 +98,26 @@ class ApplyService:
             error=application.error,
             started_at=application.started_at,
             finished_at=application.finished_at,
+            events=[
+                RunEventOut(
+                    id=e.id,
+                    level=e.level,
+                    message=e.message,
+                    tier=e.tier,
+                    created_at=e.created_at,
+                )
+                for e in events
+            ],
         )
 
     async def pause(self, application_id: str) -> ApplyStatusOut:
         application = await self._require(application_id)
         transitions.ensure_can_pause(application.status)
-        application.status = st.NEEDS_INPUT
+        application.status = st.PAUSED
         application.pause_reason = "manual_pause"
         await self._applications.add_event(application.id, "Paused by user")
         await self._applications.commit()
+        await self._queue.signal_pause(application_id)
         return await self.get_status(application_id)
 
     async def resume(self, application_id: str) -> ApplyStatusOut:

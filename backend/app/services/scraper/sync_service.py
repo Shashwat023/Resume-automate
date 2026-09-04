@@ -21,6 +21,7 @@ from stagehand import Stagehand
 from app.models.db_models import Job
 from app.services.browser.chrome_launcher import get_or_launch
 from app.services.engine.llm_client import openrouter_llm
+from app.services.engine.timeouts import with_timeout
 
 GREENHOUSE_BOARD_RE = re.compile(
     r"(?:job-boards\.greenhouse\.io|boards\.greenhouse\.io)/([\w-]+)"
@@ -188,7 +189,9 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
             or await sh.browser.context.new_page()
         )
         await page.goto(company_url)
-        await page.wait_for_load_state("load")
+        await with_timeout(
+            page.wait_for_load_state("load"), what="wait_for_load_state"
+        )
         await page.wait_for_timeout(1500)
 
         result = await sh.extract(
