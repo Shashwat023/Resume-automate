@@ -29,7 +29,18 @@ export const QueuePage = () => {
     );
   }
 
-  const hasActiveJob = queueState?.status === 'running' || queueState?.status === 'paused';
+  // queueState.status is a coarse AGGREGATE across the whole queue and
+  // does not move for a single job stuck at needs_input (2FA) or paused —
+  // e.g. 3 failed + 2 needs_input jobs computes to aggregate 'idle', which
+  // would hide CurrentJobCard (and its Take Control button) at exactly the
+  // moment a real, specific job needs it. currentJobId is per-job and
+  // already correctly includes waiting_for_user (see api/queue.ts), so it
+  // catches this case; the aggregate checks stay as an additional signal,
+  // not the only one.
+  const hasActiveJob =
+    !!queueState?.currentJobId ||
+    queueState?.status === 'running' ||
+    queueState?.status === 'paused';
 
   return (
     <div className="max-w-7xl mx-auto h-full flex flex-col space-y-6 pb-6">
