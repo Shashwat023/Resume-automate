@@ -25,10 +25,12 @@ from stagehand import Page
 
 from app.core.config import get_settings
 from app.domain.answer_key import question_hash
+from app.domain.semantic_dictionary import match_field
 from app.repositories.answer_library_repository import AnswerLibraryRepository
+from app.services.engine.field_fill import fill_textbox
 from app.services.engine.openrouter_client import OpenRouterError, chat_json
 from app.services.engine.resume_parse import ResumeFacts
-from app.services.engine.tier0_harvest import FormField
+from app.services.engine.tier0_harvest import FormField, strip_country_code
 
 settings = get_settings()
 
@@ -77,6 +79,14 @@ class Tier1Result:
     # Filled (not skipped) but below the cache-gate threshold, so the guess
     # was used once and NOT written to the answers library — see map_fields.
     low_confidence_filled: list[str]
+    # A real, previously-silent gap: nothing enforces that the LLM's JSON
+    # response includes an entry for every field it was asked about. If it
+    # omits one, map_fields never even attempts to apply a value for it —
+    # not a confidence decision, not an error, just absent from the loop
+    # that only iterates over what the model returned. One repair call is
+    # made targeting exactly the omitted fields (see map_fields); a field
+    # lands here only if it's STILL missing after that retry.
+    unanswered: list[str]
     errored: list[tuple[str, str]]
     usage: dict
 
@@ -143,8 +153,17 @@ async def map_fields(
     from_library: list[tuple[str, str]] = []
     for_tier2: list[tuple[FormField, str]] = []
     low_confidence_filled: list[str] = []
+    unanswered: list[str] = []
     errored: list[tuple[str, str]] = []
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    # Same "does a sibling Country selector exist" signal tier0_harvest.py
+    # uses — computed once here so any phone-like field Tier 1 ends up
+    # applying (see _apply's phone-normalization note) gets the same
+    # country-code handling regardless of which tier actually writes it.
+    has_country_selector = any(
+        f.role == "combobox" and "country" in f.label.lower() for f in fields
+    )
 
     # 1. Answers library first — free, no LLM call. Only fields with no
     #    fixed option set are cacheable this way (see module docstring).
@@ -152,24 +171,37 @@ async def map_fields(
     for f in fields:
         if not f.options:
             cached = await answer_repo.get(profile_id, question_hash(f.label))
-            if cached is not None:
+            # Real bug found live: a cache write is only gated on
+            # confidence, never on the answer actually having content. One
+            # earlier run's LLM call returned an EMPTY string for "Why
+            # Anthropic?" at confidence exactly 0.5 (the cache-gate
+            # threshold) — it got cached, and every run since (including
+            # this pipeline's own repair passes) silently "filled" the
+            # field with nothing and reported success, while the real ATS
+            # correctly rejected it as required-but-empty on every single
+            # submission attempt. A blank cached answer is treated as no
+            # cache hit at all here — falls through to `remaining` for a
+            # fresh LLM attempt instead of being trusted forever.
+            if cached is not None and cached.answer.strip():
                 from_library.append((f.label, cached.answer))
-                await _apply(page, f, cached.answer, filled, for_tier2, errored)
+                await _apply(
+                    page, f, cached.answer, filled, for_tier2, errored, has_country_selector
+                )
                 continue
         remaining.append(f)
 
     if not remaining:
         return Tier1Result(
-            filled, from_library, for_tier2, low_confidence_filled, errored, usage
+            filled, from_library, for_tier2, low_confidence_filled, unanswered, errored, usage
         )
 
     if not settings.openrouter_api_key:
         # Kill switch: no key configured -> the app must stay runnable
         # without one. Nothing to fill these with, so they're genuinely
         # left blank (not a confidence decision — there's no LLM call at all).
-        low_confidence_filled.extend(f.label for f in remaining)
+        unanswered.extend(f.label for f in remaining)
         return Tier1Result(
-            filled, from_library, for_tier2, low_confidence_filled, errored, usage
+            filled, from_library, for_tier2, low_confidence_filled, unanswered, errored, usage
         )
 
     messages = build_prompt(profile, remaining, resume_facts)
@@ -177,17 +209,76 @@ async def map_fields(
     usage = call_usage
 
     by_id = {f.node_id: f for f in remaining}
-    for answer in parsed.answers:
+    answered_ids = await _apply_answers(
+        page, by_id, parsed.answers, profile_id, answer_repo,
+        filled, for_tier2, low_confidence_filled, errored, has_country_selector,
+    )
+    missing = [f for node_id, f in by_id.items() if node_id not in answered_ids]
+
+    # A real, previously-silent gap: the LLM's JSON response can simply
+    # omit a field entirely (drop it from the `answers` array), and
+    # nothing detected that — the field just stayed blank with zero log
+    # line anywhere. One targeted repair call, scoped to only the missing
+    # fields, before giving up on them.
+    if missing:
+        repair_messages = build_prompt(profile, missing, resume_facts)
+        try:
+            repaired, repair_usage = await _chat_with_repair(repair_messages)
+            usage = {k: usage[k] + repair_usage[k] for k in usage}
+            missing_by_id = {f.node_id: f for f in missing}
+            repaired_ids = await _apply_answers(
+                page, missing_by_id, repaired.answers, profile_id, answer_repo,
+                filled, for_tier2, low_confidence_filled, errored, has_country_selector,
+            )
+            answered_ids |= repaired_ids
+            missing = [f for f in missing if f.node_id not in repaired_ids]
+        except OpenRouterError:
+            pass  # repair failed outright — `missing` stays as-is, logged below
+
+    unanswered.extend(f.label for f in missing)
+
+    return Tier1Result(
+        filled, from_library, for_tier2, low_confidence_filled, unanswered, errored, usage
+    )
+
+
+async def _apply_answers(
+    page: Page,
+    by_id: dict[str, FormField],
+    answers: list[FieldAnswer],
+    profile_id: int,
+    answer_repo: AnswerLibraryRepository,
+    filled: list[tuple[str, str]],
+    for_tier2: list[tuple[FormField, str]],
+    low_confidence_filled: list[str],
+    errored: list[tuple[str, str]],
+    has_country_selector: bool = False,
+) -> set[str]:
+    """Applies every answer the model actually returned (regardless of
+    confidence — see the accepted-tradeoff note in map_fields); returns the
+    set of field_ids it covered so the caller can compute what's still
+    missing entirely (an omission, not a confidence decision)."""
+    answered_ids: set[str] = set()
+    for answer in answers:
         field = by_id.get(answer.field_id)
         if field is None:
             continue
 
-        # Every answer gets filled regardless of confidence — accepted
-        # tradeoff (PLAN.md Day 4): a wrong answer beats a blank required
-        # field now that submission is fully automated. Confidence is used
-        # ONLY below to decide whether the answer is trustworthy enough to
-        # cache and replay into future applications, never to gate filling.
-        await _apply(page, field, answer.value, filled, for_tier2, errored)
+        # An empty/whitespace-only "answer" is functionally the same
+        # silent-omission bug the repair-retry above exists to catch — the
+        # model technically returned an entry for this field_id, but there
+        # is nothing to apply. Left OUT of answered_ids so it flows into
+        # `missing` and gets the same one-shot repair retry a truly
+        # omitted field gets, rather than being treated as done with
+        # nothing in it (see map_fields' matching guard on the
+        # answers-library read path for the other half of this fix).
+        if not answer.value.strip():
+            continue
+        answered_ids.add(answer.field_id)
+
+        await _apply(
+            page, field, answer.value, filled, for_tier2, errored, has_country_selector
+        )
         if answer.confidence < settings.tier1_confidence_threshold:
             low_confidence_filled.append(field.label)
 
@@ -205,10 +296,7 @@ async def map_fields(
                 source="llm",
                 confidence=answer.confidence,
             )
-
-    return Tier1Result(
-        filled, from_library, for_tier2, low_confidence_filled, errored, usage
-    )
+    return answered_ids
 
 
 async def _apply(
@@ -218,14 +306,45 @@ async def _apply(
     filled: list[tuple[str, str]],
     for_tier2: list[tuple[FormField, str]],
     errored: list[tuple[str, str]],
+    has_country_selector: bool = False,
 ) -> None:
     if field.xpath is None:
         errored.append((field.label, "no xpath available"))
         return
 
+    # Belt-and-suspenders against the same "empty answer silently treated
+    # as filled" bug both callers already guard against — an empty
+    # .fill("") on a real textbox genuinely succeeds (no exception) and
+    # would otherwise be indistinguishable from a real answer.
+    if field.role == "textbox" and not value.strip():
+        errored.append((field.label, "answer was empty — not filled"))
+        return
+
     try:
         if field.role == "textbox":
-            await page.locator(field.xpath).fill(value)
+            # Real bug found live: Tier 0's own semantic-dictionary match on
+            # 'Phone' should always catch a plain phone textbox — but on at
+            # least one real form it fell through to Tier 1 instead (root
+            # cause not isolated: a label-parsing quirk on that specific
+            # tree, or the field having no direct xpath at harvest time).
+            # Whatever the reason, Tier 1's LLM then free-formed a value
+            # from the resume/profile text and produced a wrong,
+            # domestic-format number ("08303545027" — a leading 0 the
+            # profile's stored "+918303545027" never had). Tier 0's own
+            # country-code-stripping fix (tier0_harvest.py) only ran in
+            # tier0_harvest's own code path, so it never protected this
+            # fallback path. Applying the same normalization here — keyed
+            # off the same semantic match, not a hardcoded label — closes
+            # that gap regardless of which tier ends up handling the field.
+            semantic_match = match_field(field.label)
+            if (
+                semantic_match is not None
+                and semantic_match.profile_attr == "phone"
+                and value.startswith("+")
+                and has_country_selector
+            ):
+                value = strip_country_code(value)
+            await fill_textbox(page, field.xpath, value)
             filled.append((field.label, value))
         elif field.is_native_select:
             await page.locator(field.xpath).select_option(value)

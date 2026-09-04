@@ -26,9 +26,12 @@ distinction is exactly the Tier 1 vs Tier 2 boundary:
 import re
 from dataclasses import dataclass, field
 
+import phonenumbers
 from stagehand import Page
 
 from app.domain.semantic_dictionary import match_field, resolve_value
+from app.services.engine.field_fill import fill_textbox
+from app.services.engine.timeouts import with_timeout
 
 # Role is USUALLY a single bare word (StaticText/ListMarker/textbox/...),
 # but the file-upload control on a real Greenhouse form renders as a
@@ -59,6 +62,30 @@ _GROUP_ROLE = "group"
 # a resume/CV — attaching it everywhere would silently submit it as a cover
 # letter too.
 _RESUME_FIELD_LABEL = re.compile(r"resum[eé]|\bcv\b", re.I)
+
+# Real bug found live: a form can split phone entry into a separate
+# Country/dial-code selector PLUS a plain Phone field. The profile stores
+# the phone number WITH its country code (e.g. "+918303545027"), which is
+# correct for a single combined phone field — but on a split form it
+# duplicates the code, since the Country dropdown already supplies it.
+# Only strip when a sibling selector actually exists on the page (checked
+# where this is used) — a form with one combined field legitimately needs
+# the full number.
+#
+# A SECOND real bug was found fixing the first one: a naive regex
+# (`^\+\d{1,4}[\s\-]*`, greedily eating up to 4 digits) doesn't know where
+# the country code actually ends — calling codes are 1-3 digits and
+# genuinely ambiguous from the digit string alone (+1 is 1 digit, +91 is
+# 2, +971 is 3). Live-confirmed: it ate "+9183" instead of "+91" from
+# "+918303545027", leaving the mangled "03545027" as the "phone number".
+# `phonenumbers` (Google's libphonenumber) parses against the real ITU
+# calling-code table instead of guessing.
+def strip_country_code(value: str) -> str:
+    try:
+        parsed = phonenumbers.parse(value, None)
+    except phonenumbers.NumberParseException:
+        return value
+    return str(parsed.national_number)
 
 
 @dataclass
@@ -212,6 +239,13 @@ async def fill_deterministic(
                 continue
             try:
                 await page.locator(f.xpath).set_input_files(resume_file_path)
+                # Confirmed live (see FLAGGED.md): Greenhouse's own widget
+                # does an async upload after the file is set — a progress
+                # bar, then "resume.pdf" + "Remove file" once it settles,
+                # roughly ~1s in practice. A short wait here is cheap
+                # insurance against later steps (Tier 1/2, or a fast
+                # submit) racing ahead of that settling.
+                await page.wait_for_timeout(1500)
                 filled.append((f.label, resume_file_path))
             except Exception as exc:  # noqa: BLE001
                 errored.append((f.label, str(exc)))
@@ -230,6 +264,14 @@ async def fill_deterministic(
             unmatched.append(f.label)
             continue
 
+        if match.profile_attr == "phone" and value.startswith("+"):
+            has_country_selector = any(
+                other.role == "combobox" and "country" in other.label.lower()
+                for other in fields
+            )
+            if has_country_selector:
+                value = strip_country_code(value)
+
         if f.xpath is None:
             unmatched.append(f.label)
             continue
@@ -238,7 +280,7 @@ async def fill_deterministic(
             # A field earlier in this loop may have reflowed the DOM enough
             # to invalidate this xpath even though it came from the same
             # snapshot — one bad field must not abort the rest of the fill.
-            await page.locator(f.xpath).fill(value)
+            await fill_textbox(page, f.xpath, value)
             filled.append((f.label, value))
         except Exception as exc:  # noqa: BLE001
             errored.append((f.label, str(exc)))
@@ -250,6 +292,6 @@ async def harvest_and_fill(
     page: Page, profile: dict, resume_file_path: str | None = None
 ) -> HarvestResult:
     """Convenience wrapper: snapshot + collect + fill in one call (Tier-0-only callers)."""
-    snapshot = await page.snapshot()
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
     fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
     return await fill_deterministic(page, fields, profile, resume_file_path)
