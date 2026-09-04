@@ -4,9 +4,17 @@ from app.services.captcha.solver import CaptchaError
 
 
 class FakePage:
+    # url() is a real ASYNC METHOD on Stagehand's Page, not a plain
+    # attribute — this fake matches that shape deliberately (a prior
+    # version had `self.url = url`, which let a real `page.url` vs
+    # `await page.url()` bug through this test suite undetected; see
+    # service.py's resolve_captcha for the fix and PLAN.md Day 5).
     def __init__(self, url="https://example.com/apply"):
-        self.url = url
+        self._url = url
         self.evaluated: list[str] = []
+
+    async def url(self):
+        return self._url
 
     async def evaluate(self, expression):
         self.evaluated.append(expression)
@@ -52,6 +60,14 @@ async def test_solved_captcha_injects_token(monkeypatch):
     assert len(page.evaluated) == 1
     assert "the-solved-token" in page.evaluated[0]
     assert "g-recaptcha-response" in page.evaluated[0]
+    # Real bug found live: writing only the hidden DOM field works for a
+    # classic visible reCAPTCHA v2 checkbox, but a real submission was
+    # rejected with "Please complete the reCAPTCHA" despite a genuinely
+    # solved token — the invisible/Enterprise widget's real "solved" state
+    # lives in Google's own JS, set only via its registered callback. Must
+    # also attempt to locate and invoke it, not just fill the DOM mirror.
+    assert "___grecaptcha_cfg" in page.evaluated[0]
+    assert "callback" in page.evaluated[0]
 
 
 async def test_hcaptcha_injects_into_h_captcha_response_field(monkeypatch):

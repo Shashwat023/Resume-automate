@@ -49,7 +49,13 @@ async def resolve_captcha(page: Page) -> CaptchaOutcome:
     last_error: Exception | None = None
     for _attempt in range(2):
         try:
-            token = await solve(challenge, page.url)
+            # Page.url is an ASYNC METHOD on Stagehand's Page, not a plain
+            # property (`async def url(self) -> str`) — a real bug this
+            # fixed: `page.url` alone evaluates to the bound method object
+            # itself, not a string, which 2captcha's API correctly rejected
+            # as an invalid page URL (ApiException: ERROR_PAGEURL), caught
+            # live during Day 5 verification.
+            token = await solve(challenge, await page.url())
             await _inject_token(page, challenge, token)
             return CaptchaOutcome(status="solved", detail=challenge.kind)
         except CaptchaError as exc:
@@ -60,6 +66,30 @@ async def resolve_captcha(page: Page) -> CaptchaOutcome:
 
 
 async def _inject_token(page: Page, challenge: CaptchaChallenge, token: str) -> None:
+    """
+    Real bug found live: writing the solved token into the hidden
+    `g-recaptcha-response` textarea (below) is the standard technique for
+    a CLASSIC visible reCAPTCHA v2 checkbox — the site's own JS typically
+    polls or reads that field on submit. It does NOT work for an
+    invisible/Enterprise widget (confirmed live: Anthropic's Greenhouse
+    form rejected a real, successfully-2captcha-solved token with "Please
+    complete the reCAPTCHA and resubmit your application"). An invisible
+    widget's "has the user completed the challenge" state lives in
+    Google's own JS, set only when ITS registered callback fires — which
+    normally happens only after a real widget interaction. Writing to the
+    DOM field alone never touches that internal state, so the site's own
+    submit-gate still thinks nothing happened.
+
+    Fix: ALSO locate the widget's real callback via `___grecaptcha_cfg`
+    (the internal registry `grecaptcha`/`grecaptcha.enterprise` both share
+    — Enterprise is built on the same client-registration mechanism) and
+    invoke it directly with the token, exactly as Google's own widget
+    would after a real solve. This is a best-effort technique reverse
+    engineered from Google's own (versioned, lightly obfuscated) internal
+    structure — not officially documented, so kept as an ADDITION to the
+    DOM-field write, never a replacement, since a classic non-Enterprise
+    widget may still only need the field.
+    """
     field_name = _RESPONSE_FIELD[challenge.kind]
     await page.evaluate(
         f"""(() => {{
@@ -81,6 +111,43 @@ async def _inject_token(page: Page, challenge: CaptchaChallenge, token: str) -> 
                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
             }});
-            return fields.length;
+
+            // Invisible/Enterprise fallback: find and invoke the widget's
+            // own registered callback so Google's internal "solved" state
+            // actually gets set, not just the DOM mirror of it.
+            let callbacksInvoked = 0;
+            try {{
+                const cfg = window.___grecaptcha_cfg;
+                if (cfg && cfg.clients) {{
+                    for (const client of Object.values(cfg.clients)) {{
+                        // The callback lives at an unpredictable, versioned
+                        // nesting depth inside each client object — walk
+                        // every nested object looking for a function
+                        // property named 'callback' (v2) or found under a
+                        // 'promise-callback'-shaped key (enterprise/v3),
+                        // rather than hardcoding a specific path that
+                        // breaks on the next Google API revision.
+                        const seen = new Set();
+                        const stack = [client];
+                        while (stack.length) {{
+                            const obj = stack.pop();
+                            if (!obj || typeof obj !== 'object' || seen.has(obj)) continue;
+                            seen.add(obj);
+                            for (const [key, value] of Object.entries(obj)) {{
+                                if (typeof value === 'function' && /callback/i.test(key)) {{
+                                    try {{
+                                        value(token);
+                                        callbacksInvoked++;
+                                    }} catch (e) {{ /* try the next candidate */ }}
+                                }} else if (value && typeof value === 'object') {{
+                                    stack.push(value);
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }} catch (e) {{ /* best-effort only — DOM field write above still stands */ }}
+
+            return {{ fieldsFilled: fields.length, callbacksInvoked }};
         }})()"""
     )
