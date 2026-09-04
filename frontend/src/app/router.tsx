@@ -64,6 +64,17 @@ export const router = createBrowserRouter([
             ),
           },
           {
+            // SettingsPage, its lazy import and ROUTES.SETTINGS all already
+            // existed — only this route entry was missing, so /settings 404'd
+            // and `tsc -b` reported SettingsPage as an unused declaration.
+            path: ROUTES.SETTINGS,
+            element: (
+              <Suspense fallback={<PageLoader />}>
+                <SettingsPage />
+              </Suspense>
+            ),
+          },
+          {
             path: ROUTES.ADMIN,
             element: (
               <Suspense fallback={<PageLoader />}>

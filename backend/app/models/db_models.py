@@ -70,6 +70,11 @@ class Resume(Base):
     file_path: Mapped[str] = mapped_column(Text)
     resume_url: Mapped[str] = mapped_column(Text)
     extracted_text: Mapped[str | None] = mapped_column(Text, default=None)
+    # JSON-encoded ResumeFacts (education/employment/skills/certifications),
+    # parsed once per resume on first use by the automation engine and
+    # cached here — see services/engine/resume_parse.py. Not exposed on the
+    # public API (ResumeGetOut/ResumeUploadOut are separate schemas).
+    parsed_facts: Mapped[str | None] = mapped_column(Text, default=None)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     profile: Mapped["Profile"] = relationship(back_populates="resume")
@@ -172,7 +177,12 @@ class FieldCache(Base):
 
 
 class AnswerLibrary(Base):
-    """question_hash -> user-approved answer, scoped per profile."""
+    """
+    question_hash -> approved answer, scoped per profile. `source` and
+    `confidence` distinguish an LLM-generated answer (cached only above a
+    confidence threshold) from a human-approved one (Day 4 HITL) — human
+    answers always win and overwrite an LLM guess for the same question.
+    """
 
     __tablename__ = "answers_library"
 
@@ -182,7 +192,12 @@ class AnswerLibrary(Base):
     question_hash: Mapped[str] = mapped_column(Text, primary_key=True)
     question_text: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, default="llm")  # "llm" | "human"
+    confidence: Mapped[float | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class TrackedCompany(Base):

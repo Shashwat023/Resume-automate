@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "prebuild": "tsc -b",
+    "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview"
   },

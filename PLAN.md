@@ -16,6 +16,28 @@ The universality problem and its solution (cascading resolver: a11y tree → bat
 - Universal across 400+ providers, no per-provider API integrations for form-filling.
 - 5 days, complete project.
 
+### Scope correction (from the client/senior discussion, adopted Day 4)
+
+The human-in-the-loop surface is **much narrower** than v2 assumed. Confirmed direction:
+
+- **The automation fills every field on its own.** No "leave it for a human" path for ordinary form fields.
+  - **Personal details** → the profile record.
+  - **Academic + professional details** → **the uploaded resume** (this is new: resume content becomes a first-class data source for form filling, not just a file to attach).
+  - **Everything else / unknown questions** → the LLM answers it. Declining to answer is no longer an acceptable outcome for a required field.
+- **Submission is automated.** The final-review-before-submit human gate is removed; the engine clicks Submit and verifies the result.
+- **CAPTCHA is automated** via 2captcha. Not a human escalation trigger.
+- **Scraping is automated.** Unchanged.
+- **The ONLY *automation-initiated* human-in-the-loop trigger is 2FA** — a one-time code the system cannot possess by design. Live view exists to serve that one case.
+- **User-initiated pause/resume is a separate, always-available control.** Every job in the queue gets a play/pause button so a user who queued a posting by mistake can stop it **before** it starts processing or **mid-run**, then resume or cancel. This is a deliberate user action, not the automation asking for help — the two must not share a status (see below).
+
+**What this changes vs. what was already built:**
+
+- **Tier 1 always answers. Confidence stops gating whether a field is filled.** Per explicit direction: every field gets whatever answer the LLM produced, however low its confidence. *Some level of hallucination is an accepted product tradeoff here* — recorded as a decision, not an oversight, because Day 3's verified "honestly abstain on ambiguous questions" behavior is precisely what is being traded away. The threshold (now **0.5**) survives only as a **cache gate** for the answers library, so a low-confidence guess is used once but never remembered and reused.
+- Two capabilities that were never built at all become Day-4 blockers: **resume text extraction** (the `resumes.extracted_text` column exists but was never populated) and **file-input handling** (Tier 0 collects `textbox/combobox/checkbox/radio` only — the resume *attachment* field on essentially every ATS form is currently unhandled).
+- **`pause()` currently sets `status = needs_input`** (`apply_service.py:103`) — which now collides with the 2FA meaning. The frontend renders `needs_input` as *"Waiting for you — open live view"*, so a user-paused job would wrongly prompt a live-view takeover. User-pause needs its own `paused` status (Day 4H).
+
+**One risk flagged back, not a blocker:** automated submission means every live test creates a real job application at a real employer. Day 4 therefore lands a **local mock ATS form** as the primary submit-path test surface, plus a `SUBMIT_ENABLED` config flag (default **off** in dev) so the full cascade can be exercised end-to-end against real forms without transmitting an application. Real-employer submission is enabled deliberately, for the demo, not as a side effect of running the suite.
+
 ### New scope this revision adds
 - **Match the existing frontend's REST contract exactly** (endpoints, field names, types, status vocabulary) — it is not ours to redesign.
 - **Job discovery/scraping**, triggered by the frontend's existing `AdminPage` → `POST /api/admin/sync`. This wasn't in v1 of the plan; the frontend already assumes it exists.
@@ -58,7 +80,7 @@ Status vocabulary the frontend already maps (`frontend/src/api/queue.ts:15-36`) 
 
 ### New additions (backend + small additive frontend edits)
 
-1. **New status: `needs_input`.** Add to backend status vocabulary and to `frontend/src/api/queue.ts` `mapBackendStatusToJobStatus` (currently anything unrecognized falls into `waiting`, which would hide the very moment a human needs to act — this one line must not be skipped). Surface it distinctly in `QueueStatusBadge.tsx` and `CurrentJobCard.tsx` with a "Take control" affordance.
+1. **New status: `needs_input`.** Add to backend status vocabulary and to `frontend/src/api/queue.ts` `mapBackendStatusToJobStatus` (currently anything unrecognized falls into `waiting`, which would hide the very moment a human needs to act — this one line must not be skipped). Surface it distinctly in `QueueStatusBadge.tsx` and `CurrentJobCard.tsx` with a "Take control" affordance. **Per the scope correction, this status now has exactly one cause: 2FA.**
 
 2. **Real pause/resume/cancel endpoints**, wired into the already-present but no-op buttons in `frontend/src/features/queue/components/QueueControls.tsx` (currently just toasts "not yet supported"):
    - `POST /api/apply/{application_id}/pause`
@@ -80,7 +102,7 @@ The universality problem is unaffected by the frontend swap. Same cascading reso
 - **Tier 0** — CDP accessibility tree + semantic dictionary, $0, ~70-80% of fields.
 - **Tier 1** — batched OpenRouter call (one per page, not per field) for leftover fields, text/a11y not vision.
 - **Tier 2** — Stagehand `observe()` → `act()` for custom widgets (the exact fix for the old coordinate-clicking bug).
-- **Tier 3** — human, via the new live-view WebSocket: login, 2FA, failed CAPTCHA, low-confidence field, final review before submit.
+- **Tier 3** — human, via the live-view WebSocket. **Scope narrowed (see "Scope correction" below): 2FA only.**
 
 **Provider fingerprint cache** and **answers library**, unchanged — this is what makes 400+ providers affordable: first contact with a form/question pays LLM cost, every repeat is ~free.
 
@@ -122,7 +144,7 @@ Insert/update into `jobs` table, return `{success, jobs_inserted, jobs_updated, 
 ## Data model
 
 - `profiles` — matches `BackendProfile` exactly, all fields above including the ones the old backend's schema was missing (`gender`, `current_company`, `twitter_url`)
-- `resumes` — profile_id FK, file, extracted text, `resume_url`
+- `resumes` — profile_id FK, file, `resume_url`, `extracted_text` (populated Day 4 — was declared but never written), `parsed_facts` (Day 4: structured education/employment/skills, parsed once per resume and reused across every application)
 - `jobs` — id (int PK, string on the wire), title, company_name, location, location_type, industry, posted_date, job_type, salary, description, requirements[], apply_url, company_url, ats
 - `applications` — profile_id, job_id, application_id (string, external-facing), status (incl. `needs_input`), pause_reason, started_at, finished_at, error
 - `run_events` — append-only audit log per application, also the source for the log-stream WS
@@ -176,35 +198,114 @@ Note: using SQLite (`sqlite+aiosqlite`) via SQLAlchemy 2.0 `create_all()`, no Al
 
 - [x] `profile`, `resume` endpoints, exact `BackendProfile` shape (resume upload implemented, not yet smoke-tested with a real file).
 - [x] `jobs/search` endpoint + `jobs` table (done Day 1, tested with 441 real Greenhouse jobs).
-- [x] `apply/start`, `apply/status`, `apply/history`, `apply/details` — status vocabulary exact. `needs_input` added to the **backend** vocabulary; **`frontend/src/api/queue.ts` `mapBackendStatusToJobStatus` still needs the matching one-line addition** so it doesn't fall into the `waiting` default.
+- [x] `apply/start`, `apply/status`, `apply/history`, `apply/details` — status vocabulary exact. `needs_input` added to both the backend vocabulary and `frontend/src/api/queue.ts` (`mapBackendStatusToJobStatus` → `waiting_for_user` at `queue.ts:25`, `describeBackendStatus` at `queue.ts:56`) — done during the clean-architecture restructure pass.
 - [x] Tier 0 harvester (a11y tree → semantic dictionary → fill) — **real, verified**. `app/services/engine/tier0_harvest.py` + `semantic_dictionary.py` + `runner.py`. Uses Stagehand's `page.snapshot()` (its own accessibility-tree representation — no need to hand-roll raw CDP `Accessibility.getFullAXTree`), regex-matches `textbox` roles against a label dictionary, fills via `page.locator(xpath).fill()`. Tested live against a real Anthropic Greenhouse form: correctly filled First/Last Name, Email, Phone, Website, LinkedIn from the profile; correctly left the 6 genuine free-text judgment questions ("Why Anthropic?", relocation address, etc.) unmatched for Tier 1+. Includes a heuristic "click Apply to reveal the form" step (common on Greenhouse/Lever, not universal — that generalization is Tier 2's job) and per-field error isolation (one stale xpath doesn't abort the whole run — this fired for real during testing and the fix/hardening are both in).
 - [ ] Point `VITE_API_BASE_URL` at the new backend, confirm existing screens (Search, Profile, Upload, Dashboard) work unmodified end to end. Backend confirmed working via direct HTTP calls and through the real running frontend during manual testing (profile autosave, admin sync, search results all verified in-browser); a pre-existing frontend bug was found and fixed along the way (see Known issues found below).
 
 ### Day 3 — Intelligence + scraper
 
-- [ ] Tier 1 batched LLM mapping, Tier 2 Stagehand `observe`/`act` — verify against a custom-styled checkbox and dropdown specifically.
-- [x] Job scraper tier 1 (known-ATS: Greenhouse, Lever) — done Day 1 ahead of schedule, tested live (441 real jobs). Stagehand `extract()` fallback for non-ATS pages and `portals.yml` seed-loading still pending.
+- [x] **Tier 1 batched LLM field mapping** — `app/services/engine/tier1_map.py` + `openrouter_client.py`. One OpenRouter call per page for every field Tier 0 couldn't match; decides a value using the profile + answers library, applies directly for textboxes/native selects, hands custom-widget fields to Tier 2. Verified live against the real Anthropic Greenhouse form: correctly wrote a genuine free-text answer for "Why Anthropic?", correctly left 7-11 genuinely ambiguous fields at low confidence rather than guessing (the honesty instruction working as designed), and correctly served 6 fields from the answers-library cache on a second run with zero fresh LLM cost.
+- [x] **Tier 2 Stagehand `observe`→`act`** — `app/services/engine/tier2_resolve.py` + `llm_client.py::openrouter_llm` (the full Stagehand LLM-callback contract, mapped from the installed package source, not guessed — see PLAN.md's contract notes above this table). **Verified against custom-styled dropdowns on a live form**, exactly as required: Tier 2 genuinely opened and selected values in 5 real custom React-select comboboxes on Anthropic's production Greenhouse form (visa sponsorship ×2, relocation, in-person-25%, Country) — confirmed via raw CDP inspection of the actual rendered page, not just log messages. **A real bug was caught and fixed during this verification**: a single observe()+act() call only opened the dropdown without completing the selection (the option element doesn't exist in the accessibility tree until the dropdown is open, so it can't be resolved in one shot) — fixed with a genuine two-step open-then-select flow, now covered by regression tests. This is the direct, now-verified fix for the coordinate-clicking bug the whole rebuild exists for. No literal `<input type=checkbox>` existed on the test form to verify against — all of this form's multi-choice fields render as the same custom-combobox widget type, so the checkbox code path is implemented and unit-tested but not live-verified.
+- [x] Job scraper tier 1 (known-ATS: Greenhouse, Lever) — done Day 1, tested live (499 real jobs).
+- [x] **Job scraper tier 2 — Stagehand `extract()` fallback** for non-ATS pages, `app/services/scraper/sync_service.py::_sync_via_extract`. Verified live: completed successfully against a real company page (correctly found zero jobs on a homepage with none listed) and failed gracefully against another (no crash, proper `{success: false}`). Uses a dedicated `"scraper"` Chrome profile, never a user's logged-in session.
+- [x] **`portals.yml` seeding** — `app/scripts/seed_portals.py`. Corrected a real miscount along the way: the file has 409 tracked companies, not 454 (454 = 409 tracked_companies + 45 separate search_queries entries, conflated by an earlier grep). All 409 have `scan_method: websearch` — **zero** resolve to a free Greenhouse/Lever API directly; every real scrape needs the extract() fallback. 10 bare-ATS-host junk entries correctly detected and skipped. Verified live: 399 inserted, 10 skipped; re-run is idempotent (0 inserted, 399 updated).
 - [x] `admin/sync` endpoint wired to `AdminPage.tsx` exactly — done Day 1.
-- [ ] Answers library.
+- [x] **Answers library** — `app/domain/answer_key.py` (question normalization/hashing) + `app/repositories/answer_library_repository.py`. Per-decision: only caches high-confidence answers, tagged `source` ('llm'/'human'); a human answer always overwrites an LLM one, an LLM answer never overwrites a human one. Verified live — a second run against the same form served 6 answers from cache with zero fresh LLM cost for those fields.
 
-### Day 4 — Human-in-the-loop, for real
+**Bugs found and fixed during Day 3** (both caught by writing tests / live-verifying, not assumed): (1) `tier1_map.py`'s prompt-building crashed on `datetime` values from the raw profile dict — fixed with `json.dumps(..., default=str)`, regression-tested. (2) Tier 2's single-step combobox resolution reported false success — see above, fixed with the two-step flow.
 
-- [ ] Pause/resume/cancel endpoints, wired into `QueueControls.tsx`.
-- [ ] `needs_input` triggers: login wall, 2FA, failed CAPTCHA, low-confidence field.
-- [ ] Log stream WS wired into `LogViewer.tsx`.
-- [ ] 2captcha integration + escalation to human on failure.
-- [ ] Provider fingerprint cache.
+Day-2 leftovers closed alongside this: `queue.ts`'s `needs_input` mapping was already done (PLAN.md's own note was stale); Upload Resume and Queue pages verified live in a real browser (a real file upload round-tripped through `POST /api/resume/upload` end to end).
+
+### Day 4 — Full autonomy + 2FA-only human-in-the-loop
+
+Re-scoped per "Scope correction" above. The theme is no longer "hand off to a human" — it is **"never need to, except for 2FA"**. Ordered by what unblocks what.
+
+**A. Resume as a data source (new capability, blocks everything else) — [x] done, unit-tested**
+- [x] **Resume text extraction** — `services/resume/extract.py`: `pypdf` for PDF, `python-docx` for DOCX, plain-text passthrough otherwise, best-effort (never fails the upload). Wired into `ResumeService.upload`. Verified against the real resume on file for profile 1 — 4452 chars extracted correctly from a real PDF.
+- [x] **Structured resume parse** — `services/engine/resume_parse.py::parse_resume_facts`, one `chat_json` call → `ResumeFacts` (employment/education/skills/certifications). `ResumeService.get_facts` caches the result on `Resume.parsed_facts` (JSON), so it's paid once per resume — verified via unit test that a second call makes zero further parse calls. A re-upload invalidates the stale cache (`parsed_facts` reset to `None`). Degrades to empty facts, never raises, if there's no key or no text — same kill-switch pattern as Tier 1.
+- [x] **Feed it to Tier 1** — `map_fields`/`build_prompt` take an optional `resume_facts` param; `runner.py` fetches it once per application (via `ResumeService`) before the Tier 1 call.
+- Not unit-tested live against a real form yet (no field on the test form actually needed resume-only data) — the extraction/parse/cache pipeline itself IS live-verified (real PDF → real text), the "Tier 1 answers a resume-only question correctly" claim is not.
+
+**B. File upload — the resume attachment field — [~] implemented, unit-tested, but live verification found a real unresolved discrepancy — DO NOT treat as working**
+- [x] `file` added to `tier0_harvest.TARGET_ROLES`. Real recon finding (not guessed): the role renders as the comma-joined `input, file` on a live Greenhouse form, not a bare `file` role — parsing handles this. The field's real label ("Resume/CV") and its required-marker (`*`) both live on the enclosing `group:` node, not the input itself — also confirmed live and handled (`_enclosing_group`). A real form had **two** file inputs (Resume/CV, Cover Letter); the resume is only attached to the one whose label actually says resume/CV (`_RESUME_FIELD_LABEL`), a bug caught while writing the test for it, fixed before it shipped.
+- [x] Filled deterministically in Tier 0 via `Locator.set_input_files()` (Stagehand — no raw CDP needed, contrary to the original plan) with the profile's stored resume path. No LLM cost.
+- [ ] **Live verification found a real, unresolved false-success pattern** (same class of bug as Day 3's combobox issue, not yet root-caused): `set_input_files()` returns no error, but checking the actual DOM (not our own log) shows the file was never reflected in the widget's own state — the input's `files.length` never left 0, and the section re-rendered back to its unattached "Attach" state with no filename shown and no error either. Full details, evidence, and a working theory (React/dropzone not recognizing the CDP-injected selection as trusted; or a Stagehand-python RPC difference from real Playwright) are in [FLAGGED.md](FLAGGED.md) #8. **This blocks calling Section B complete** — needs either an event-dispatch fix or a fallback through Tier 2's `observe`/`act` (a real synthetic click + native file-picker), mirroring the Day-3 two-step combobox fix.
+- [ ] Tier 2 fallback for drag-and-drop/custom uploaders — not started; likely now the *primary* path pending B's root cause, not just a fallback for a rarer widget shape.
+
+**C. Tier 1 never abstains — it always answers — [x] done, unit-tested**
+- [x] **Confidence no longer gates filling at all.** Whatever value the LLM returns for a field gets written to the form, regardless of how low its confidence is. There is no skip path, no second pass, no escalation, no human handoff.
+- [x] **`tier1_confidence_threshold` drops 0.6 → 0.5 and is repurposed**: it stops being a fill gate and becomes purely a **cache gate** for the answers library. Everything is *filled*; only answers at or above 0.5 are *remembered* — preserves the Day-3 decision (cache high-confidence only) for the reason that motivated it, so a low-confidence guess is used once but never propagated into future applications.
+- [x] **Prompt inverted** — the system prompt now instructs the model to always produce its best answer and use confidence to express uncertainty, not as permission to decline (Day 3's verified abstention behavior on ambiguous fields is the thing being traded away, deliberately).
+- [x] **Required-field detection** — `FormField.required`, captured from the same `group:` ancestor pattern found in Part B. Informational only (nothing gates on it); not yet wired into a `run_events` log line for an unfilled required field — small remaining gap.
+- [x] `Tier1Result.low_confidence` renamed to `low_confidence_filled` — fields are filled, just flagged; `runner.py`'s log line updated to match.
+- [x] Every answer keeps logging value + confidence to `run_events`, low-confidence at `warn`.
+
+**D. CAPTCHA — automated via 2captcha — [x] done, unit-tested; NOT live-verified against a real solve**
+- [x] **API key from env**: `TWOCAPTCHA_API_KEY` added to `backend/.env` by you, surfaced as `settings.twocaptcha_api_key`.
+- [x] `services/captcha/detect.py` — regex over iframe `src` (not DOM attributes; the sitekey is public by design and sits right in the iframe URL's `k=`/`sitekey=` query param). **Grounded in a real finding**: Anthropic's live Greenhouse form embeds an *invisible reCAPTCHA Enterprise* iframe — its exact URL shape (`/recaptcha/enterprise/anchor?...&k=...&size=invisible`) is what `_RECAPTCHA_IFRAME` matches, not a guess.
+- [x] `services/captcha/solver.py` — thin async wrapper (`asyncio.to_thread`) over the synchronous `2captcha-python` SDK; `services/captcha/service.py` orchestrates detect → solve → inject-token-into-page, one retry on failure.
+- [x] **Kill switch**: no key configured → detection still runs and logs it, solving is skipped (`outcome="no_key"`), never crashes the run.
+- [x] Retry once on failure, then **`captcha_failure_escalates: bool = True`** (config, deviation flagged as planned) — escalates to `needs_input`/`pause_reason="captcha_failed"` via the same pause/resume mechanism as 2FA, rather than failing the application outright.
+- **Not live-verified**: no live run actually triggered and solved a real CAPTCHA — that would cost real 2captcha balance and up to 10 minutes per attempt, and Anthropic's is invisible (may only fire on real submit, which wasn't safe to trigger this pass). Detection regex is grounded in a real captured iframe URL; solving/injection is unit-tested against a fake 2captcha client only.
+
+**E. 2FA — the one real human-in-the-loop path — [x] done, unit-tested; NOT live-verified (no 2FA challenge encountered in any live test to date)**
+- [x] **Detection** — `services/engine/twofa_detect.py`, deterministic regex over the accessibility tree's label/heading text (same Tier-0 philosophy — no DOM attribute access). Runs after navigation/apply-click, and again after each submit attempt.
+- [x] On detection → `status = needs_input`, `pause_reason = "2fa_required"`, halts and calls `wait_for_resume` (existing Day-1 mechanism); resumes on the same live Chrome session.
+- [x] On resume → continues the cascade from where it stopped (re-snapshots naturally as part of the normal flow).
+- **Not live-verified**: no 2FA challenge was encountered on any real form used in this project so far, so the detection pattern itself is unconfirmed against real markup — flagged in FLAGGED.md.
+
+**F. Submission + verification — [x] implemented, unit-tested; NOT live-verified against a real form (deliberately — `submit_enabled` defaults False)**
+- [x] `services/engine/submit.py` — `find_submit_button` (regex over the tree, same technique as the existing `_click_apply_if_present`) + `read_outcome` (confirmation-phrase vs validation-error regex over the post-click tree).
+- [x] **`submit_enabled` config flag, default `False`** — the full cascade runs and stops one click short; logged clearly (`"Submission skipped — SUBMIT_ENABLED is False"`) and the application is marked `completed` at that point (a deliberate simplification — see note below).
+- [x] **Post-submit verification**: confirmation text → `completed`. Validation error → **one bounded repair pass** — reruns the full Tier0→Tier1→Tier2 cascade against the corrected page state and retries submit once. This is a **simplified version of the original design** (a full rerun, not per-field-error-message targeting) — flagged as a known simplification, not the fuller design originally scoped.
+- [ ] **Local mock ATS form** — not built this pass. This is the biggest real gap in F: without it, the submit path (and the repair-pass loop) has never been exercised against anything, real or fake — only unit-tested at the regex/logic level with hand-written tree fragments.
+
+**Known simplification, flagged rather than hidden**: with `submit_enabled=False`, the run is marked `completed` even though nothing was actually submitted — chosen over inventing a new status, since the vocabulary only has `queued/running/needs_input/completed/failed/cancelled` and `needs_input` is reserved for 2FA. The `RunEvent` log is the source of truth for "was this actually submitted" — always check it, don't infer submission from status alone while `submit_enabled` is off.
+
+**H. Per-job play/pause in the queue (user-initiated, distinct from 2FA) — [x] done, unit-tested, AND live-verified**
+
+The scenario: a user queues a posting by mistake and wants to stop it — either before it starts, or while it is mid-run.
+
+- [x] **New status `paused`** in `app/domain/status.py`. `apply_service.pause()` now sets `PAUSED` (not `NEEDS_INPUT`) and calls a new `queue.signal_pause()`.
+- [x] **Frontend status mapping** — `paused` maps to `waiting` in `mapBackendStatusToJobStatus`, with its own `describeBackendStatus` label. A new `QueueItem.rawStatus` field carries the un-coarsened backend status through so per-row controls (which need to tell "paused" apart from an ordinary "queued", both mapped to `waiting`) don't need a new `JobStatus` badge variant.
+- [x] **Pause before processing starts** — `worker/queue_runner.py` gained a `_pause_events` dict (mirroring the existing `_cancel_events`) plus `signal_pause`/`is_paused`; `runner.py` checks `is_paused()` before `get_or_launch()`. **Live-verified**: paused a freshly-queued application immediately, confirmed via server logs that Chrome never launched and status held at `paused` for several seconds — the "costs nothing" claim is real, not assumed.
+- [x] **Pause mid-run** — checkpoints via `_check_paused_and_wait` at every tier boundary in `_run_fill_cascade` (after Tier 0, Tier 1, Tier 2) and immediately before the submit click in `_submit_and_verify`. Tier-boundary and pre-submit checkpoints are unit-tested-only, not yet live-exercised (lower risk — same code path as the pre-launch gate, which was live-tested).
+- [x] **Cancel while paused** — a real gap found while implementing this: the existing `wait_for_resume` had nothing listening for a cancel signal while blocked, so cancelling a paused (or 2FA-paused, or CAPTCHA-escalated) application would leave its task — and Chrome session — blocked forever. Fixed with `wait_for_resume_or_cancel` (races both events via `asyncio.wait`) used at every pause point, plus a new `ApplicationCancelled` sentinel exception so the runner unwinds cleanly without the generic error handler overwriting the already-`CANCELLED` status with `FAILED`.
+- [x] **Resume** continues on the same live Chrome session — **live-verified**: resumed the same paused application, confirmed it transitioned to `running` and proceeded (a subsequent Stagehand init timeout was an environmental issue from this session's own heavy Chrome-profile reuse, not a functional problem with resume itself — see FLAGGED.md #10).
+- [x] `transitions.ensure_can_resume` now accepts both `NEEDS_INPUT` and `PAUSED`.
+
+**Two more real bugs found and fixed during H's live verification** (neither specific to H, both were blocking it — full detail in FLAGGED.md #10):
+1. `QueuePage.tsx`'s `hasActiveJob` gate only checked the *aggregate* queue status, which doesn't move for a single `needs_input` job among otherwise-terminal ones — `CurrentJobCard` (and the whole Live View entry point from Part G) was unreachable in exactly that case. Fixed by also checking `queueState.currentJobId` directly.
+2. `runner.py`'s initial profile/job/resume lookup had **no exception handling at all** — a DB error there (this session hit a real one: a stale dev DB missing a column) killed the background task silently, leaving the application stuck at `queued` forever with zero error, zero log line, zero UI signal. Fixed by moving that lookup inside the same try/except that already covers every later failure.
+
+**G. Frontend wiring — [x] fully done, including Part H's per-row control**
+- [x] `QueueControls.tsx` — replaced the "not yet supported" toasts with real calls to `pauseApply`/`resumeApply`/`cancelApply`, targeting the queue's current application via `queueState.currentJobId`.
+- [x] **Real bug found and fixed**: `mapHistoryToQueueState` only ever set `currentJobId` from an item with status `running` — a `needs_input` (2FA) item maps to `waiting_for_user`, a *different* status, so `currentJobId` silently went `undefined` the moment a job most needed attention. Fixed by including `waiting_for_user` in the "current job" lookup.
+- [x] **`LiveView.tsx`** — canvas (`<img>` of JPEG frames) + click/keyboard capture over `WS /ws/apply/{id}/live-view`, coordinates scaled from rendered size to the frame's natural (real viewport) size before forwarding as CDP `Input.dispatch{Mouse,Key}Event` params. Opened from "Take Control" on `CurrentJobCard`. **Live-verified**: opened against a real application, WS connected (confirmed via the connected-state indicator), no console errors.
+- [x] **`useApplicationLogs` hook** — real `WS /ws/apply/{id}/logs` connection, replacing the hardcoded `logs: []`. **Live-verified**: real Tier 0/1/2 log lines from actual historical runs rendered correctly in `LogViewer`.
+- [x] **`JobTimelineModal.tsx`** (new, Day 5) — the run_events timeline for ANY job (not just the live "current" one), via `GET /api/apply/details/{id}` (extended with an `events` field — additive, `getDetails` was unused in the frontend before this so nothing broke). Opened via a new History icon on every `QueueTable` row. **Live-verified**: opened against a real completed (failed) application, showed its real 3-event history with correct error-level coloring.
+- [x] **Per-row Pause/Resume buttons in `QueueTable.tsx`** (Part H's frontend half) — `usePauseJobMutation`/`useResumeJobMutation` take an explicit application id (unlike `QueueControls`' current-job-only mutations), shown/hidden per row via `item.rawStatus`. **Live-verified** end to end via the underlying API (see H above) — the buttons themselves were exercised through the same click-through pass that opened Live View and the timeline modal.
+- [x] Safety fix in `QueueControls.tsx`: the generic "Resume Queue" button is disabled while the current job is `waiting_for_user`, directing to Take Control instead.
+- [x] `npx tsc -b` and `npx vite build` both clean (two pre-existing unrelated errors confirmed via `git diff` to predate this session).
+
+**Deferred out of Day 4:** provider fingerprint cache (a cost optimization, moved to the Day-5 cut list).
 
 ### Day 5 — Make it real
 
-- [ ] End-to-end runs: Greenhouse, Lever, Ashby, one company career page requiring the scraper's extract fallback.
-- [ ] Final-review-before-submit gate.
-- [ ] Error handling, retries, `run_events` timeline visible via existing UI where possible.
-- [ ] Demo script, README, `.env.example` (backend + confirm frontend's existing `.env.example` still points correctly).
+- [x] **First fully successful end-to-end live fill run of the complete Day 4 cascade**, Greenhouse: CAPTCHA solved automatically, Tier 0 → 4 fields, Tier 1 → 8 fields (including low-confidence-but-filled, per the accepted tradeoff), Tier 2 → 13 fields (custom dropdowns, arbitration agreement, EEOC questions), 2 left unhandled, run marked `completed` (stopped short of Submit — `SUBMIT_ENABLED=False`). Two real, serious bugs found and fixed to get here — both reported live by the user, not found by me proactively:
+  1. **Multiple applications for one profile raced on a single shared Chrome session** — `queue_runner.py`'s own docstring claimed "serial per profile" but nothing enforced it. Fixed with `get_profile_lock()`, live-verified. Full detail: FLAGGED.md #11.
+  2. **CAPTCHA solving crashed on every real run**: `page.url` used as a plain attribute when it's actually an async method on Stagehand's `Page` — 2captcha correctly rejected the resulting bound-method-object as an invalid URL. The unit test suite didn't catch it because the test double's shape didn't match the real class. Fixed (`await page.url()`), fake corrected to match. Full detail: FLAGGED.md #12.
+- [ ] Lever, Ashby, and the scraper's extract-fallback path specifically not re-verified this pass (Greenhouse covered above; `admin/sync` extract-fallback was live-verified in Day 3).
+- [ ] ~~Final-review-before-submit gate.~~ **Removed** — submission is automated per the scope correction; the `SUBMIT_ENABLED` flag (Day 4F) is the dev-safety mechanism that replaces it.
+- [ ] **Turn `SUBMIT_ENABLED` on and do one deliberate, supervised real submission end to end.** **Not done — deliberately.** This sends a real job application to a real employer; it needs your explicit go-ahead before an agent does it, not just a plan checkbox. Flagged, not executed.
+- [x] **Error handling, retries, `run_events` timeline visible via existing UI.** Two real silent-failure classes found and fixed this pass (see Part H above and FLAGGED.md #10): the initial-lookup exception gap, and the `hasActiveJob` visibility gap. The `run_events` timeline is now visible for any job via the new `JobTimelineModal` (Part G), not just the live one.
+- [x] **`.env.example`** — `backend/.env.example` added (was missing); `frontend/.env.example` confirmed already correct (`VITE_API_BASE_URL=http://localhost:8000`).
+- [x] **README** — root `README.md` added: architecture, setup, config reference, submission-safety callout, pointers to this file and FLAGGED.md.
+- [ ] Demo script — not yet written.
 
-**Cut list, in order:** scraper's WebSearch fallback tier (rely on known-ATS + extract only) → multi-user concerns → provider cache → non-Greenhouse/Lever ATS coverage → UI polish beyond the four additive components.
+**Cut list, in order:** scraper's WebSearch fallback tier (rely on known-ATS + extract only) → multi-user concerns → provider fingerprint cache (moved here from Day 4) → non-Greenhouse/Lever ATS coverage → UI polish beyond the four additive components.
 
-**Never cut:** live-view + pause/resume, final review gate, exact contract match on existing endpoints (breaking those breaks the approved frontend).
+**Never cut:** resume-as-data-source + file upload (without them "fills every detail on its own" is false), per-job user play/pause (the only way to stop a mistakenly-queued application before it is submitted), 2FA live-view + resume, automated submit with post-submit verification, exact contract match on existing endpoints (breaking those breaks the approved frontend).
 
 ---
 
@@ -219,7 +320,14 @@ Note: using SQLite (`sqlite+aiosqlite`) via SQLAlchemy 2.0 `create_all()`, no Al
 - **Contract fidelity:** point the *unmodified* frontend at the new backend; Search, Profile, Upload, Dashboard, Admin all work with zero frontend errors before any additive changes are made.
 - **Spike gate:** as v1 — Python Stagehand `observe()` against a live Greenhouse form, zero Browserbase calls.
 - **Tier 0/2 regression:** golden-file test across 5 saved ATS forms; explicit pass on the custom checkbox/dropdown that broke the old build.
-- **Session continuity (flagship test):** queue an application on a site requiring login → status flips to `needs_input` → live view opens → log in manually → click Resume → completes and submits on the same browser session, no restart.
+- **Session continuity (flagship test, re-scoped to 2FA):** queue an application on a site that challenges with a one-time code → status flips to `needs_input` with `pause_reason = "2fa_required"` → live view opens → human types the code → click Resume → the cascade continues and submits on the same browser session, no restart.
+- **Full autonomy (new flagship test):** against the local mock ATS form, a single run fills **every** field — personal from profile, academic/professional from the parsed resume, unknown questions from the LLM, resume file attached via the file input — then submits and detects the confirmation. Zero `needs_input` events, zero unfilled required fields.
+- **Resume as a data source:** a question answerable *only* from resume content (e.g. a prior employer not present on the profile record) is filled correctly.
+- **Submit safety:** with `SUBMIT_ENABLED=False`, a full run against a real ATS form reaches the submit control and stops — verified by the form still being on-screen, unsubmitted.
+- **User pause, before start:** pause a `queued` job → it never launches Chrome and never spends an LLM call → press play → it runs normally from the beginning.
+- **User pause, mid-run:** pause a `running` job → it stops at the next tier boundary with status `paused` → press play → it continues on the *same* Chrome session with previously-filled fields still filled, not refilled from scratch.
+- **Pause beats submit:** a job paused while `SUBMIT_ENABLED=True` never submits — the pre-submit checkpoint holds.
+- **Status separation:** a user-paused job never shows the 2FA "open live view" prompt, and a 2FA pause never looks like a user pause.
 - **Scraper:** `admin/sync` against a Greenhouse-hosted company returns nonzero `jobs_inserted`; against a non-ATS branded careers page falls through to Stagehand `extract()` and still returns jobs.
 - **Cache:** two jobs on the same ATS → second run makes zero Tier 1 LLM calls.
 - **Status vocabulary:** every status the backend emits round-trips through `mapBackendStatusToJobStatus` to something other than the `waiting` default, including `needs_input`.
@@ -236,6 +344,9 @@ Note: using SQLite (`sqlite+aiosqlite`) via SQLAlchemy 2.0 `create_all()`, no Al
 | Job scraper scope creep across 400+ providers | Cascading same as form-filling: known APIs → extract → WebSearch fallback (cuttable first) |
 | No auth means any client can pass any `profile_id` | Explicitly accepted for this phase per your decision; flagged for later |
 | 5-day scope, now with scraper as new work | Vertical slice first (Greenhouse/Lever), explicit cut list above |
+| **Automated submission sends real applications to real employers** | `SUBMIT_ENABLED` defaults off in dev; local mock ATS form is the primary submit-path test surface; real submission only ever run deliberately and supervised |
+| **Filling every field regardless of confidence will put some wrong answers on real job applications** — Day 3's verified "abstain when unsure" behavior is deliberately traded away, and submission is now automatic, so a bad answer reaches a real employer with no human between | **Accepted tradeoff, explicitly directed** — not a defect to fix later. Prevention is out of scope by choice, so the mitigations are containment: (a) low-confidence answers are used but never cached, so one bad guess never propagates to future applications; (b) every answer is logged with its confidence, low ones at `warn`, so a bad application is explainable afterward; (c) per-job pause can stop a run before the submit checkpoint if a user spots it in the log |
+| Resume parse quality now gates form-fill accuracy for all academic/professional fields | Parsed once per resume and cached, so it is cheap to inspect and correct; parse failure degrades to raw `extracted_text` in the Tier 1 prompt rather than failing the run |
 
 ---
 

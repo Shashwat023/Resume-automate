@@ -5,6 +5,7 @@ import type { QueueStateResponse, QueueItem, JobStatus, QueueStatus } from '../t
 // Shape returned by GET /api/apply/history/{profile_id}
 interface BackendApplyHistoryItem {
   application_id: string;
+  job_id: number;
   company_name: string | null;
   job_title: string | null;
   status: string; // 'pending' | 'running' | 'completed' | 'failed' etc.
@@ -18,6 +19,12 @@ function mapBackendStatusToJobStatus(status: string): JobStatus {
     case 'pending':
     case 'checking_url':
     case 'rescraped_retry_queued':
+    case 'paused':
+      // Day 4 Part H: maps to the existing 'waiting' variant rather than a
+      // new JobStatus member, keeping the badge enum and approved visual
+      // language untouched — the distinct label below carries the meaning.
+      // Per-row controls that need to tell "paused" apart from an ordinary
+      // queued job use QueueItem.rawStatus, not this coarser mapping.
       return 'waiting';
     case 'link_expired_rescraping':
     case 'running':
@@ -55,6 +62,8 @@ export function describeBackendStatus(status: string): string {
       return 'Applying...';
     case 'needs_input':
       return 'Waiting for you — open live view';
+    case 'paused':
+      return 'Paused — press play to continue';
     case 'completed':
       return 'Completed';
     case 'failed':
@@ -74,10 +83,15 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
 
     return {
       id: h.application_id,
-      jobId: h.application_id,
+      // The REAL numeric job id (not the application UUID) — Retry needs
+      // this to call POST /api/apply/start again. Was previously aliased
+      // to h.application_id, so Retry sent Number(uuid) -> NaN -> a 422
+      // from the backend every time it was clicked.
+      jobId: String(h.job_id),
       jobTitle: h.job_title ?? 'Unknown role',
       company: h.company_name ?? 'Unknown company',
       status,
+      rawStatus: h.status,
       statusLabel: describeBackendStatus(h.status),
       attempts: 1,
       addedAt: h.started_at ?? new Date().toISOString(),
@@ -89,8 +103,12 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
 
   const total = items.length;
   const completed = items.filter((i) => i.status === 'completed' || i.status === 'failed').length;
-  const running = items.find((i) => i.status === 'running');
-  const hasRunning = !!running;
+  // "Current" job includes waiting_for_user (needs_input/2FA) — it's still
+  // the job actively being worked, just blocked on the user. Excluding it
+  // here would hide CurrentJobCard (and the live-view entry point) at
+  // exactly the moment the user most needs to see it.
+  const running = items.find((i) => i.status === 'running' || i.status === 'waiting_for_user');
+  const hasRunning = running?.status === 'running';
   const hasWaiting = items.some((i) => i.status === 'waiting');
 
   let overallStatus: QueueStatus = 'idle';
@@ -131,6 +149,28 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
   };
 }
 
+// Shape returned by GET /api/apply/details/{id} — includes the full
+// run_events timeline (Day 5), so what happened on a job is inspectable
+// after the fact, not just while it's the live "current" one.
+export interface BackendRunEvent {
+  id: number;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  tier: string | null;
+  created_at: string;
+}
+
+export interface BackendApplyDetails {
+  application_id: string;
+  profile: Record<string, unknown>;
+  job: Record<string, unknown>;
+  status: string;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  events: BackendRunEvent[];
+}
+
 export const queueApi = {
   startApply: (profileId: number, jobId: number) =>
     api.post('/api/apply/start', { profile_id: profileId, job_id: jobId }),
@@ -138,8 +178,17 @@ export const queueApi = {
   getApplyStatus: (applicationId: string) =>
     api.get(`/api/apply/status/${applicationId}`),
 
-  getDetails: (applicationId: string) =>
+  getDetails: (applicationId: string): Promise<BackendApplyDetails> =>
     api.get(`/api/apply/details/${applicationId}`),
+
+  pauseApply: (applicationId: string) =>
+    api.post(`/api/apply/${applicationId}/pause`),
+
+  resumeApply: (applicationId: string) =>
+    api.post(`/api/apply/${applicationId}/resume`),
+
+  cancelApply: (applicationId: string) =>
+    api.post(`/api/apply/${applicationId}/cancel`),
 
   createQueue: async (payload: {
     jobs: { id: string; title: string; company_name: string; apply_url: string }[];

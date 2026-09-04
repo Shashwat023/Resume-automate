@@ -13,6 +13,12 @@ export const QueueControls = () => {
   const cancelMutation = useCancelQueueMutation();
 
   const status = queueState?.status || 'idle';
+  const currentJob = queueState?.items.find((i) => i.id === queueState.currentJobId);
+  // needs_input (2FA) must never be resumed blindly from here — resuming
+  // without actually completing 2FA in the live view just re-hits the same
+  // prompt. CurrentJobCard's "Take Control" button is the only correct
+  // entry point for that case; this button stays disabled until then.
+  const needsInput = currentJob?.status === 'waiting_for_user';
 
   const handleExport = () => {
     if (!queueState?.items) return;
@@ -54,10 +60,13 @@ export const QueueControls = () => {
       ) : (
         <button
           onClick={() => resumeMutation.mutate()}
-          disabled={resumeMutation.isPending || status === 'completed' || status === 'cancelled'}
+          disabled={
+            resumeMutation.isPending || status === 'completed' || status === 'cancelled' || needsInput
+          }
+          title={needsInput ? 'Use "Take Control" above to complete 2FA first' : undefined}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg font-medium text-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
         >
-          <Play className="w-4 h-4" /> Resume Queue
+          <Play className="w-4 h-4" /> {needsInput ? 'Waiting for you...' : 'Resume Queue'}
         </button>
       )}
 

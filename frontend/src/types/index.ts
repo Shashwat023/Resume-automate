@@ -45,6 +45,13 @@ export interface QueueItem {
   company_url?: string;
   ats?: string;
   status: JobStatus;
+  // The raw backend status string (e.g. 'paused', 'queued', 'running'),
+  // kept alongside the coarser `status` (JobStatus) enum for cases that
+  // need a finer distinction than the UI's badge vocabulary carries —
+  // e.g. per-row pause/resume needs to tell 'paused' apart from an
+  // ordinary 'queued' job, even though both map to JobStatus 'waiting'.
+  rawStatus?: string;
+  statusLabel?: string;
   attempts: number;
   addedAt: string;
   startedAt?: string;

@@ -213,12 +213,12 @@ export const AdminPage = () => {
                       )}
                     </td>
                     <td className="px-6 py-4">
-                      
+                      <a
                         href={r.company_url}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-indigo-600 dark:text-indigo-400 hover:underline truncate max-w-xs block"
-                      <a>
+                      >
                         {r.company_url}
                       </a>
                     </td>
