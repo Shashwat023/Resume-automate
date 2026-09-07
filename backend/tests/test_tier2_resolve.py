@@ -7,6 +7,11 @@ from app.services.engine.tier2_resolve import build_instruction, resolve_and_exe
 @dataclass
 class FakeAction:
     selector: str = "//div[1]"
+    # Action.description is a required field on the real Stagehand model;
+    # kept here to match that shape even though nothing in this module
+    # currently reads it (a pre-act check that did was tried and reverted
+    # — see tier2_resolve.py's comment above _OPTION_RENDER_POLL_INTERVAL_MS).
+    description: str = ""
 
 
 @dataclass
@@ -67,12 +72,24 @@ class FakeSendClickEventLocator:
 
 
 class FakePage:
-    def __init__(self, send_click_event_should_fail: bool = False):
+    def __init__(
+        self,
+        send_click_event_should_fail: bool = False,
+        rendered_option_count: int = 1,
+    ):
         self.send_click_event_calls: list[str] = []
         self.send_click_event_should_fail = send_click_event_should_fail
+        # _wait_for_options_to_render polls this via page.evaluate() —
+        # non-zero means "options already rendered", so the poll exits on
+        # its first check and doesn't burn through its bounded loop in
+        # every single test.
+        self._rendered_option_count = rendered_option_count
 
     async def wait_for_timeout(self, ms):
         pass
+
+    async def evaluate(self, expression):
+        return self._rendered_option_count
 
     def locator(self, selector):
         return FakeSendClickEventLocator(self, selector)
@@ -226,7 +243,10 @@ async def test_combobox_description_naming_the_real_value_is_resolved():
         ],
     )
     field = FormField(
-        node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None
+        node_id="1",
+        role="combobox",
+        label="Do you require visa sponsorship?",
+        xpath=None,
     )
 
     result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "No")])
@@ -257,7 +277,10 @@ async def test_ordinary_phrase_containing_the_word_select_is_not_a_false_positiv
         ],
     )
     field = FormField(
-        node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None
+        node_id="1",
+        role="combobox",
+        label="Do you require visa sponsorship?",
+        xpath=None,
     )
 
     result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "No")])
@@ -294,8 +317,10 @@ async def test_combobox_opens_but_no_matching_option_found_even_after_fallback()
         observe_results=[
             FakeObserveResult(data=[open_action]),
             FakeObserveResult(data=[]),  # exact-value select observe() finds nothing
+            FakeObserveResult(
+                data=[]
+            ),  # typeahead recovery's own type-target observe() ALSO finds nothing
             FakeObserveResult(data=[]),  # closest-match fallback ALSO finds nothing
-            FakeObserveResult(data=[]),  # typeahead recovery's own type-target observe() ALSO finds nothing
         ],
         act_results=[FakeActResult(data=FakeActResultData(success=True))],
     )
@@ -306,9 +331,9 @@ async def test_combobox_opens_but_no_matching_option_found_even_after_fallback()
     )
 
     assert result.resolved == []
-    assert "no option matching" in result.errored[0][1]
-    assert "fallback" in result.errored[0][1]
-    assert "typeahead" in result.errored[0][1]
+    assert "no working strategy" in result.errored[0][1]
+    assert "typing into the field" in result.errored[0][1]
+    assert "closest-match fallback" in result.errored[0][1]
     assert len(sh.observe_calls) == 4
     assert len(sh.act_calls) == 1  # only the open-step act() ran
 
@@ -316,10 +341,11 @@ async def test_combobox_opens_but_no_matching_option_found_even_after_fallback()
 async def test_combobox_typeahead_recovery_finds_the_option_after_typing():
     # Real, live-caught bug: Figma's Greenhouse "Location (City)" field is
     # a TYPEAHEAD-filtered combobox — its option list is only populated
-    # once something is typed, so an exact AND closest-match select
-    # attempt against the just-opened, still-empty list both legitimately
-    # find nothing. Typing the value first, then retrying the select,
-    # should recover an option that genuinely exists once filtered in.
+    # once something is typed, so an exact-match select attempt against
+    # the just-opened, still-empty list legitimately finds nothing. Typing
+    # the value first — tried BEFORE the closest-match fallback, since a
+    # typeahead field was never going to show any options without typing
+    # regardless of wording — then re-selecting recovers the real option.
     open_action = FakeAction(selector="//div[@class='toggle']")
     type_action = FakeAction(selector="//input[@class='city-search']")
     select_action = FakeAction(selector="//li[@data-city='bangalore']")
@@ -327,7 +353,6 @@ async def test_combobox_typeahead_recovery_finds_the_option_after_typing():
         observe_results=[
             FakeObserveResult(data=[open_action]),
             FakeObserveResult(data=[]),  # exact-value select finds nothing (empty list)
-            FakeObserveResult(data=[]),  # closest-match fallback ALSO finds nothing
             FakeObserveResult(data=[type_action]),  # typeahead recovery finds the input
             FakeObserveResult(data=[select_action]),  # re-select after typing succeeds
         ],
@@ -341,16 +366,16 @@ async def test_combobox_typeahead_recovery_finds_the_option_after_typing():
             ),
         ],
     )
-    field = FormField(
-        node_id="1", role="combobox", label="Location (City)", xpath=None
-    )
+    field = FormField(node_id="1", role="combobox", label="Location (City)", xpath=None)
 
     result = await resolve_and_execute(
         sh, page=FakePage(), fields=[(field, "Bangalore")]
     )
 
     assert result.resolved == [("Location (City)", "Selected 'Bangalore'")]
-    assert len(sh.observe_calls) == 5
+    # The closest-match fallback must never even be attempted once typing
+    # recovered a real option — only 4 observe calls, not 5.
+    assert len(sh.observe_calls) == 4
     assert len(sh.act_calls) == 3
     assert sh.act_calls[1][0] is type_action
     assert sh.act_calls[2][0] is select_action
@@ -359,15 +384,17 @@ async def test_combobox_typeahead_recovery_finds_the_option_after_typing():
 async def test_combobox_falls_back_to_closest_match_when_exact_wording_not_found():
     # The real bug this fixes: Tier 1 decides "1-2 years" before the
     # dropdown is ever opened, but the ATS's real option reads "Less than 5
-    # years" — an exact-wording instruction finds nothing. The fallback
-    # instruction, with no literal value to match against, should still
-    # find and click SOME option.
+    # years" — an exact-wording instruction finds nothing. Typing is tried
+    # first (it's an ordinary combobox, not typeahead, so it finds no
+    # search input and comes up empty too) before the closest-match
+    # fallback, which should still find and click SOME option.
     open_action = FakeAction(selector="//div[@class='toggle']")
     fallback_action = FakeAction(selector="//div[@class='closest-option']")
     sh = FakeStagehand(
         observe_results=[
             FakeObserveResult(data=[open_action]),
             FakeObserveResult(data=[]),  # exact-value select observe() finds nothing
+            FakeObserveResult(data=[]),  # typeahead's type-target observe() finds nothing
             FakeObserveResult(data=[fallback_action]),  # fallback finds one
         ],
         act_results=[
@@ -391,7 +418,7 @@ async def test_combobox_falls_back_to_closest_match_when_exact_wording_not_found
     )
 
     assert result.resolved == [("Years of experience", "Selected 'Less than 5 years'")]
-    assert len(sh.observe_calls) == 3
+    assert len(sh.observe_calls) == 4
     # The fallback observe()'s result must be what gets act()-ed on.
     assert sh.act_calls[1][0] is fallback_action
 
@@ -448,7 +475,9 @@ async def test_multiple_fields_processed_independently():
     # Error text carries the exception TYPE too — a TimeoutError's str() is
     # empty, so without the type name a real timeout logs as
     # "observe() failed: " with nothing after it (see _describe).
-    assert result.errored == [("Field A", "observe() failed: RuntimeError: network blip")]
+    assert result.errored == [
+        ("Field A", "observe() failed: RuntimeError: network blip")
+    ]
     assert result.resolved == [("Field B", "Selected 'Yes'")]
 
 
@@ -484,7 +513,9 @@ def test_combobox_instruction_names_dropdown_and_target_value():
     assert "No" in instruction
 
 
-async def test_observe_that_never_returns_times_out_instead_of_hanging_forever(monkeypatch):
+async def test_observe_that_never_returns_times_out_instead_of_hanging_forever(
+    monkeypatch,
+):
     # The actual bug this fixes: a real run hung indefinitely on a single
     # field (no exception, no log line) after a CDP-level error on the
     # previous action. Nothing bounded how long observe()/act() could take.
@@ -496,7 +527,9 @@ async def test_observe_that_never_returns_times_out_instead_of_hanging_forever(m
 
     class HangingStagehand:
         async def observe(self, instruction, *, page=None):
-            await asyncio.sleep(10)  # would hang the whole test suite without the timeout
+            await asyncio.sleep(
+                10
+            )  # would hang the whole test suite without the timeout
             return FakeObserveResult(data=[FakeAction()])
 
     field = FormField(node_id="1", role="checkbox", label="I agree", xpath=None)
@@ -572,7 +605,10 @@ async def test_a_genuine_selection_description_is_still_accepted():
         ],
     )
     field = FormField(
-        node_id="1", role="combobox", label="Years of experience", xpath="//div[@id='y']"
+        node_id="1",
+        role="combobox",
+        label="Years of experience",
+        xpath="//div[@id='y']",
     )
 
     result = await resolve_and_execute(
@@ -602,15 +638,20 @@ async def test_transient_invalid_mouse_button_error_is_retried_once():
             FakeActResult(data=FakeActResultData(success=True)),  # open succeeds
             FakeActResult(
                 data=FakeActResultData(
-                    success=False, message="Failed to perform act: -32602 Invalid mouse button"
+                    success=False,
+                    message="Failed to perform act: -32602 Invalid mouse button",
                 )
             ),  # select fails transiently
             FakeActResult(
-                data=FakeActResultData(success=True, action_description="Selected 'India'")
+                data=FakeActResultData(
+                    success=True, action_description="Selected 'India'"
+                )
             ),  # select succeeds on retry
         ],
     )
-    field = FormField(node_id="1", role="combobox", label="Country", xpath="//div[@id='country']")
+    field = FormField(
+        node_id="1", role="combobox", label="Country", xpath="//div[@id='country']"
+    )
     # send_click_event fails here too, so this test exercises the FURTHER
     # fallback: a second plain act() retry (see
     # test_invalid_mouse_button_falls_back_to_send_click_event for the
@@ -658,7 +699,9 @@ async def test_a_non_transient_act_failure_is_not_retried():
     sh = FakeStagehand(
         observe_results=[FakeObserveResult(data=[action])],
         act_results=[
-            FakeActResult(data=FakeActResultData(success=False, message="element not visible")),
+            FakeActResult(
+                data=FakeActResultData(success=False, message="element not visible")
+            ),
         ],
     )
     field = FormField(node_id="1", role="checkbox", label="I agree", xpath=None)
@@ -682,7 +725,8 @@ async def test_invalid_mouse_button_falls_back_to_send_click_event():
         act_results=[
             FakeActResult(
                 data=FakeActResultData(
-                    success=False, message="Failed to perform act: -32602 Invalid mouse button"
+                    success=False,
+                    message="Failed to perform act: -32602 Invalid mouse button",
                 )
             ),
         ],
@@ -700,7 +744,9 @@ async def test_invalid_mouse_button_falls_back_to_send_click_event():
         )
     ]
     assert page.send_click_event_calls == ["//div[@id='country-option-india']"]
-    assert len(sh.act_calls) == 1  # send_click_event succeeded — no plain-act retry needed
+    assert (
+        len(sh.act_calls) == 1
+    )  # send_click_event succeeded — no plain-act retry needed
 
 
 async def test_send_click_event_failure_falls_through_to_plain_retry():
@@ -714,7 +760,9 @@ async def test_send_click_event_failure_falls_through_to_plain_retry():
                 )
             ),
             FakeActResult(
-                data=FakeActResultData(success=True, action_description="Checked the box")
+                data=FakeActResultData(
+                    success=True, action_description="Checked the box"
+                )
             ),
         ],
     )
@@ -725,7 +773,9 @@ async def test_send_click_event_failure_falls_through_to_plain_retry():
 
     assert result.resolved == [("I agree", "Checked the box")]
     assert page.send_click_event_calls == ["//div[1]"]
-    assert len(sh.act_calls) == 2  # original + plain retry, after send_click_event also failed
+    assert (
+        len(sh.act_calls) == 2
+    )  # original + plain retry, after send_click_event also failed
 
 
 async def test_select_step_describing_a_toggle_reopen_is_not_reported_as_resolved():
@@ -758,7 +808,10 @@ async def test_select_step_describing_a_toggle_reopen_is_not_reported_as_resolve
         ],
     )
     field = FormField(
-        node_id="1", role="combobox", label="Please read the arbitration agreement below", xpath=None
+        node_id="1",
+        role="combobox",
+        label="Please read the arbitration agreement below",
+        xpath=None,
     )
 
     result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "I agree")])
@@ -791,7 +844,12 @@ async def test_genuine_open_dropdown_phrasing_in_a_select_description_still_pass
             ),
         ],
     )
-    field = FormField(node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None)
+    field = FormField(
+        node_id="1",
+        role="combobox",
+        label="Do you require visa sponsorship?",
+        xpath=None,
+    )
 
     result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "No")])
 
@@ -835,7 +893,9 @@ async def test_closest_match_fallback_explaining_its_own_reasoning_is_still_reso
         xpath="//div[@id='years']",
     )
 
-    result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "1-2 years")])
+    result = await resolve_and_execute(
+        sh, page=FakePage(), fields=[(field, "1-2 years")]
+    )
 
     assert result.errored == []
     assert len(result.resolved) == 1
@@ -866,9 +926,13 @@ async def test_select_step_describing_open_it_and_see_options_is_not_reported_as
             ),
         ],
     )
-    field = FormField(node_id="1", role="combobox", label="Agreement to Arbitrate", xpath=None)
+    field = FormField(
+        node_id="1", role="combobox", label="Agreement to Arbitrate", xpath=None
+    )
 
-    result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "I agree to arbitrate")])
+    result = await resolve_and_execute(
+        sh, page=FakePage(), fields=[(field, "I agree to arbitrate")]
+    )
 
     assert result.resolved == []
     assert len(result.errored) == 1
@@ -906,7 +970,9 @@ async def test_select_step_describing_generic_keyboard_instructions_is_not_repor
     )
     field = FormField(node_id="1", role="combobox", label="Location (City)", xpath=None)
 
-    result = await resolve_and_execute(sh, page=FakePage(), fields=[(field, "Bangalore")])
+    result = await resolve_and_execute(
+        sh, page=FakePage(), fields=[(field, "Bangalore")]
+    )
 
     assert result.resolved == []
     assert len(result.errored) == 1
@@ -946,3 +1012,63 @@ async def test_closest_match_description_mentioning_keyboard_navigation_still_pa
 
     assert result.errored == []
     assert len(result.resolved) == 1
+
+
+# Pre-act description-verification tests were here (checking observe()'s
+# returned Action against the intended value before acting) — REMOVED
+# after live-testing proved the mechanism a net-negative regression: see
+# tier2_resolve.py's comment above _OPTION_RENDER_POLL_INTERVAL_MS for the
+# full story (it broke Veteran Status, Disability Status, and Location
+# (City) — three previously-working fields — by rejecting correct
+# EEOC-paraphrase selections as if they were wrong-entity matches).
+
+
+# ---- render-poll replacing the fixed wait ----
+
+
+async def test_render_poll_exits_immediately_once_options_are_present():
+    open_action = FakeAction(selector="//div[@class='toggle']")
+    select_action = FakeAction(selector="//div[@class='option']")
+    sh = FakeStagehand(
+        observe_results=[
+            FakeObserveResult(data=[open_action]),
+            FakeObserveResult(data=[select_action]),
+        ],
+        act_results=[
+            FakeActResult(data=FakeActResultData(success=True)),
+            FakeActResult(data=FakeActResultData(success=True, action_description="Selected 'No'")),
+        ],
+    )
+    field = FormField(node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None)
+    page = FakePage(rendered_option_count=3)  # options already present
+
+    result = await resolve_and_execute(sh, page=page, fields=[(field, "No")])
+
+    assert result.resolved == [("Do you require visa sponsorship?", "Selected 'No'")]
+
+
+async def test_render_poll_gives_up_after_its_bound_if_nothing_ever_renders(monkeypatch):
+    from app.services.engine import tier2_resolve
+
+    monkeypatch.setattr(tier2_resolve, "_OPTION_RENDER_POLL_MAX_MS", 0)
+
+    open_action = FakeAction(selector="//div[@class='toggle']")
+    select_action = FakeAction(selector="//div[@class='option']")
+    sh = FakeStagehand(
+        observe_results=[
+            FakeObserveResult(data=[open_action]),
+            FakeObserveResult(data=[select_action]),
+        ],
+        act_results=[
+            FakeActResult(data=FakeActResultData(success=True)),
+            FakeActResult(data=FakeActResultData(success=True, action_description="Selected 'No'")),
+        ],
+    )
+    field = FormField(node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None)
+    page = FakePage(rendered_option_count=0)  # options never render
+
+    # Must still proceed to the select step (best-effort poll, not a hang)
+    # even though options never appeared to the poll's own check.
+    result = await resolve_and_execute(sh, page=page, fields=[(field, "No")])
+
+    assert result.resolved == [("Do you require visa sponsorship?", "Selected 'No'")]

@@ -201,6 +201,57 @@ _GENERIC_INSTRUCTIONS_NOT_SELECTION = re.compile(
     re.I,
 )
 
+# A pre-act check that blocked/retried whenever the returned Action's own
+# description didn't literally quote the intended value was tried here and
+# REVERTED after live-testing proved it a net-negative regression: it was
+# meant to catch a genuinely wrong entity match (Tier 1 decided 'India',
+# observe() returned an Action describing 'Afghanistan +93'), but it fired
+# just as readily on EEOC-mandated fields — Tier 1 decides a short
+# paraphrase ("Not a veteran") while Greenhouse's real option is the full
+# compliance-mandated sentence ("I am not a protected veteran"), which will
+# NEVER contain that literal substring despite being the correct answer.
+# Confirmed live: this broke Veteran Status, Disability Status, and
+# Location (City) — all three previously-working fields — in a single
+# test run, forcing a retry that then asked for exact wording that doesn't
+# exist anywhere on the page and found nothing. The "closest reasonable
+# match" fallback a few lines below already exists specifically to allow
+# this kind of paraphrase — a pre-act literal-substring check can't tell
+# a wrong-entity match apart from a correctly-paraphrased one, so it isn't
+# worth the false positives. If a similar wrong-match bug recurs, a fix
+# needs a way to distinguish "different wording of the same answer" from
+# "a different answer entirely" — not attempted here.
+
+# Real, live-caught gap: a FIXED 400ms wait after opening a dropdown
+# doesn't adapt to how long the flyout actually takes to render its
+# options — too short under load (leaves the field blank, feeding the
+# exact non-determinism the description-verification above and the
+# closest-match/typeahead fallbacks all exist to route around), while
+# always paying the full 400ms even when options rendered in 50ms across
+# every one of the ~15 comboboxes on a real form. Poll for ANY
+# option-shaped element instead, bounded so a dropdown that genuinely has
+# nothing to show (or uses a selector shape this generic check misses)
+# doesn't hang — falls through to the observe() call regardless either way.
+_OPTION_RENDER_POLL_INTERVAL_MS = 150
+_OPTION_RENDER_POLL_MAX_MS = 3000
+_GENERIC_OPTION_SELECTOR = (
+    '[role="option"], li[role="option"], [role="listbox"] li, .pac-item'
+)
+
+
+async def _wait_for_options_to_render(page) -> None:
+    elapsed = 0
+    while elapsed < _OPTION_RENDER_POLL_MAX_MS:
+        try:
+            count = await page.evaluate(
+                f"document.querySelectorAll('{_GENERIC_OPTION_SELECTOR}').length"
+            )
+        except Exception:  # noqa: BLE001
+            return
+        if count:
+            return
+        await page.wait_for_timeout(_OPTION_RENDER_POLL_INTERVAL_MS)
+        elapsed += _OPTION_RENDER_POLL_INTERVAL_MS
+
 
 @dataclass
 class Tier2Result:
@@ -251,7 +302,9 @@ async def _resolve_single_step(sh: Stagehand, page, instruction: str) -> str:
     return act_result.data.action_description
 
 
-async def _type_then_reobserve_select(sh: Stagehand, page, field: FormField, value: str):
+async def _type_then_reobserve_select(
+    sh: Stagehand, page, field: FormField, value: str
+):
     """
     Last-resort recovery for a TYPEAHEAD-filtered combobox (a
     Google-Places-style city picker, confirmed live on Figma's Greenhouse
@@ -322,7 +375,7 @@ async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -
     if not open_result.data.success:
         return f"ERROR:failed to open dropdown: {open_result.data.message}"
 
-    await page.wait_for_timeout(400)  # let the flyout actually render its options
+    await _wait_for_options_to_render(page)
 
     select_instruction = f"Click the option '{value}' that is now visible in the open '{field.label}' dropdown"
     try:
@@ -330,7 +383,25 @@ async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -
     except Exception as exc:  # noqa: BLE001
         return f"ERROR:observe() (select step) failed: {_describe(exc)}"
 
+    tried_typeahead = False
     if not obs_select.data:
+        # Real, live-caught gap: a TYPEAHEAD-filtered combobox (a
+        # Google-Places-style city picker, confirmed live on Figma's
+        # Greenhouse "Location (City)" field) has an EMPTY option list
+        # until something is typed — an exact-match instruction against
+        # the just-opened, still-empty list finds nothing not because the
+        # value is a paraphrase, but because there was never anything to
+        # click in the first place. Tried BEFORE the closest-match
+        # fallback below (was the LAST resort until live-testing showed
+        # that order wastes a full round-trip guessing at options that
+        # don't exist yet, on a field that's typeahead-driven every time):
+        # if typing genuinely reveals matching options, that beats a
+        # "closest reasonable match" guess against a list this field was
+        # never going to show without typing.
+        tried_typeahead = True
+        obs_select = await _type_then_reobserve_select(sh, page, field, value)
+
+    if not obs_select or not obs_select.data:
         # Real, live-caught gap: Tier 1 decides a value BEFORE the dropdown
         # is ever opened (it has to — the real options aren't in the tree
         # until then, see tier0_harvest.py), so it's often a paraphrase —
@@ -347,27 +418,34 @@ async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -
             f"of the options actually shown, never leave the dropdown unset."
         )
         try:
-            obs_select = await _with_timeout(sh.observe(fallback_instruction, page=page))
+            obs_select = await _with_timeout(
+                sh.observe(fallback_instruction, page=page)
+            )
         except Exception as exc:  # noqa: BLE001
             return f"ERROR:observe() (fallback select step) failed: {_describe(exc)}"
 
         if not obs_select.data:
-            # Real, live-caught gap: BOTH exact and closest-match found
-            # ZERO options on every attempt for Figma's Greenhouse
-            # "Location (City)" field, across two full runs — because it's
-            # a TYPEAHEAD-filtered combobox (Google-Places-style): the
-            # option list is only populated once something is typed, so
-            # there was never anything to click in the first place. Last
-            # resort before giving up: type the value into the combobox's
-            # own input, then retry the select once more against whatever
-            # that filtering reveals.
-            obs_select = await _type_then_reobserve_select(sh, page, field, value)
-            if obs_select is None or not obs_select.data:
-                return (
-                    f"ERROR:dropdown opened but no option matching '{value}' "
-                    "was found (closest-match fallback and typeahead retry "
-                    "also found nothing)"
-                )
+            # Nothing worked: exact match, (if attempted) typing into the
+            # field, and the closest-match fallback all came up empty.
+            # Distinguished from a "found options but none matched"
+            # failure — this is Tier 2 having no strategy left for
+            # whatever this widget actually is, not a bad guess from
+            # Tier 1. `_escalate_unhandled_required_fields_if_any`
+            # (runner.py) is what actually stops a required field like
+            # this from silently submitting incomplete; an optional one
+            # is simply left blank, same as any other unresolved field.
+            attempted = (
+                "exact match, typing into the field, and the closest-match "
+                "fallback"
+                if tried_typeahead
+                else "exact match and the closest-match fallback"
+            )
+            return (
+                f"ERROR:no working strategy found '{value}' (or anything "
+                f"close to it) in the '{field.label}' dropdown after trying "
+                f"{attempted} — this widget may not match any pattern this "
+                f"tier knows how to drive"
+            )
 
     try:
         select_result = await _act_with_retry(sh, page, obs_select.data[0])
@@ -409,9 +487,9 @@ def _check_description_for_failure(field: FormField, description: str) -> str | 
          (never against the OPEN step's own description, where this
          language is expected and correct).
     """
-    if _NO_MATCH_PHRASES.search(description or "") and not _CLOSEST_MATCH_RESOLVED.search(
+    if _NO_MATCH_PHRASES.search(
         description or ""
-    ):
+    ) and not _CLOSEST_MATCH_RESOLVED.search(description or ""):
         return (
             f"selection reported success but its own description says no "
             f"matching option was found for '{field.label}': {description}"
