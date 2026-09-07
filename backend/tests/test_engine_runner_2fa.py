@@ -116,7 +116,9 @@ async def test_2fa_resumes_immediately_on_manual_resume(async_session, monkeypat
     assert page.snapshot_calls == 1
 
 
-async def test_2fa_cancellation_raises_application_cancelled(async_session, monkeypatch):
+async def test_2fa_cancellation_raises_application_cancelled(
+    async_session, monkeypatch
+):
     application = await _seed(async_session, monkeypatch)
     page = FakePage([_TWOFA_TREE])
 
@@ -255,8 +257,13 @@ async def test_submit_clicks_again_after_2fa_resolves_before_reading_outcome(
     monkeypatch.setattr(runner, "wait_for_resume_or_cancel", _fake_wait)
 
     result = await runner._submit_and_verify(
-        application.id, sh=None, page=page, profile_dict={}, profile_id=1,
-        resume_file_path=None, cascade=cascade,
+        application.id,
+        sh=None,
+        page=page,
+        profile_dict={},
+        profile_id=1,
+        resume_file_path=None,
+        cascade=cascade,
     )
 
     assert result.outcome == "completed"
@@ -288,8 +295,13 @@ async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
     monkeypatch.setattr(runner, "is_paused", lambda app_id: False)
 
     result = await runner._submit_and_verify(
-        application.id, sh=None, page=page, profile_dict={}, profile_id=1,
-        resume_file_path=None, cascade=cascade,
+        application.id,
+        sh=None,
+        page=page,
+        profile_dict={},
+        profile_id=1,
+        resume_file_path=None,
+        cascade=cascade,
     )
 
     assert result.outcome == "completed"
@@ -322,17 +334,27 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
 
     application = await _seed(async_session, monkeypatch)
     unresolved_field = FormField(
-        node_id="9", role="combobox", label="Location (City)", xpath=None, required=False
+        node_id="9",
+        role="combobox",
+        label="Location (City)",
+        xpath=None,
+        required=False,
     )
     cascade = FillCascadeResult(
         fields=[unresolved_field],
         tier0=HarvestResult(filled=[], unmatched=[], errored=[]),
         tier1=Tier1Result(
-            filled=[], from_library=[], for_tier2=[], low_confidence_filled=[],
-            unanswered=[], errored=[],
+            filled=[],
+            from_library=[],
+            for_tier2=[],
+            low_confidence_filled=[],
+            unanswered=[],
+            errored=[],
             usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         ),
-        tier2=Tier2Result(resolved=[], errored=[("Location (City)", "no working strategy")]),
+        tier2=Tier2Result(
+            resolved=[], errored=[("Location (City)", "no working strategy")]
+        ),
     )
 
     page = FakeSubmitPage(
@@ -354,7 +376,9 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
 
         return CaptchaOutcome(status="not_present")
 
-    async def _fake_repair(app_id, sh, page, profile_dict, profile_id, cascade, also_target=None):
+    async def _fake_repair(
+        app_id, sh, page, profile_dict, profile_id, cascade, also_target=None
+    ):
         return cascade  # no-op: nothing new gets resolved by repair either
 
     escalation_pauses: list[set] = []
@@ -375,8 +399,13 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
     monkeypatch.setattr(runner, "_escalate_unhandled_fields_if_any", _spying_escalate)
 
     result = await runner._submit_and_verify(
-        application.id, sh=None, page=page, profile_dict={}, profile_id=1,
-        resume_file_path=None, cascade=cascade,
+        application.id,
+        sh=None,
+        page=page,
+        profile_dict={},
+        profile_id=1,
+        resume_file_path=None,
+        cascade=cascade,
     )
 
     assert result.outcome == "completed"
@@ -413,7 +442,9 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
 
         return CaptchaOutcome(status="not_present")
 
-    async def _fake_repair(app_id, sh, page, profile_dict, profile_id, cascade, also_target=None):
+    async def _fake_repair(
+        app_id, sh, page, profile_dict, profile_id, cascade, also_target=None
+    ):
         return cascade
 
     async def _fake_wait(app_id, timeout=None):
@@ -425,8 +456,13 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
     monkeypatch.setattr(runner, "wait_for_resume_or_cancel", _fake_wait)
 
     result = await runner._submit_and_verify(
-        application.id, sh=None, page=page, profile_dict={}, profile_id=1,
-        resume_file_path=None, cascade=cascade,
+        application.id,
+        sh=None,
+        page=page,
+        profile_dict={},
+        profile_id=1,
+        resume_file_path=None,
+        cascade=cascade,
     )
 
     assert result.outcome == "validation_error"

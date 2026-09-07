@@ -299,7 +299,10 @@ async def get_or_launch(profile_key: str) -> ChromeSession:
         # the session for now.
         extension_id = await _discover_extension_id(port)
         session = ChromeSession(
-            profile_key=profile_key, port=port, browser=browser, extension_id=extension_id
+            profile_key=profile_key,
+            port=port,
+            browser=browser,
+            extension_id=extension_id,
         )
 
     _sessions[profile_key] = session

@@ -44,7 +44,9 @@ class FakeLocator:
 
 
 class FakePage:
-    def __init__(self, suggestion_visible: bool = False, suggestion_text: str | None = None):
+    def __init__(
+        self, suggestion_visible: bool = False, suggestion_text: str | None = None
+    ):
         self.calls: list[tuple] = []
         self._suggestion_visible = suggestion_visible
         self._suggestion_text = suggestion_text

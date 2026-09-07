@@ -73,7 +73,9 @@ async def test_solve_wraps_solver_exceptions(monkeypatch):
         await solver.solve(challenge, "https://example.com")
 
 
-async def test_solver_is_constructed_with_explicit_timeouts_not_sdk_defaults(monkeypatch):
+async def test_solver_is_constructed_with_explicit_timeouts_not_sdk_defaults(
+    monkeypatch,
+):
     # The single biggest latent freeze before this fix: the SDK's own
     # defaults are recaptchaTimeout=600 / defaultTimeout=120, and the call
     # runs under `asyncio.to_thread`, which CANNOT be cancelled — so a slow
@@ -106,7 +108,9 @@ async def test_a_solve_that_never_returns_fails_instead_of_hanging(monkeypatch):
     import time
 
     monkeypatch.setattr(solver.settings, "twocaptcha_api_key", "fake-key")
-    monkeypatch.setattr(solver.settings, "captcha_solve_timeout_seconds", -29)  # +30 => 1s
+    monkeypatch.setattr(
+        solver.settings, "captcha_solve_timeout_seconds", -29
+    )  # +30 => 1s
 
     class FakeSolver:
         def __init__(self, api_key, **kwargs):
@@ -122,7 +126,9 @@ async def test_a_solve_that_never_returns_fails_instead_of_hanging(monkeypatch):
     monkeypatch.setattr(solver, "TwoCaptcha", FakeSolver)
 
     with pytest.raises(CaptchaError, match="did not return a solution"):
-        await solver.solve(CaptchaChallenge(kind="hcaptcha", sitekey="x"), "https://e.com")
+        await solver.solve(
+            CaptchaChallenge(kind="hcaptcha", sitekey="x"), "https://e.com"
+        )
 
 
 async def test_solve_passes_action_through_for_enterprise_challenges(monkeypatch):

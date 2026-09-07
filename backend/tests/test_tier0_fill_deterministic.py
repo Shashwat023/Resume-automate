@@ -301,7 +301,10 @@ async def test_visible_suggestion_with_unrelated_text_is_not_clicked():
     # whose own text plausibly matches what was just typed should be
     # clicked.
     field = FormField(
-        node_id="1", role="textbox", label="Location (City)", xpath="//input[@id='city']"
+        node_id="1",
+        role="textbox",
+        label="Location (City)",
+        xpath="//input[@id='city']",
     )
     page = FakePage(suggestion_visible=True, suggestion_text="Unrelated Menu Item")
 

@@ -435,8 +435,7 @@ async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -
             # this from silently submitting incomplete; an optional one
             # is simply left blank, same as any other unresolved field.
             attempted = (
-                "exact match, typing into the field, and the closest-match "
-                "fallback"
+                "exact match, typing into the field, and the closest-match fallback"
                 if tried_typeahead
                 else "exact match and the closest-match fallback"
             )

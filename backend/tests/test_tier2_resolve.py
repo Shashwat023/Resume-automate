@@ -394,7 +394,9 @@ async def test_combobox_falls_back_to_closest_match_when_exact_wording_not_found
         observe_results=[
             FakeObserveResult(data=[open_action]),
             FakeObserveResult(data=[]),  # exact-value select observe() finds nothing
-            FakeObserveResult(data=[]),  # typeahead's type-target observe() finds nothing
+            FakeObserveResult(
+                data=[]
+            ),  # typeahead's type-target observe() finds nothing
             FakeObserveResult(data=[fallback_action]),  # fallback finds one
         ],
         act_results=[
@@ -1036,10 +1038,17 @@ async def test_render_poll_exits_immediately_once_options_are_present():
         ],
         act_results=[
             FakeActResult(data=FakeActResultData(success=True)),
-            FakeActResult(data=FakeActResultData(success=True, action_description="Selected 'No'")),
+            FakeActResult(
+                data=FakeActResultData(success=True, action_description="Selected 'No'")
+            ),
         ],
     )
-    field = FormField(node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None)
+    field = FormField(
+        node_id="1",
+        role="combobox",
+        label="Do you require visa sponsorship?",
+        xpath=None,
+    )
     page = FakePage(rendered_option_count=3)  # options already present
 
     result = await resolve_and_execute(sh, page=page, fields=[(field, "No")])
@@ -1047,7 +1056,9 @@ async def test_render_poll_exits_immediately_once_options_are_present():
     assert result.resolved == [("Do you require visa sponsorship?", "Selected 'No'")]
 
 
-async def test_render_poll_gives_up_after_its_bound_if_nothing_ever_renders(monkeypatch):
+async def test_render_poll_gives_up_after_its_bound_if_nothing_ever_renders(
+    monkeypatch,
+):
     from app.services.engine import tier2_resolve
 
     monkeypatch.setattr(tier2_resolve, "_OPTION_RENDER_POLL_MAX_MS", 0)
@@ -1061,10 +1072,17 @@ async def test_render_poll_gives_up_after_its_bound_if_nothing_ever_renders(monk
         ],
         act_results=[
             FakeActResult(data=FakeActResultData(success=True)),
-            FakeActResult(data=FakeActResultData(success=True, action_description="Selected 'No'")),
+            FakeActResult(
+                data=FakeActResultData(success=True, action_description="Selected 'No'")
+            ),
         ],
     )
-    field = FormField(node_id="1", role="combobox", label="Do you require visa sponsorship?", xpath=None)
+    field = FormField(
+        node_id="1",
+        role="combobox",
+        label="Do you require visa sponsorship?",
+        xpath=None,
+    )
     page = FakePage(rendered_option_count=0)  # options never render
 
     # Must still proceed to the select step (best-effort poll, not a hang)

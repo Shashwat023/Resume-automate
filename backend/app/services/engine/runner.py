@@ -246,7 +246,12 @@ async def run_application(application_id: str) -> None:
                     await _handle_2fa_if_present(application_id, page)
 
                     cascade = await _run_fill_cascade(
-                        application_id, sh, page, profile_dict, profile_id, resume_file_path
+                        application_id,
+                        sh,
+                        page,
+                        profile_dict,
+                        profile_id,
+                        resume_file_path,
                     )
 
                     # Proactive self-check before ever attempting submit — not just
@@ -995,7 +1000,9 @@ async def _escalate_unhandled_fields_if_any(
     fields, no need to interrupt a human for those.
     """
     unhandled = _unhandled_labels(cascade)
-    required_unhandled = {f.label for f in cascade.fields if f.required and f.label in unhandled}
+    required_unhandled = {
+        f.label for f in cascade.fields if f.required and f.label in unhandled
+    }
     escalate_labels = sorted(required_unhandled | (also_target or set()))
     if not escalate_labels:
         return
