@@ -117,10 +117,10 @@ def find_invalid_field_labels(formatted_tree: str) -> list[str]:
     for line in formatted_tree.splitlines():
         m = _FIELD_LINE.match(line)
         label_here = (m.group("label") or "").strip() if m else None
-        role_tokens = (
-            {r.strip() for r in m.group("role").split(",")} if m else set()
+        role_tokens = {r.strip() for r in m.group("role").split(",")} if m else set()
+        is_candidate_label = (
+            bool(role_tokens & TARGET_ROLES) or _GROUP_ROLE in role_tokens
         )
-        is_candidate_label = bool(role_tokens & TARGET_ROLES) or _GROUP_ROLE in role_tokens
         # A validation-error TEXT node itself can match _FIELD_LINE (it's
         # just another `[id] role: text` line) — don't let it overwrite
         # the real field label sitting right above it.
