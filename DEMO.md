@@ -47,14 +47,15 @@ Open `http://localhost:5173`.
 - Click **Resume** — it continues normally.
 - Click the **History** icon on any row (including an old one from a previous run) to show the full `run_events` timeline for that specific application — this works for completed/failed jobs too, not just the live one.
 
-## 6. 2FA — the one human-in-the-loop step (talk through, don't fake it)
+## 6. Human-in-the-loop — 2FA and stuck fields (talk through; only stage it if you have a real challenge handy)
 
-Not staged live in this demo (no test account with 2FA readily available) — describe the mechanism instead:
+- If a form challenges with a one-time code, or the cascade hits a field it genuinely can't resolve, the application pauses (`needs_input`) and a **"Take Control"** button appears — both on the Current Job card and on that job's own row in the queue table.
+- Clicking it opens a live view — an actual screencast of the running browser with click/keyboard passthrough — so you type the code (or fill the stuck field) directly in the real page.
+- The panel itself has **Resume** and **Cancel** buttons: continue on the *same* browser session, same cookies, no restart — or abandon that application outright.
+- *Talking point:* this started as 2FA-only and deliberately grew into the universal fallback. Rather than chase every new widget shape as it's discovered, anything the automation can't resolve gets handed to a human for that one field — the agent never fails and stops on its own while a human fix is still possible.
+- *Talking point:* the 2FA wait also polls the page and **auto-resumes on its own** if the challenge clears (say you answered the code on your phone), with a 10-minute ceiling so an unanswered one fails cleanly instead of stranding the queue.
 
-- If a form challenges with a one-time code, the application pauses (`needs_input`), and a **"Take Control"** button appears on the Queue page.
-- Clicking it opens a live view — an actual screencast of the running browser with click/keyboard passthrough — so you type the code directly into the real page.
-- Closing it and pressing Resume continues the *same* browser session, same cookies, no restart.
-- *Talking point:* this is the only thing the system can't do for you by design — everything else (CAPTCHA via 2captcha, form-fill, submission) is fully automated.
+This has been exercised for real — a live email-OTP challenge on a Figma application — so it's a genuine mechanism, not a mockup. Staging it live still depends on hitting a challenge on demand, which you can't count on.
 
 ---
 
@@ -65,4 +66,9 @@ Not staged live in this demo (no test account with 2FA readily available) — de
 
 ## If something looks off mid-demo
 
-Known, already-documented gaps are in [FLAGGED.md](FLAGGED.md) — worth skimming before a live demo so nothing there surprises you. The file-upload attach step in particular has a known live discrepancy (FLAGGED.md #8) — don't promise it works if asked directly.
+Known, already-documented gaps are in [FLAGGED.md](FLAGGED.md) — worth skimming before a live demo so nothing there surprises you. Two specifically worth knowing before someone asks:
+
+- **A typeahead/autocomplete field** (Greenhouse's "Location (City)") resolves unreliably. If it happens mid-demo, that's the human-escalation fallback doing its job — the run pauses and asks you to fill that one field rather than failing. Frame it that way rather than as a surprise.
+- **Risk-based reCAPTCHA Enterprise** can reject a validly-solved token on session risk score alone, independent of anything the code does. Don't promise CAPTCHA "always works" — it works, and a hardened site can still refuse the result.
+
+Real submissions cost ~$0.10–0.15 in LLM credits per completed form fill, if anyone asks about running economics.
