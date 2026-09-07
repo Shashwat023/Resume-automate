@@ -31,7 +31,9 @@ _RESPONSE_FIELD = {
 
 @dataclass
 class CaptchaOutcome:
-    status: str  # "not_present" | "solved" | "no_key" | "failed_escalate" | "failed_hard"
+    status: (
+        str  # "not_present" | "solved" | "no_key" | "failed_escalate" | "failed_hard"
+    )
     detail: str = ""
 
 

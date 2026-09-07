@@ -51,7 +51,9 @@ async def test_detects_classic_recaptcha_v2():
 
 async def test_detects_hcaptcha():
     page = FakePage(
-        ["https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html?sitekey=my-hcaptcha-sitekey&host=example.com"]
+        [
+            "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html?sitekey=my-hcaptcha-sitekey&host=example.com"
+        ]
     )
 
     challenge = await detect_captcha(page)
