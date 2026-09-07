@@ -7,6 +7,7 @@ class FakeLocator:
         self._xpath = xpath
         self._boom = boom
         self._suggestion_visible = False
+        self._page = None
 
     async def fill(self, value):
         if self._boom:
@@ -20,6 +21,8 @@ class FakeLocator:
         if self._boom:
             raise RuntimeError("stale xpath")
         self._calls.append(("type", self._xpath, value))
+        if self._page is not None:
+            self._page._last_typed = value
 
     async def set_input_files(self, path):
         if self._boom:
@@ -32,12 +35,26 @@ class FakeLocator:
     async def is_visible(self):
         return self._suggestion_visible
 
+    async def inner_text(self):
+        # None -> auto-match whatever was last typed, so a test that just
+        # wants "does it click" doesn't also have to wire up matching
+        # text; a test verifying the mismatch-guard sets an explicit
+        # non-matching value instead (see FakePage's suggestion_text).
+        if self._page is not None and self._page._suggestion_text is not None:
+            return self._page._suggestion_text
+        return self._page._last_typed if self._page is not None else ""
+
     async def click(self):
         self._calls.append(("click", self._xpath))
 
 
 class FakePage:
-    def __init__(self, boom_xpaths: set[str] | None = None, suggestion_visible: bool = False):
+    def __init__(
+        self,
+        boom_xpaths: set[str] | None = None,
+        suggestion_visible: bool = False,
+        suggestion_text: str | None = None,
+    ):
         self.calls: list[tuple] = []
         self._boom_xpaths = boom_xpaths or set()
         # Whether field_fill.fill_textbox's suggestion-selector locator
@@ -45,10 +62,13 @@ class FakePage:
         # autocomplete option — False by default, same as a plain textbox
         # with no such widget.
         self._suggestion_visible = suggestion_visible
+        self._suggestion_text = suggestion_text
+        self._last_typed: str | None = None
 
     def locator(self, xpath):
         locator = FakeLocator(self.calls, xpath, boom=xpath in self._boom_xpaths)
         locator._suggestion_visible = self._suggestion_visible
+        locator._page = self
         return locator
 
     async def wait_for_timeout(self, ms):
@@ -240,7 +260,10 @@ async def test_city_field_selects_autocomplete_suggestion_when_one_appears():
     # runs despite looking filled — it's backed by an autocomplete widget
     # that plain fill() doesn't satisfy (see field_fill.py's docstring).
     city_field = FormField(
-        node_id="1", role="textbox", label="Location (City)", xpath="//input[@id='city']"
+        node_id="1",
+        role="textbox",
+        label="Location (City)",
+        xpath="//input[@id='city']",
     )
     page = FakePage(suggestion_visible=True)
 
@@ -267,6 +290,24 @@ async def test_plain_textbox_with_no_suggestion_is_unaffected():
     result = await fill_deterministic(page, [field], {"full_name": "Jane Doe"})
 
     assert result.filled == [("First Name", "Jane")]
+    assert not any(call[0] == "click" for call in page.calls)
+
+
+async def test_visible_suggestion_with_unrelated_text_is_not_clicked():
+    # Regression guard: an earlier version of fill_textbox clicked the
+    # FIRST visible [role="option"]-shaped element anywhere on the page,
+    # regardless of what it said — unsafe if an unrelated dropdown/listbox
+    # happened to be open elsewhere at the same moment. Only a suggestion
+    # whose own text plausibly matches what was just typed should be
+    # clicked.
+    field = FormField(
+        node_id="1", role="textbox", label="Location (City)", xpath="//input[@id='city']"
+    )
+    page = FakePage(suggestion_visible=True, suggestion_text="Unrelated Menu Item")
+
+    result = await fill_deterministic(page, [field], {"city": "Bangalore"})
+
+    assert result.filled == [("Location (City)", "Bangalore")]
     assert not any(call[0] == "click" for call in page.calls)
 
 

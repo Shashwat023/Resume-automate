@@ -63,6 +63,7 @@ _GROUP_ROLE = "group"
 # letter too.
 _RESUME_FIELD_LABEL = re.compile(r"resum[eé]|\bcv\b", re.I)
 
+
 # Real bug found live: a form can split phone entry into a separate
 # Country/dial-code selector PLUS a plain Phone field. The profile stores
 # the phone number WITH its country code (e.g. "+918303545027"), which is
