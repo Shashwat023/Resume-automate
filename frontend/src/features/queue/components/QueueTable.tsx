@@ -51,7 +51,28 @@ export const QueueTable = () => {
     }),
     columnHelper.accessor('jobTitle', {
       header: 'Job Title',
-      cell: info => <span className="text-gray-700 dark:text-gray-300 text-sm truncate max-w-[200px] block">{info.getValue()}</span>,
+      cell: info => {
+        const item = info.row.original;
+        const formUrl = item.apply_url || item.company_url;
+        return (
+          <div className="flex items-center gap-2">
+            <span className="text-gray-700 dark:text-gray-300 text-sm truncate max-w-[200px] block" title={info.getValue()}>
+              {info.getValue()}
+            </span>
+            {formUrl && (
+              <a
+                href={formUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors shrink-0"
+                title="View application form"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
+          </div>
+        );
+      },
     }),
     columnHelper.accessor('ats', {
       header: 'ATS',
@@ -80,6 +101,7 @@ export const QueueTable = () => {
       header: '',
       cell: (info) => {
         const item = info.row.original;
+        const formUrl = item.apply_url || item.company_url;
         
         return (
           // Real bug found live: these were only ever visible on
@@ -127,8 +149,8 @@ export const QueueTable = () => {
                 <SkipForward className="w-4 h-4" />
               </button>
             )}
-            {item.company_url && (
-              <a href={item.company_url} target="_blank" rel="noreferrer" className="p-1.5 text-gray-400 hover:text-gray-900 transition-colors" title="Open Job">
+            {formUrl && (
+              <a href={formUrl} target="_blank" rel="noopener noreferrer" className="p-1.5 text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors" title="View application form">
                 <ExternalLink className="w-4 h-4" />
               </a>
             )}

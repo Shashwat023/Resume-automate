@@ -77,6 +77,9 @@ class ApplyService:
                 status=app.status,
                 started_at=app.started_at,
                 finished_at=app.finished_at,
+                apply_url=job.apply_url,
+                company_url=job.company_url,
+                ats=job.ats,
             )
             for app, job in rows
         ]
@@ -91,7 +94,14 @@ class ApplyService:
             profile={"id": profile.id, "full_name": profile.full_name}
             if profile
             else {},
-            job={"id": job.id, "title": job.title, "company_name": job.company_name}
+            job={
+                "id": job.id,
+                "title": job.title,
+                "company_name": job.company_name,
+                "apply_url": job.apply_url,
+                "company_url": job.company_url,
+                "ats": job.ats,
+            }
             if job
             else {},
             status=application.status,

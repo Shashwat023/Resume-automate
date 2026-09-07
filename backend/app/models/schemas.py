@@ -170,6 +170,9 @@ class ApplyHistoryItemOut(BaseModel):
     status: str
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    apply_url: str | None = None
+    company_url: str | None = None
+    ats: str | None = None
 
 
 class RunEventOut(BaseModel):

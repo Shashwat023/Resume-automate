@@ -187,3 +187,6 @@ async def test_get_history_includes_real_job_id(async_session):
     assert len(history) == 1
     assert history[0].application_id == application.id
     assert history[0].job_id == job.id
+    assert history[0].apply_url == job.apply_url
+    assert history[0].company_url == job.company_url
+    assert history[0].ats == job.ats
