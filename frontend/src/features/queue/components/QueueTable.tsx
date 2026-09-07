@@ -5,9 +5,10 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { useState } from 'react';
-import { PlayCircle, PauseCircle, SkipForward, ExternalLink, History } from 'lucide-react';
+import { PlayCircle, PauseCircle, SkipForward, ExternalLink, History, MonitorPlay } from 'lucide-react';
 import { QueueStatusBadge } from './QueueStatusBadge';
 import { JobTimelineModal } from './JobTimelineModal';
+import { LiveView } from './LiveView';
 import { useQueueStore } from '../../../store/queueStore';
 import { type QueueItem } from '../../../types';
 import {
@@ -25,6 +26,7 @@ const PAUSABLE_RAW_STATUSES = new Set(['queued', 'pending', 'running']);
 export const QueueTable = () => {
   const queueState = useQueueStore((state) => state.queueState);
   const [timelineJobId, setTimelineJobId] = useState<string | null>(null);
+  const [liveViewJobId, setLiveViewJobId] = useState<string | null>(null);
   const skipMutation = useSkipJobMutation();
   const retryMutation = useRetryJobMutation();
   const pauseMutation = usePauseJobMutation();
@@ -80,7 +82,21 @@ export const QueueTable = () => {
         const item = info.row.original;
         
         return (
-          <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          // Real bug found live: these were only ever visible on
+          // :hover (opacity-0 group-hover:opacity-100) — a running job's
+          // own Pause button, and any Resume/Take-Control control, were
+          // there in the DOM but effectively invisible unless the user
+          // happened to hover exactly that row. Always visible now.
+          <div className="flex items-center justify-end gap-2">
+            {item.status === 'waiting_for_user' && (
+              <button
+                onClick={() => setLiveViewJobId(item.id)}
+                className="flex items-center gap-1 px-2 py-1 rounded text-amber-600 hover:text-amber-700 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 transition-colors text-xs font-semibold"
+                title="Take control — enter the verification code or fill the field manually, then Resume"
+              >
+                <MonitorPlay className="w-3.5 h-3.5" /> Take Control
+              </button>
+            )}
             {item.rawStatus === 'paused' && (
               <button
                 onClick={() => resumeMutation.mutate(item.id)}
@@ -180,6 +196,10 @@ export const QueueTable = () => {
 
       {timelineJobId && (
         <JobTimelineModal applicationId={timelineJobId} onClose={() => setTimelineJobId(null)} />
+      )}
+
+      {liveViewJobId && (
+        <LiveView applicationId={liveViewJobId} onClose={() => setLiveViewJobId(null)} />
       )}
     </div>
   );
