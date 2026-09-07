@@ -185,14 +185,26 @@ async def map_fields(
             if cached is not None and cached.answer.strip():
                 from_library.append((f.label, cached.answer))
                 await _apply(
-                    page, f, cached.answer, filled, for_tier2, errored, has_country_selector
+                    page,
+                    f,
+                    cached.answer,
+                    filled,
+                    for_tier2,
+                    errored,
+                    has_country_selector,
                 )
                 continue
         remaining.append(f)
 
     if not remaining:
         return Tier1Result(
-            filled, from_library, for_tier2, low_confidence_filled, unanswered, errored, usage
+            filled,
+            from_library,
+            for_tier2,
+            low_confidence_filled,
+            unanswered,
+            errored,
+            usage,
         )
 
     if not settings.openrouter_api_key:
@@ -201,7 +213,13 @@ async def map_fields(
         # left blank (not a confidence decision — there's no LLM call at all).
         unanswered.extend(f.label for f in remaining)
         return Tier1Result(
-            filled, from_library, for_tier2, low_confidence_filled, unanswered, errored, usage
+            filled,
+            from_library,
+            for_tier2,
+            low_confidence_filled,
+            unanswered,
+            errored,
+            usage,
         )
 
     messages = build_prompt(profile, remaining, resume_facts)
@@ -210,8 +228,16 @@ async def map_fields(
 
     by_id = {f.node_id: f for f in remaining}
     answered_ids = await _apply_answers(
-        page, by_id, parsed.answers, profile_id, answer_repo,
-        filled, for_tier2, low_confidence_filled, errored, has_country_selector,
+        page,
+        by_id,
+        parsed.answers,
+        profile_id,
+        answer_repo,
+        filled,
+        for_tier2,
+        low_confidence_filled,
+        errored,
+        has_country_selector,
     )
     missing = [f for node_id, f in by_id.items() if node_id not in answered_ids]
 
@@ -227,8 +253,16 @@ async def map_fields(
             usage = {k: usage[k] + repair_usage[k] for k in usage}
             missing_by_id = {f.node_id: f for f in missing}
             repaired_ids = await _apply_answers(
-                page, missing_by_id, repaired.answers, profile_id, answer_repo,
-                filled, for_tier2, low_confidence_filled, errored, has_country_selector,
+                page,
+                missing_by_id,
+                repaired.answers,
+                profile_id,
+                answer_repo,
+                filled,
+                for_tier2,
+                low_confidence_filled,
+                errored,
+                has_country_selector,
             )
             answered_ids |= repaired_ids
             missing = [f for f in missing if f.node_id not in repaired_ids]
@@ -238,7 +272,13 @@ async def map_fields(
     unanswered.extend(f.label for f in missing)
 
     return Tier1Result(
-        filled, from_library, for_tier2, low_confidence_filled, unanswered, errored, usage
+        filled,
+        from_library,
+        for_tier2,
+        low_confidence_filled,
+        unanswered,
+        errored,
+        usage,
     )
 
 
@@ -282,7 +322,10 @@ async def _apply_answers(
         if answer.confidence < settings.tier1_confidence_threshold:
             low_confidence_filled.append(field.label)
 
-        if not field.options and answer.confidence >= settings.tier1_confidence_threshold:
+        if (
+            not field.options
+            and answer.confidence >= settings.tier1_confidence_threshold
+        ):
             # Cache free-text / unknown-option answers only, and only when
             # confident — this is the "novel question" case the answers
             # library exists for. A low-confidence guess is used once here

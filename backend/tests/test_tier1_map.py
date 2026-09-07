@@ -12,6 +12,7 @@ class FakeLocator:
         self._calls = calls
         self._xpath = xpath
         self._suggestion_visible = False
+        self._page = None
 
     async def fill(self, value):
         self._calls.append(("fill", self._xpath, value))
@@ -21,6 +22,8 @@ class FakeLocator:
         # docstring for why plain fill() alone isn't enough for
         # autocomplete-backed fields like Greenhouse's "Location (City)".
         self._calls.append(("type", self._xpath, value))
+        if self._page is not None:
+            self._page._last_typed = value
 
     async def select_option(self, value):
         self._calls.append(("select_option", self._xpath, value))
@@ -31,18 +34,26 @@ class FakeLocator:
     async def is_visible(self):
         return self._suggestion_visible
 
+    async def inner_text(self):
+        if self._page is not None and self._page._suggestion_text is not None:
+            return self._page._suggestion_text
+        return self._page._last_typed if self._page is not None else ""
+
     async def click(self):
         self._calls.append(("click", self._xpath))
 
 
 class FakePage:
-    def __init__(self, suggestion_visible: bool = False):
+    def __init__(self, suggestion_visible: bool = False, suggestion_text: str | None = None):
         self.calls: list[tuple] = []
         self._suggestion_visible = suggestion_visible
+        self._suggestion_text = suggestion_text
+        self._last_typed: str | None = None
 
     def locator(self, xpath):
         locator = FakeLocator(self.calls, xpath)
         locator._suggestion_visible = self._suggestion_visible
+        locator._page = self
         return locator
 
     async def wait_for_timeout(self, ms):
@@ -213,7 +224,9 @@ async def test_custom_combobox_with_no_options_goes_to_tier2(
     assert cached.answer == "No"
 
 
-async def test_low_confidence_answer_is_filled_but_not_cached(async_session, monkeypatch):
+async def test_low_confidence_answer_is_filled_but_not_cached(
+    async_session, monkeypatch
+):
     """
     Day 4 scope correction: Tier 1 never abstains. A low-confidence answer
     is still written to the field (accepted tradeoff, see PLAN.md) — the
@@ -256,6 +269,7 @@ async def test_no_api_key_leaves_everything_unfilled(async_session, monkeypatch)
     field genuinely gets no answer — there's no LLM call to produce one at
     all, unlike a low-confidence answer which is still filled.
     """
+
     async def _boom(*args, **kwargs):
         raise AssertionError("chat_json must not be called when no key is configured")
 
@@ -345,7 +359,15 @@ async def test_field_omitted_from_llm_response_triggers_repair_and_gets_filled(
         "chat_json",
         _sequential_chat_json(
             {"answers": [{"field_id": "1", "value": "Yes", "confidence": 0.9}]},
-            {"answers": [{"field_id": "2", "value": "I admire the mission.", "confidence": 0.8}]},
+            {
+                "answers": [
+                    {
+                        "field_id": "2",
+                        "value": "I admire the mission.",
+                        "confidence": 0.8,
+                    }
+                ]
+            },
         ),
     )
     monkeypatch.setattr(tier1_map.settings, "openrouter_api_key", "fake-key-for-test")
@@ -353,8 +375,15 @@ async def test_field_omitted_from_llm_response_triggers_repair_and_gets_filled(
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
     fields = [
-        FormField(node_id="1", role="textbox", label="Willing to relocate?", xpath="//textarea[1]"),
-        FormField(node_id="2", role="textbox", label="Why Anthropic?", xpath="//textarea[2]"),
+        FormField(
+            node_id="1",
+            role="textbox",
+            label="Willing to relocate?",
+            xpath="//textarea[1]",
+        ),
+        FormField(
+            node_id="2", role="textbox", label="Why Anthropic?", xpath="//textarea[2]"
+        ),
     ]
     page = FakePage()
 
@@ -380,7 +409,9 @@ async def test_field_still_omitted_after_repair_lands_in_unanswered(
 
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
-    field = FormField(node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]")
+    field = FormField(
+        node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]"
+    )
     page = FakePage()
 
     result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
@@ -389,17 +420,21 @@ async def test_field_still_omitted_after_repair_lands_in_unanswered(
     assert result.filled == []
 
 
-async def test_repair_call_scoped_to_only_the_missing_fields(async_session, monkeypatch):
+async def test_repair_call_scoped_to_only_the_missing_fields(
+    async_session, monkeypatch
+):
     seen_user_messages = []
 
     async def _fake(messages, *, json_schema, schema_name, model, temperature=0.0):
         seen_user_messages.append(messages[1]["content"])
         if len(seen_user_messages) == 1:
-            return {"answers": [{"field_id": "1", "value": "Yes", "confidence": 0.9}]}, {
-                "input_tokens": 10, "output_tokens": 5, "total_tokens": 15
-            }
+            return {
+                "answers": [{"field_id": "1", "value": "Yes", "confidence": 0.9}]
+            }, {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         return {"answers": [{"field_id": "2", "value": "Answer", "confidence": 0.9}]}, {
-            "input_tokens": 5, "output_tokens": 3, "total_tokens": 8
+            "input_tokens": 5,
+            "output_tokens": 3,
+            "total_tokens": 8,
         }
 
     monkeypatch.setattr(tier1_map, "chat_json", _fake)
@@ -408,7 +443,9 @@ async def test_repair_call_scoped_to_only_the_missing_fields(async_session, monk
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
     fields = [
-        FormField(node_id="1", role="textbox", label="Willing to relocate?", xpath="//t[1]"),
+        FormField(
+            node_id="1", role="textbox", label="Willing to relocate?", xpath="//t[1]"
+        ),
         FormField(node_id="2", role="textbox", label="Why Anthropic?", xpath="//t[2]"),
     ]
     page = FakePage()
@@ -439,15 +476,25 @@ async def test_phone_field_country_code_stripped_when_answered_via_tier1(
         tier1_map,
         "chat_json",
         _fake_chat_json(
-            {"answers": [{"field_id": "1", "value": "+918303545027", "confidence": 0.9}]}
+            {
+                "answers": [
+                    {"field_id": "1", "value": "+918303545027", "confidence": 0.9}
+                ]
+            }
         ),
     )
 
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
-    phone_field = FormField(node_id="1", role="textbox", label="Phone", xpath="//input[@id='phone']")
+    phone_field = FormField(
+        node_id="1", role="textbox", label="Phone", xpath="//input[@id='phone']"
+    )
     country_field = FormField(
-        node_id="2", role="combobox", label="Country", xpath="//div[@id='country']", options=["India"]
+        node_id="2",
+        role="combobox",
+        label="Country",
+        xpath="//div[@id='country']",
+        options=["India"],
     )
     page = FakePage()
 
@@ -468,13 +515,19 @@ async def test_phone_field_kept_whole_when_no_sibling_country_selector(
         tier1_map,
         "chat_json",
         _fake_chat_json(
-            {"answers": [{"field_id": "1", "value": "+918303545027", "confidence": 0.9}]}
+            {
+                "answers": [
+                    {"field_id": "1", "value": "+918303545027", "confidence": 0.9}
+                ]
+            }
         ),
     )
 
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
-    phone_field = FormField(node_id="1", role="textbox", label="Phone", xpath="//input[@id='phone']")
+    phone_field = FormField(
+        node_id="1", role="textbox", label="Phone", xpath="//input[@id='phone']"
+    )
     page = FakePage()
 
     result = await tier1_map.map_fields(
@@ -484,7 +537,9 @@ async def test_phone_field_kept_whole_when_no_sibling_country_selector(
     assert ("Phone", "+918303545027") in result.filled
 
 
-async def test_empty_cached_answer_is_treated_as_no_cache_hit(async_session, monkeypatch):
+async def test_empty_cached_answer_is_treated_as_no_cache_hit(
+    async_session, monkeypatch
+):
     # Real bug found live: a cache write is only gated on confidence, never
     # on the answer having content. One earlier run cached an EMPTY string
     # for "Why Anthropic?" at confidence 0.5 — every run since silently
@@ -494,7 +549,15 @@ async def test_empty_cached_answer_is_treated_as_no_cache_hit(async_session, mon
         tier1_map,
         "chat_json",
         _fake_chat_json(
-            {"answers": [{"field_id": "1", "value": "Because AI safety matters.", "confidence": 0.9}]}
+            {
+                "answers": [
+                    {
+                        "field_id": "1",
+                        "value": "Because AI safety matters.",
+                        "confidence": 0.9,
+                    }
+                ]
+            }
         ),
     )
 
@@ -509,7 +572,9 @@ async def test_empty_cached_answer_is_treated_as_no_cache_hit(async_session, mon
         confidence=0.5,
     )
 
-    field = FormField(node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]")
+    field = FormField(
+        node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]"
+    )
     page = FakePage()
 
     result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
@@ -523,12 +588,16 @@ async def test_empty_llm_answer_is_not_treated_as_filled(async_session, monkeypa
     monkeypatch.setattr(
         tier1_map,
         "chat_json",
-        _fake_chat_json({"answers": [{"field_id": "1", "value": "   ", "confidence": 0.9}]}),
+        _fake_chat_json(
+            {"answers": [{"field_id": "1", "value": "   ", "confidence": 0.9}]}
+        ),
     )
 
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
-    field = FormField(node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]")
+    field = FormField(
+        node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]"
+    )
     page = FakePage()
 
     result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
@@ -545,12 +614,16 @@ async def test_empty_answer_never_gets_cached(async_session, monkeypatch):
     monkeypatch.setattr(
         tier1_map,
         "chat_json",
-        _fake_chat_json({"answers": [{"field_id": "1", "value": "", "confidence": 0.9}]}),
+        _fake_chat_json(
+            {"answers": [{"field_id": "1", "value": "", "confidence": 0.9}]}
+        ),
     )
 
     profile = await _seed_profile(async_session)
     repo = AnswerLibraryRepository(async_session)
-    field = FormField(node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]")
+    field = FormField(
+        node_id="1", role="textbox", label="Why Anthropic?", xpath="//textarea[1]"
+    )
     page = FakePage()
 
     await tier1_map.map_fields(page, [field], {}, profile.id, repo)
