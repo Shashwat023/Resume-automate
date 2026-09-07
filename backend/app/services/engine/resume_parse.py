@@ -13,7 +13,7 @@ empty. This module itself is stateless and does no caching/DB I/O.
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
-from app.services.engine.openrouter_client import OpenRouterError, chat_json
+from app.services.engine.openrouter_client import chat_json
 
 settings = get_settings()
 

@@ -64,9 +64,7 @@ class ResumeService:
         except OpenRouterError:
             return ResumeFacts()
 
-        await self._resume_repo.set_parsed_facts(
-            profile_id, facts.model_dump_json()
-        )
+        await self._resume_repo.set_parsed_facts(profile_id, facts.model_dump_json())
         return facts
 
     async def get(self, profile_id: int) -> Resume:
