@@ -164,11 +164,23 @@ class ApplyStatusOut(BaseModel):
 
 class ApplyHistoryItemOut(BaseModel):
     application_id: str
+    job_id: int
     company_name: str | None = None
     job_title: str | None = None
     status: str
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    apply_url: str | None = None
+    company_url: str | None = None
+    ats: str | None = None
+
+
+class RunEventOut(BaseModel):
+    id: int
+    level: str
+    message: str
+    tier: str | None = None
+    created_at: datetime
 
 
 class ApplyDetailsOut(BaseModel):
@@ -179,6 +191,12 @@ class ApplyDetailsOut(BaseModel):
     error: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # Day 5: full run_events timeline, so what happened on a job is visible
+    # after the fact (completed/failed) — not just while it's live via the
+    # logs WebSocket. Additive field; nothing in the frontend currently
+    # depends on ApplyDetailsOut's exact shape (getDetails is unused there
+    # today), so this doesn't touch the existing contract.
+    events: list[RunEventOut] = []
 
 
 # ---- Admin sync ----

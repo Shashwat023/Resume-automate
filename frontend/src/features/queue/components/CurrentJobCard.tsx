@@ -1,15 +1,20 @@
+import { useState } from 'react';
 import { useQueueStore } from '../../../store/queueStore';
 import { QueueStatusBadge } from './QueueStatusBadge';
-import { FileText, UserCircle, ExternalLink } from 'lucide-react';
+import { LiveView } from './LiveView';
+import { FileText, UserCircle, ExternalLink, MonitorPlay } from 'lucide-react';
 
 export const CurrentJobCard = () => {
   const queueState = useQueueStore((state) => state.queueState);
-  
+  const [liveViewOpen, setLiveViewOpen] = useState(false);
+
   if (!queueState || !queueState.currentJobId) return null;
 
   const currentJob = queueState.items.find(i => i.id === queueState.currentJobId || i.jobId === queueState.currentJobId);
 
   if (!currentJob) return null;
+
+  const needsInput = currentJob.status === 'waiting_for_user';
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl p-5 border border-indigo-200 dark:border-indigo-900 shadow-sm shadow-indigo-100 dark:shadow-none">
@@ -30,7 +35,20 @@ export const CurrentJobCard = () => {
         </div>
         
         <div className="min-w-0 flex-1">
-          <h4 className="text-base font-bold text-gray-900 dark:text-white truncate">{currentJob.jobTitle}</h4>
+          <div className="flex items-center gap-2">
+            <h4 className="text-base font-bold text-gray-900 dark:text-white truncate">{currentJob.jobTitle}</h4>
+            {(currentJob.apply_url || currentJob.company_url) && (
+              <a
+                href={currentJob.apply_url || currentJob.company_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors shrink-0"
+                title="View application form"
+              >
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            )}
+          </div>
           <p className="text-sm text-gray-500 dark:text-gray-400 truncate">{currentJob.company}</p>
         </div>
       </div>
@@ -61,15 +79,28 @@ export const CurrentJobCard = () => {
         </div>
       </div>
       
-      {currentJob.company_url && (
-        <a 
-          href={currentJob.company_url} 
-          target="_blank" 
-          rel="noreferrer"
+      {needsInput && (
+        <button
+          onClick={() => setLiveViewOpen(true)}
+          className="mt-4 flex items-center justify-center gap-2 w-full px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white transition-colors rounded-lg text-sm font-semibold"
+        >
+          <MonitorPlay className="w-4 h-4" /> Take Control — Enter Verification Code
+        </button>
+      )}
+
+      {(currentJob.apply_url || currentJob.company_url) && (
+        <a
+          href={currentJob.apply_url || currentJob.company_url}
+          target="_blank"
+          rel="noopener noreferrer"
           className="mt-4 flex items-center justify-center gap-2 w-full px-3 py-2 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors rounded-lg text-sm font-medium"
         >
           View Target Form <ExternalLink className="w-4 h-4" />
         </a>
+      )}
+
+      {liveViewOpen && (
+        <LiveView applicationId={currentJob.id} onClose={() => setLiveViewOpen(false)} />
       )}
     </div>
   );

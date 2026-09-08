@@ -9,3 +9,4 @@ def test_active_statuses_are_not_terminal():
     assert st.QUEUED not in st.TERMINAL
     assert st.RUNNING not in st.TERMINAL
     assert st.NEEDS_INPUT not in st.TERMINAL
+    assert st.PAUSED not in st.TERMINAL

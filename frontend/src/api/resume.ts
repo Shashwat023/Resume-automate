@@ -1,3 +1,4 @@
+import type { AxiosProgressEvent } from 'axios';
 import api from './axios';
 
 // ── Types matching backend resume schemas ──────────────────────────────
@@ -20,7 +21,7 @@ export const resumeApi = {
   uploadResume: (
     profileId: number,
     file: File,
-    onUploadProgress?: (progressEvent: ProgressEvent) => void,
+    onUploadProgress?: (progressEvent: AxiosProgressEvent) => void,
     signal?: AbortSignal,
   ) => {
     const formData = new FormData();

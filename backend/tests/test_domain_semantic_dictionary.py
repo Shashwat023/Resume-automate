@@ -55,22 +55,42 @@ def test_free_text_judgment_questions_are_left_unmatched(label):
     assert match_field(label) is None
 
 
-def test_relocation_address_question_matches_address_pattern_but_has_no_value():
-    # This label ("What is the address from which you plan on working? ...")
-    # DOES match the \baddress\b pattern — it's not a Tier-0/Tier-1 boundary
-    # case at the matching level. It was unmatched in the real form test only
-    # because that profile had no `address` set, so resolve_value() returned
-    # None and the harvester's `if not value` check skipped it. Pre-existing
-    # behavior, not something this restructure touched — flagged separately
-    # as a minor ambiguity (this is really a "where would you work from"
-    # judgment question, not a home-address field) rather than "fixed" here.
-    match = match_field(
-        "What is the address from which you plan on working? If you would "
-        'need to relocate, please type "relocating".'
+def test_relocation_question_is_not_treated_as_a_home_address_field():
+    # FLAGGED.md #5, now fixed. A bare `\baddress\b` matched this
+    # relocation JUDGMENT question and would fill the candidate's literal
+    # home address into a field that is really asking a yes/no relocation
+    # question. It was only ever harmless by accident — the test profile
+    # had no `address` set, so `resolve_value` returned None and the
+    # harvester skipped it. With a real address on file (which is now the
+    # case in live testing) it would have written the wrong answer.
+    # Falls through to Tier 1, which can actually reason about it.
+    assert (
+        match_field(
+            "What is the address from which you plan on working? If you would "
+            'need to relocate, please type "relocating".'
+        )
+        is None
     )
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Address",
+        "Address*",
+        "Street Address",
+        "Address Line 1",
+        "Home address",
+        "Mailing Address",
+        "Current Address",
+    ],
+)
+def test_genuine_address_fields_still_match(label):
+    # The narrowing above must not cost the real thing it exists for.
+    match = match_field(label)
     assert match is not None
     assert match.profile_attr == "address"
-    assert resolve_value({}, match) is None
+    assert resolve_value({"address": "12 Baker St"}, match) == "12 Baker St"
 
 
 def test_first_name_transform_takes_first_token():

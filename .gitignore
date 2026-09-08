@@ -55,3 +55,6 @@ backend/storage/
 
 # --- Temp & Personal scripts ---
 cmd.txt
+
+# --- Claude Code / Personal IDE config ---
+.claude/

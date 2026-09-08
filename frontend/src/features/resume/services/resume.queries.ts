@@ -1,3 +1,4 @@
+import type { AxiosProgressEvent } from 'axios';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { resumeApi } from '../../../api/resume';
 import { useResumeStore } from '../../../store/resumeStore';
@@ -32,7 +33,7 @@ export const useUploadResumeMutation = () => {
       signal,
     }: {
       file: File;
-      onUploadProgress?: (progressEvent: any) => void;
+      onUploadProgress?: (progressEvent: AxiosProgressEvent) => void;
       signal?: AbortSignal;
     }) => {
       const profileId = getStoredProfileId();

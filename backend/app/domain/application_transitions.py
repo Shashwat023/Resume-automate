@@ -19,7 +19,7 @@ def ensure_can_pause(current_status: str) -> None:
 
 
 def ensure_can_resume(current_status: str) -> None:
-    if current_status != st.NEEDS_INPUT:
+    if current_status not in (st.NEEDS_INPUT, st.PAUSED):
         raise ConflictError("Application is not paused")
 
 
