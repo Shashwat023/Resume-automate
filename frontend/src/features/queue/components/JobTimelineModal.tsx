@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X, History } from 'lucide-react';
+import { X, History, ExternalLink } from 'lucide-react';
 import { clsx } from 'clsx';
 import { queueApi, type BackendApplyDetails } from '../../../api/queue';
 
@@ -34,6 +34,8 @@ export const JobTimelineModal = ({ applicationId, onClose }: JobTimelineModalPro
     };
   }, [applicationId]);
 
+  const formUrl = (details?.job as any)?.apply_url || (details?.job as any)?.company_url;
+
   return (
     <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
       <div className="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[85vh]">
@@ -43,6 +45,17 @@ export const JobTimelineModal = ({ applicationId, onClose }: JobTimelineModalPro
             <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
               Run Timeline {details ? `— ${details.job.title ?? ''} @ ${details.job.company_name ?? ''}` : ''}
             </h3>
+            {formUrl && (
+              <a
+                href={formUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors ml-1 inline-flex items-center"
+                title="View application form"
+              >
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            )}
           </div>
           <button
             onClick={onClose}

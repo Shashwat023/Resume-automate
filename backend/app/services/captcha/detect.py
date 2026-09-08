@@ -29,6 +29,28 @@ class CaptchaChallenge:
     sitekey: str
     enterprise: bool = False
     invisible: bool = False
+    action: str | None = None
+
+
+# Real bug this fixes: Enterprise reCAPTCHA binds every token to an
+# `action` name the SITE'S OWN JS passes to `execute(sitekey, {action})`
+# (e.g. "submit", "apply") — Google's server-side assessment compares it,
+# and a missing/wrong action is grounds for rejection on its own,
+# independent of anything else. That action isn't in the iframe URL; it
+# only exists in the page's own inline JS, so it has to be scraped out of
+# script text. Best-effort — falls back to None (2captcha's own default,
+# "verify") if no matching call is found.
+_ACTION_IN_JS = re.compile(
+    r"""(?:grecaptcha(?:\.enterprise)?\.execute|execute)\s*\([^)]*action\s*:\s*['"]([\w/-]+)['"]"""
+)
+
+
+async def _extract_action(page: Page) -> str | None:
+    scripts = await page.evaluate(
+        "Array.from(document.scripts).map(s => s.textContent || '').join('\\n')"
+    )
+    m = _ACTION_IN_JS.search(scripts or "")
+    return m.group(1) if m else None
 
 
 async def detect_captcha(page: Page) -> CaptchaChallenge | None:
@@ -38,11 +60,15 @@ async def detect_captcha(page: Page) -> CaptchaChallenge | None:
     for src in iframe_srcs or []:
         m = _RECAPTCHA_IFRAME.search(src)
         if m:
+            enterprise = "/enterprise/" in src
+            invisible = "size=invisible" in src
+            action = await _extract_action(page) if enterprise else None
             return CaptchaChallenge(
                 kind="recaptcha",
                 sitekey=m.group(1),
-                enterprise="/enterprise/" in src,
-                invisible="size=invisible" in src,
+                enterprise=enterprise,
+                invisible=invisible,
+                action=action,
             )
         m = _HCAPTCHA_IFRAME.search(src)
         if m:

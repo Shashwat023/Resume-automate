@@ -35,7 +35,20 @@ export const CurrentJobCard = () => {
         </div>
         
         <div className="min-w-0 flex-1">
-          <h4 className="text-base font-bold text-gray-900 dark:text-white truncate">{currentJob.jobTitle}</h4>
+          <div className="flex items-center gap-2">
+            <h4 className="text-base font-bold text-gray-900 dark:text-white truncate">{currentJob.jobTitle}</h4>
+            {(currentJob.apply_url || currentJob.company_url) && (
+              <a
+                href={currentJob.apply_url || currentJob.company_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors shrink-0"
+                title="View application form"
+              >
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            )}
+          </div>
           <p className="text-sm text-gray-500 dark:text-gray-400 truncate">{currentJob.company}</p>
         </div>
       </div>
@@ -75,11 +88,11 @@ export const CurrentJobCard = () => {
         </button>
       )}
 
-      {currentJob.company_url && (
+      {(currentJob.apply_url || currentJob.company_url) && (
         <a
-          href={currentJob.company_url}
+          href={currentJob.apply_url || currentJob.company_url}
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
           className="mt-4 flex items-center justify-center gap-2 w-full px-3 py-2 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors rounded-lg text-sm font-medium"
         >
           View Target Form <ExternalLink className="w-4 h-4" />

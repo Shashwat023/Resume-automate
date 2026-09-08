@@ -68,7 +68,7 @@ async def test_full_pause_resume_cancel_lifecycle(client):
 
     pause_resp = await client.post(f"/api/apply/{application_id}/pause")
     assert pause_resp.status_code == 200
-    assert pause_resp.json()["status"] == "needs_input"
+    assert pause_resp.json()["status"] == "paused"
 
     resume_resp = await client.post(f"/api/apply/{application_id}/resume")
     assert resume_resp.status_code == 200

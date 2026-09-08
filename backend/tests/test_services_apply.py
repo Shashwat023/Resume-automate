@@ -21,6 +21,7 @@ class FakeQueue:
         self.enqueued: list[str] = []
         self.resumed: list[str] = []
         self.cancelled: list[str] = []
+        self.paused: list[str] = []
 
     async def enqueue_application(self, application_id: str) -> None:
         self.enqueued.append(application_id)
@@ -31,7 +32,13 @@ class FakeQueue:
     async def signal_cancel(self, application_id: str) -> None:
         self.cancelled.append(application_id)
 
+    async def signal_pause(self, application_id: str) -> None:
+        self.paused.append(application_id)
+
     def is_cancelled(self, application_id: str) -> bool:
+        return False
+
+    def is_paused(self, application_id: str) -> bool:
         return False
 
     def cleanup(self, application_id: str) -> None:
@@ -86,7 +93,22 @@ async def test_pause_then_resume_signals_queue(async_session):
 
     # start() leaves status QUEUED, which is not TERMINAL, so pause is valid
     paused = await service.pause(application.id)
-    assert paused.status == st.NEEDS_INPUT
+    assert paused.status == st.PAUSED
+    assert queue.paused == [application.id]
+
+    resumed = await service.resume(application.id)
+    assert resumed.status == st.RUNNING
+    assert queue.resumed == [application.id]
+
+
+async def test_resume_from_needs_input_still_works(async_session):
+    """PAUSED (user pause) and NEEDS_INPUT (2FA) are different statuses,
+    but both must resume the same way — this is the 2FA path."""
+    service, queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+    application_row = await service._require(application.id)
+    application_row.status = st.NEEDS_INPUT
+    await async_session.commit()
 
     resumed = await service.resume(application.id)
     assert resumed.status == st.RUNNING
@@ -118,3 +140,53 @@ async def test_cancel_twice_is_conflict(async_session):
 
     with pytest.raises(ConflictError, match="already finished"):
         await service.cancel(application.id)
+
+
+async def test_get_details_includes_full_run_events_timeline(async_session):
+    service, _queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+    await service._applications.add_event(
+        application.id, "Tier 0 filled 'Email'", level="info", tier="tier0"
+    )
+    await service._applications.add_event(
+        application.id, "Tier 1 low confidence", level="warn", tier="tier1"
+    )
+    await service._applications.commit()
+
+    details = await service.get_details(application.id)
+
+    assert details.application_id == application.id
+    assert (
+        len(details.events) == 3
+    )  # "Application queued" (from start()) + the two added above
+    assert [e.message for e in details.events] == [
+        "Application queued",
+        "Tier 0 filled 'Email'",
+        "Tier 1 low confidence",
+    ]
+    assert details.events[1].tier == "tier0"
+    assert details.events[2].level == "warn"
+
+
+async def test_get_details_missing_application_is_not_found(async_session):
+    service, _queue, _profile, _job = await _make_service(async_session)
+
+    with pytest.raises(NotFoundError, match="Application not found"):
+        await service.get_details("does-not-exist")
+
+
+async def test_get_history_includes_real_job_id(async_session):
+    """Regression test: the frontend's Retry button was sending the
+    application UUID as job_id (Number(uuid) -> NaN -> 422) because the
+    history response never exposed the real numeric job id at all."""
+    service, _queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+
+    history = await service.get_history(profile.id)
+
+    assert len(history) == 1
+    assert history[0].application_id == application.id
+    assert history[0].job_id == job.id
+    assert history[0].apply_url == job.apply_url
+    assert history[0].company_url == job.company_url
+    assert history[0].ats == job.ats

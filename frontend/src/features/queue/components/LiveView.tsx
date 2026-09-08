@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { X, Play, XCircle } from 'lucide-react';
 import { wsUrl } from '@/lib/wsUrl';
+import { useResumeJobMutation, useCancelJobMutation } from '../services/queue.queries';
 
 interface LiveViewProps {
   applicationId: string;
@@ -21,6 +22,31 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
   const wsRef = useRef<WebSocket | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const resumeMutation = useResumeJobMutation();
+  const cancelMutation = useCancelJobMutation();
+
+  // Real bug this fixes: this panel told the user to "press Resume" after
+  // entering their code, but no enabled Resume control existed anywhere
+  // while the application's status was needs_input (2FA) —
+  // QueueControls' queue-wide Resume button is deliberately DISABLED for
+  // that exact status (it points back here instead), and QueueTable's
+  // per-row Resume only fires for rawStatus === 'paused', never
+  // needs_input. The instruction referred to a button that didn't exist.
+  // The backend also auto-resumes on its own once the challenge clears
+  // (polled every few seconds — see runner.py's _handle_2fa_if_present),
+  // so this button is a faster, explicit alternative to that polling,
+  // not the only way forward if the user forgets to click it.
+  const handleResume = () => {
+    resumeMutation.mutate(applicationId, { onSuccess: onClose });
+  };
+
+  // Per user direction: rather than send the user hunting for a
+  // queue-level Cancel control (which had its own gating bugs — see
+  // FLAGGED.md #30), give the choice right here, at the exact moment
+  // they're asked to act on this job — resume it, or give up on it.
+  const handleCancel = () => {
+    cancelMutation.mutate(applicationId, { onSuccess: onClose });
+  };
 
   useEffect(() => {
     const ws = new WebSocket(wsUrl(`/ws/apply/${applicationId}/live-view`));
@@ -103,8 +129,28 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
           )}
         </div>
 
-        <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400 shrink-0">
-          Click into the browser above and enter your verification code, then close this panel and press Resume.
+        <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 shrink-0 flex items-center justify-between gap-3">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Click into the browser above and enter your verification code, then press Resume — or
+            Cancel to give up on this application. The agent will also continue automatically if
+            the challenge clears on its own.
+          </p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleCancel}
+              disabled={cancelMutation.isPending || resumeMutation.isPending}
+              className="flex items-center gap-2 px-4 py-2 border border-red-200 dark:border-red-900/40 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors rounded-lg text-sm font-semibold disabled:opacity-50"
+            >
+              <XCircle className="w-4 h-4" /> Cancel
+            </button>
+            <button
+              onClick={handleResume}
+              disabled={resumeMutation.isPending || cancelMutation.isPending}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white transition-colors rounded-lg text-sm font-semibold disabled:opacity-50"
+            >
+              <Play className="w-4 h-4" /> Resume
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -14,7 +14,9 @@ class FakeStorage:
     async def save(self, profile_id, filename, contents):
         from app.ports import SavedFile
 
-        return SavedFile(file_path=f"/tmp/{filename}", resume_url=f"/storage/{filename}")
+        return SavedFile(
+            file_path=f"/tmp/{filename}", resume_url=f"/storage/{filename}"
+        )
 
     async def delete(self, file_path):
         pass
@@ -48,7 +50,9 @@ async def test_reupload_invalidates_stale_parsed_facts(async_session):
     repo = ResumeRepository(async_session)
 
     await service.upload(profile.id, "resume.txt", b"first version")
-    await repo.set_parsed_facts(profile.id, ResumeFacts(skills=["Python"]).model_dump_json())
+    await repo.set_parsed_facts(
+        profile.id, ResumeFacts(skills=["Python"]).model_dump_json()
+    )
 
     await service.upload(profile.id, "resume.txt", b"second, different version")
 
@@ -95,7 +99,9 @@ async def test_get_facts_parses_once_and_caches(async_session, monkeypatch):
     assert json.loads(resume.parsed_facts)["skills"] == ["Python"]
 
 
-async def test_get_facts_degrades_gracefully_on_openrouter_error(async_session, monkeypatch):
+async def test_get_facts_degrades_gracefully_on_openrouter_error(
+    async_session, monkeypatch
+):
     from app.services.engine.openrouter_client import OpenRouterError
 
     profile = await _seed_profile(async_session)

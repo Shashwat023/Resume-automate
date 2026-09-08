@@ -102,11 +102,13 @@ The universality problem is unaffected by the frontend swap. Same cascading reso
 - **Tier 0** — CDP accessibility tree + semantic dictionary, $0, ~70-80% of fields.
 - **Tier 1** — batched OpenRouter call (one per page, not per field) for leftover fields, text/a11y not vision.
 - **Tier 2** — Stagehand `observe()` → `act()` for custom widgets (the exact fix for the old coordinate-clicking bug).
-- **Tier 3** — human, via the live-view WebSocket. **Scope narrowed (see "Scope correction" below): 2FA only.**
+- **Tier 3** — human, via the live-view WebSocket. **Scope narrowed (see "Scope correction" below) to 2FA only — then deliberately widened again after live testing** into the universal "automation is stuck, a human can unstick it" fallback: 2FA, a twice-failed CAPTCHA, and any single field the cascade genuinely can't resolve. See "Post-Day-5 — the live-testing era" below.
 
 **Provider fingerprint cache** and **answers library**, unchanged — this is what makes 400+ providers affordable: first contact with a form/question pays LLM cost, every repeat is ~free.
 
 **Chrome session model**, unchanged: launch Chrome yourself (headed, persistent `--user-data-dir`), Stagehand attaches via `cdp_url` (never launches its own), live-view proxy attaches as a second independent CDP client on the same Chrome. Pause = stop issuing commands; the browser and cookies never go away.
+
+> **Amended after live testing:** the browser now goes away *between applications* — one Chrome process per application, closed at the end of each. Within a single application (including across pauses, 2FA, and live-view takeover) it behaves exactly as described above. Cookie/login continuity comes from reusing the same `--user-data-dir` on the next launch, not from keeping the process alive; `keep_alive` is now `False`. This is forced by Stagehand's extension having a one-way `created → initialized → closed` state machine — see "Post-Day-5" below and FLAGGED.md #26–#29.
 
 **Day-1 spike: PASSED. Python confirmed, no Node sidecar built.** The installed package turned out to be Stagehand v4 (`await Stagehand.create(browser=..., model=...)`, a redesign from the v2/v3 API referenced in the original research). Four facts confirmed empirically against a real Greenhouse form: (1) `local_browser.launch(port=..., user_data_dir=..., keep_alive=True)` needs zero Browserbase key and never calls `api.stagehand.browserbase.com`; (2) `Stagehand.create(model=<callback>)` accepts a fully custom async LLM callback — no base-URL constraints, OpenRouter is just an HTTP call inside it; (3) a second, independent CDP client attaches to the same Chrome concurrently with Stagehand's own session; (4) Chrome survives `Stagehand.close()` when launched with `keep_alive=True` — the literal mechanism pause/resume depends on.
 
@@ -258,7 +260,7 @@ Re-scoped per "Scope correction" above. The theme is no longer "hand off to a hu
 - [x] `services/engine/submit.py` — `find_submit_button` (regex over the tree, same technique as the existing `_click_apply_if_present`) + `read_outcome` (confirmation-phrase vs validation-error regex over the post-click tree).
 - [x] **`submit_enabled` config flag, default `False`** — the full cascade runs and stops one click short; logged clearly (`"Submission skipped — SUBMIT_ENABLED is False"`) and the application is marked `completed` at that point (a deliberate simplification — see note below).
 - [x] **Post-submit verification**: confirmation text → `completed`. Validation error → **one bounded repair pass** — reruns the full Tier0→Tier1→Tier2 cascade against the corrected page state and retries submit once. This is a **simplified version of the original design** (a full rerun, not per-field-error-message targeting) — flagged as a known simplification, not the fuller design originally scoped.
-- [ ] **Local mock ATS form** — not built this pass. This is the biggest real gap in F: without it, the submit path (and the repair-pass loop) has never been exercised against anything, real or fake — only unit-tested at the regex/logic level with hand-written tree fragments.
+- [ ] **Local mock ATS form** — not built this pass. This was the biggest real gap in F: without it, the submit path (and the repair-pass loop) had never been exercised against anything, real or fake — only unit-tested at the regex/logic level with hand-written tree fragments. *(Superseded: the submit path and repair loop have since been exercised extensively against real Greenhouse forms with `SUBMIT_ENABLED=True` — see "Post-Day-5" below. The mock form was never built; live testing replaced it, which is worse for reproducibility and better for realism.)*
 
 **Known simplification, flagged rather than hidden**: with `submit_enabled=False`, the run is marked `completed` even though nothing was actually submitted — chosen over inventing a new status, since the vocabulary only has `queued/running/needs_input/completed/failed/cancelled` and `needs_input` is reserved for 2FA. The `RunEvent` log is the source of truth for "was this actually submitted" — always check it, don't infer submission from status alone while `submit_enabled` is off.
 
@@ -347,6 +349,24 @@ The scenario: a user queues a posting by mistake and wants to stop it — either
 | **Automated submission sends real applications to real employers** | `SUBMIT_ENABLED` defaults off in dev; local mock ATS form is the primary submit-path test surface; real submission only ever run deliberately and supervised |
 | **Filling every field regardless of confidence will put some wrong answers on real job applications** — Day 3's verified "abstain when unsure" behavior is deliberately traded away, and submission is now automatic, so a bad answer reaches a real employer with no human between | **Accepted tradeoff, explicitly directed** — not a defect to fix later. Prevention is out of scope by choice, so the mitigations are containment: (a) low-confidence answers are used but never cached, so one bad guess never propagates to future applications; (b) every answer is logged with its confidence, low ones at `warn`, so a bad application is explainable afterward; (c) per-job pause can stop a run before the submit checkpoint if a user spots it in the log |
 | Resume parse quality now gates form-fill accuracy for all academic/professional fields | Parsed once per resume and cached, so it is cheap to inspect and correct; parse failure degrades to raw `extracted_text` in the Tier 1 prompt rather than failing the run |
+
+---
+
+## Post-Day-5 — the live-testing era (Anthropic, then Figma)
+
+Everything above was built largely against unit tests and a handful of live runs on one company's Greenhouse board. This phase was different: repeated real runs against **two** companies (Anthropic, then Figma — deliberately a second company, to separate "our bug" from "that one form's quirk"), with a real profile and real submissions enabled. Nearly every entry in FLAGGED.md #13–#31 came out of it. The full detail lives there; this is the shape of what changed and what it cost.
+
+**What got proven live:** CAPTCHA solving (repeatedly), the full Tier 0→1→2 cascade filling ~20 fields on a real form, submission with validation-error detection and a targeted repair pass, a real email-OTP 2FA challenge, and the human-escalation fallback firing correctly.
+
+**The three structural changes this phase forced:**
+
+1. **Human escalation became the universal fallback, not a 2FA special case.** A typeahead city picker (Greenhouse's "Location (City)") resisted four separate fixes — exact-match click, closest-match fallback, type-then-select, and a pre-act verification pass that turned out to be a regression and was reverted. The lesson wasn't "fix that widget"; it was that there will always be a next widget shape. Per product direction — *the agent never fails and stops on its own while a human fix is still possible* — any field the cascade genuinely can't resolve now pauses and hands that one field to a human, and the final submit attempt is human-assisted before a run is ever allowed to end as `failed`.
+
+2. **One Chrome process per application.** Four attempts (FLAGGED.md #26 → #29), each live-tested and each wrong in a different way, before landing on the actual constraint: Stagehand's own extension has a one-way `created → initialized → closed` state machine with no reset, so a second `Stagehand.create()` against the same Chrome process can never succeed — reconnecting with a fresh wrapper doesn't help, and it has nothing to do with whether the previous run succeeded or was cancelled. Sessions are now closed at the end of every application, from inside the per-profile lock so the next application can't race the teardown.
+
+3. **Timeouts everywhere a browser await crosses the CDP boundary** (`timeouts.py`). Several "the app just froze" reports traced to unbounded awaits — a wedged socket, a 2captcha SDK default of 600s twice over, a 2FA pause with no ceiling. All bounded now, including the 2FA wait, which additionally polls the page and auto-resumes if the challenge clears on its own.
+
+**Worth carrying forward — the pattern, not just the bugs:** the most expensive mistakes this phase were *confident fixes based on sound-looking reasoning that were never run before being called done*. The browser-session bug took four attempts precisely because each fix was defensible from reading the SDK source, and each was still wrong once actually executed. Two other fixes (the pre-act description check; "only close the session on failure") were live-tested, found to be net-negative regressions, and reverted. Anything in this codebase marked "not yet live-verified" should be read as genuinely unproven, not as a formality.
 
 ---
 

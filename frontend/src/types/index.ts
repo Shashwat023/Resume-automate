@@ -42,6 +42,7 @@ export interface QueueItem {
   jobId: string;
   jobTitle: string;
   company: string;
+  apply_url?: string;
   company_url?: string;
   ats?: string;
   status: JobStatus;

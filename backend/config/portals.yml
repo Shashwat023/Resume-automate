@@ -3176,3 +3176,132 @@ tracked_companies:
     notes: "Tier 3 staffing ATS target - TrackerRMS"
     scan_method: websearch
     enabled: true
+
+  # --- Real, direct Greenhouse board URLs (company token included) ---
+  # Everything above this point is a generic company homepage — sync_service.py's
+  # _detect_greenhouse/_detect_lever regexes need the ATS's OWN board URL with
+  # the company token in it (job-boards.greenhouse.io/<token>) to hit the fast
+  # structured-JSON API path; a bare homepage falls through to the slow/
+  # unreliable Stagehand extract() fallback instead. Added so there's more
+  # than one company to test the fill/submit/captcha pipeline against —
+  # every job in the DB before this was Anthropic/Greenhouse only.
+  # Every token below was LIVE-VERIFIED against
+  # https://boards-api.greenhouse.io/v1/boards/<token>/jobs (200 + a real
+  # job count) before being added — several plausible-looking guesses
+  # (notion, ramp, plaid, doordash) 404'd and were dropped rather than
+  # shipped as dead entries. No working Lever (jobs.lever.co) tokens were
+  # found this way — every guess tried (netflix, shopify, box, canva,
+  # duolingo, and a dozen more) 404'd, meaning those companies have since
+  # moved off Lever or use a token that isn't guessable from the brand
+  # name. Revisit if Lever coverage specifically is needed.
+  # scan_method: greenhouse is informational only — sync_service.py's own
+  # regex detection on careers_url is what actually drives the Admin-page
+  # sync, independent of this field.
+
+  - name: Stripe
+    careers_url: https://job-boards.greenhouse.io/stripe
+    notes: 'Direct Greenhouse board token, live-verified (611 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Figma
+    careers_url: https://job-boards.greenhouse.io/figma
+    notes: 'Direct Greenhouse board token, live-verified (157 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Dropbox
+    careers_url: https://job-boards.greenhouse.io/dropbox
+    notes: 'Direct Greenhouse board token, live-verified (40 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: GitLab
+    careers_url: https://job-boards.greenhouse.io/gitlab
+    notes: 'Direct Greenhouse board token, live-verified (230 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Coinbase
+    careers_url: https://job-boards.greenhouse.io/coinbase
+    notes: 'Direct Greenhouse board token, live-verified (189 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Pinterest
+    careers_url: https://job-boards.greenhouse.io/pinterest
+    notes: 'Direct Greenhouse board token, live-verified (191 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Instacart
+    careers_url: https://job-boards.greenhouse.io/instacart
+    notes: 'Direct Greenhouse board token, live-verified (113 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Databricks
+    careers_url: https://job-boards.greenhouse.io/databricks
+    notes: 'Direct Greenhouse board token, live-verified (867 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Discord
+    careers_url: https://job-boards.greenhouse.io/discord
+    notes: 'Direct Greenhouse board token, live-verified (49 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Robinhood
+    careers_url: https://job-boards.greenhouse.io/robinhood
+    notes: 'Direct Greenhouse board token, live-verified (133 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Brex
+    careers_url: https://job-boards.greenhouse.io/brex
+    notes: 'Direct Greenhouse board token, live-verified (272 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Asana
+    careers_url: https://job-boards.greenhouse.io/asana
+    notes: 'Direct Greenhouse board token, live-verified (113 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Squarespace
+    careers_url: https://job-boards.greenhouse.io/squarespace
+    notes: 'Direct Greenhouse board token, live-verified (26 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Affirm
+    careers_url: https://job-boards.greenhouse.io/affirm
+    notes: 'Direct Greenhouse board token, live-verified (203 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: DoorDash
+    careers_url: https://job-boards.greenhouse.io/doordashusa
+    notes: 'Direct Greenhouse board token, live-verified (458 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Lyft
+    careers_url: https://job-boards.greenhouse.io/lyft
+    notes: 'Direct Greenhouse board token, live-verified (170 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Twitch
+    careers_url: https://job-boards.greenhouse.io/twitch
+    notes: 'Direct Greenhouse board token, live-verified (50 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse
+
+  - name: Reddit
+    careers_url: https://job-boards.greenhouse.io/reddit
+    notes: 'Direct Greenhouse board token, live-verified (147 jobs), added for non-Anthropic pipeline testing'
+    enabled: true
+    scan_method: greenhouse

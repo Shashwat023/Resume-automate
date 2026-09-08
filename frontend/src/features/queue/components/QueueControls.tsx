@@ -72,7 +72,20 @@ export const QueueControls = () => {
 
       <button
         onClick={() => cancelMutation.mutate()}
-        disabled={cancelMutation.isPending || status === 'completed' || status === 'cancelled' || status === 'idle'}
+        // Real bug found live: the aggregate `status` computation
+        // (queue.ts) only counts a job as "active" when its own status is
+        // literally 'running' — a job stuck at 'waiting_for_user' (2FA /
+        // manual-field escalation) matches neither that nor any other
+        // branch, so the aggregate falls through to its 'idle' default.
+        // This button's disabled check on `status === 'idle'` then made
+        // Cancel unusable on EXACTLY the job most likely to need
+        // cancelling — one stuck waiting on the user. `needsInput` (which
+        // checks the actual current job, not the lossy aggregate) is
+        // enough on its own to know there's something cancellable here.
+        disabled={
+          cancelMutation.isPending ||
+          (!needsInput && (status === 'completed' || status === 'cancelled' || status === 'idle'))
+        }
         className="flex items-center gap-2 px-4 py-2 border border-red-200 text-red-600 dark:border-red-900/30 dark:text-red-400 rounded-lg font-medium text-sm hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50"
       >
         <XCircle className="w-4 h-4" /> Cancel Run

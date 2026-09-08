@@ -137,12 +137,21 @@ async def wait_for_resume(application_id: str) -> None:
     await event.wait()
 
 
-async def wait_for_resume_or_cancel(application_id: str) -> str:
-    """Returns "resumed" or "cancelled" — whichever fires first. Use this
-    (not the plain wait_for_resume) at every blocking pause point, so a
-    cancel signalled while an application is paused (2FA, CAPTCHA
-    escalation, or a user pause) is actually observed instead of leaving
-    the task — and its Chrome session — blocked forever."""
+async def wait_for_resume_or_cancel(
+    application_id: str, timeout: float | None = None
+) -> str:
+    """Returns "resumed" or "cancelled" — whichever fires first — or
+    "timeout" if neither fires within `timeout` seconds (default: wait
+    forever, unchanged for every existing caller). Use this (not the plain
+    wait_for_resume) at every blocking pause point, so a cancel signalled
+    while an application is paused (2FA, CAPTCHA escalation, or a user
+    pause) is actually observed instead of leaving the task — and its
+    Chrome session — blocked forever.
+
+    `timeout` exists for 2FA: a run must poll for the challenge clearing
+    on its own (auto-resume) rather than block on a human clicking Resume
+    forever — see runner.py's `_handle_2fa_if_present`. Callers that pass
+    no timeout keep the original indefinite-wait behavior exactly."""
     resume_event = _resume_events.setdefault(application_id, asyncio.Event())
     cancel_event = _cancel_events.setdefault(application_id, asyncio.Event())
     resume_event.clear()
@@ -151,13 +160,17 @@ async def wait_for_resume_or_cancel(application_id: str) -> str:
     cancel_task = asyncio.create_task(cancel_event.wait())
     try:
         done, pending = await asyncio.wait(
-            {resume_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            {resume_task, cancel_task},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
         )
     finally:
         for task in (resume_task, cancel_task):
             if not task.done():
                 task.cancel()
 
+    if not done:
+        return "timeout"
     return "cancelled" if cancel_task in done else "resumed"
 
 

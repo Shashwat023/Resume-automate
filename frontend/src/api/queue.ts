@@ -11,6 +11,9 @@ interface BackendApplyHistoryItem {
   status: string; // 'pending' | 'running' | 'completed' | 'failed' etc.
   started_at: string | null;
   finished_at: string | null;
+  apply_url?: string | null;
+  company_url?: string | null;
+  ats?: string | null;
 }
 
 function mapBackendStatusToJobStatus(status: string): JobStatus {
@@ -90,6 +93,9 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
       jobId: String(h.job_id),
       jobTitle: h.job_title ?? 'Unknown role',
       company: h.company_name ?? 'Unknown company',
+      apply_url: h.apply_url ?? undefined,
+      company_url: h.company_url ?? undefined,
+      ats: h.ats ?? undefined,
       status,
       rawStatus: h.status,
       statusLabel: describeBackendStatus(h.status),
