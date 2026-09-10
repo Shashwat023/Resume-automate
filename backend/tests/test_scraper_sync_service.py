@@ -292,6 +292,34 @@ def _install_fake_stagehand(monkeypatch, fake_instance):
     monkeypatch.setattr(sync_service, "get_or_launch", _fake_get_or_launch)
 
 
+async def test_extract_via_extract_closes_the_scraper_chrome_session(
+    async_session, monkeypatch
+):
+    """
+    Live-caught (FLAGGED.md): sh.close() alone leaves the "scraper" Chrome
+    profile's browser claimed, so a second sync_company() call reuses it
+    via get_or_launch() and immediately fails with "Stagehand has already
+    been initialized". _sync_via_extract must also call close_session() so
+    the next call gets a genuinely fresh browser.
+    """
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([])],
+        observe_results=[_FakeObserveResult([])],
+    )
+    _install_fake_stagehand(monkeypatch, fake)
+
+    closed_profile_keys: list[str] = []
+
+    async def _fake_close_session(profile_key):
+        closed_profile_keys.append(profile_key)
+
+    monkeypatch.setattr(sync_service, "close_session", _fake_close_session)
+
+    await sync_service._sync_via_extract("https://example.com/careers", async_session)
+
+    assert closed_profile_keys == [sync_service._SCRAPER_PROFILE_KEY]
+
+
 async def test_extract_pagination_follows_next_page_until_none_found(
     async_session, monkeypatch
 ):
@@ -351,6 +379,78 @@ async def test_extract_pagination_stops_when_a_page_yields_no_new_jobs(
     # Stopped after page 2 found nothing new — never checked for a 3rd page.
     assert fake.extract_calls == 2
     assert fake.observe_calls == 1
+
+
+# ---- _sync_via_extract: drill-down to a "Search Jobs" page ----
+
+
+async def test_extract_drilldown_follows_search_jobs_link_when_first_page_is_empty(
+    async_session, monkeypatch
+):
+    from app.services.scraper.sync_service import ScrapedJob
+
+    fake = _FakeStagehandInstance(
+        extract_results=[
+            _FakeExtractResult([]),  # page 1: landing page, no jobs
+            _FakeExtractResult(
+                [ScrapedJob(title="Engineer", location="Remote", apply_url="https://x.com/1")]
+            ),  # after drilldown: real listings
+        ],
+        observe_results=[
+            _FakeObserveResult([_FakeAction()]),  # drilldown: "Search Jobs" link found
+            _FakeObserveResult([]),  # pagination: no next page
+        ],
+    )
+    _install_fake_stagehand(monkeypatch, fake)
+
+    inserted, updated = await sync_service._sync_via_extract(
+        "https://example.com/careers", async_session
+    )
+
+    assert inserted == 1
+    assert fake.extract_calls == 2
+    assert fake.observe_calls == 2
+    assert fake.act_calls == 1  # clicked the drilldown link, nothing more
+
+
+async def test_extract_drilldown_not_attempted_when_no_link_found(
+    async_session, monkeypatch
+):
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([])],  # landing page, no jobs
+        observe_results=[_FakeObserveResult([])],  # no drilldown link either
+    )
+    _install_fake_stagehand(monkeypatch, fake)
+
+    inserted, updated = await sync_service._sync_via_extract(
+        "https://example.com/careers", async_session
+    )
+
+    assert inserted == 0
+    assert fake.extract_calls == 1
+    assert fake.observe_calls == 1
+    assert fake.act_calls == 0
+
+
+async def test_extract_drilldown_stops_if_retry_still_empty(async_session, monkeypatch):
+    fake = _FakeStagehandInstance(
+        extract_results=[
+            _FakeExtractResult([]),  # page 1: landing page
+            _FakeExtractResult([]),  # after drilldown: still nothing
+        ],
+        observe_results=[_FakeObserveResult([_FakeAction()])],  # drilldown link found
+    )
+    _install_fake_stagehand(monkeypatch, fake)
+
+    inserted, updated = await sync_service._sync_via_extract(
+        "https://example.com/careers", async_session
+    )
+
+    assert inserted == 0
+    assert fake.extract_calls == 2
+    # Drilldown only ever attempted once — no second observe() call.
+    assert fake.observe_calls == 1
+    assert fake.act_calls == 1
 
 
 async def test_extract_pagination_respects_max_page_cap(async_session, monkeypatch):

@@ -345,3 +345,17 @@ Deduping is cumulative across pages (a `seen_apply_urls` set), not just per-page
 **Explicitly still not solved** (asked about directly, answered honestly): a bare ATS platform root (e.g. `job-boards.greenhouse.io/` with no company token) has no directory of companies to enumerate — this pagination loop helps once you're on an actual listing page, it doesn't invent one where none exists.
 
 Unit-tested: 3 new tests covering each stop condition (`test_extract_pagination_follows_next_page_until_none_found`, `test_extract_pagination_stops_when_a_page_yields_no_new_jobs`, `test_extract_pagination_respects_max_page_cap`). 324 total passing. **Not yet live-tested** against a real multi-page careers site — the existing Greenhouse/Lever jobs in the DB all came from the free API path, which this doesn't touch.
+
+**Update — live-tested against `jobs.ashbyhq.com/notion` (130 real postings, not Greenhouse/Lever):** ran cleanly end-to-end — one `extract()` call captured all 130 jobs (77 inserted, 53 already existed), `observe()` correctly found no pagination control and the loop stopped without ever calling `act()`. Confirms the refactor doesn't regress the common case. The `act()`-driven click-through path itself (stop conditions 1/2, real page advance) is still unexercised live — this site had no separate "load more" control to click — only unit-tested so far.
+
+## 33. Landing-page careers sites (a "Search Jobs" button, no listings on the URL given) now get one drill-down hop
+
+Live-caught via manual review, not a crash: pasting a marketing/landing URL (e.g. `careers.cargill.com/en`, `salesforce.com/company/careers/`) into sync returned `0 jobs` — correct behavior for the old code, but unhelpful, since the actual listings are one click away behind a "Search Jobs" button.
+
+Distinguished from two related, explicitly out-of-scope cases (see user discussion):
+- A bare ATS platform root with no company token — no directory exists to enumerate; still unsolved and unsolvable without a different discovery mechanism (see `#32`).
+- A career site split into multiple parallel tracks by experience level (e.g. Cargill's separate Professional / Production / University listings pages) — following one such link arbitrarily would miss the others, and per user's own tradeoff analysis, blindly crawling all of them for a single-persona app would waste LLM spend scraping job levels a given user base doesn't need. **Deferred, not built.**
+
+What's built: if the very first `extract()` call on the given URL finds zero postings, `_sync_via_extract` now tries exactly one drill-down hop — `observe()` for a single "Search Jobs"/"View Openings"/"Current Openings"-style link, `act()` to follow it, then re-`extract()` from the resulting page. If that retry is also empty, it stops for good — no repeated or recursive drilling. Costs at most 3 extra LLM calls (`observe`+`act`+`extract`), and only when page one is genuinely empty.
+
+Unit-tested: `test_extract_drilldown_follows_search_jobs_link_when_first_page_is_empty`, `test_extract_drilldown_not_attempted_when_no_link_found`, `test_extract_drilldown_stops_if_retry_still_empty`. 327 total passing. **Not yet live-tested** against a real landing-page careers site.

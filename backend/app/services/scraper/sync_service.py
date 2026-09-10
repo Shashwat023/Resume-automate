@@ -20,7 +20,7 @@ from stagehand import Stagehand
 
 from app.core.config import get_settings
 from app.models.db_models import Job
-from app.services.browser.chrome_launcher import get_or_launch
+from app.services.browser.chrome_launcher import close_session, get_or_launch
 from app.services.engine.llm_client import openrouter_llm
 from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
 
@@ -195,6 +195,55 @@ _PAGINATION_INSTRUCTION = (
     "is already shown and there is no such control, find nothing."
 )
 
+# Some careers pages are landing/marketing pages, not listings — e.g. a page
+# with only a "Search Jobs" button or search bar and no postings rendered
+# at all. If the very first extract() finds nothing, try one drill-down hop
+# to the actual listings page before giving up. Deliberately narrow: this
+# follows a single "go to the job listings" link, not every link on the
+# page — a page with several separate tracks (e.g. Professional/Production/
+# University career sites) isn't handled by this and still needs a direct
+# URL to the specific listings page (see FLAGGED.md).
+_JOBS_LINK_INSTRUCTION = (
+    "Find a link or button that leads to a page listing open job positions "
+    "or a job search page — e.g. 'Search Jobs', 'View Openings', 'Current "
+    "Openings', 'Browse Jobs'. If this page already lists job postings "
+    "directly, find nothing."
+)
+
+
+async def _try_drilldown_to_listings(sh, page) -> bool:
+    """
+    One best-effort hop from a landing page to its actual job listings.
+    Returns True if a link was found and clicked (caller should re-extract).
+    """
+    try:
+        obs = await with_timeout(
+            sh.observe(_JOBS_LINK_INSTRUCTION, page=page),
+            LLM_CALL_TIMEOUT_SECONDS,
+            what="observe() (drilldown)",
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+    if not obs.data:
+        return False
+
+    try:
+        await with_timeout(
+            sh.act(obs.data[0], page=page),
+            LLM_CALL_TIMEOUT_SECONDS,
+            what="act() (drilldown)",
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+    try:
+        await with_timeout(page.wait_for_load_state("load"), what="wait_for_load_state")
+    except Exception:  # noqa: BLE001
+        pass  # an in-page SPA route change may never fire a "load" event
+    await page.wait_for_timeout(1500)
+    return True
+
 
 async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, int]:
     """
@@ -207,6 +256,10 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
     it and repeat. Bounded three ways so this can never turn into an
     unbounded LLM-spend loop — see each check below and
     settings.scraper_max_pages's own docstring.
+
+    If the very first page is a landing page with no postings, tries one
+    drill-down hop to a "Search Jobs"-style link before giving up — see
+    _try_drilldown_to_listings.
     """
     settings = get_settings()
     session = await get_or_launch(_SCRAPER_PROFILE_KEY)
@@ -224,7 +277,9 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
         await with_timeout(page.wait_for_load_state("load"), what="wait_for_load_state")
         await page.wait_for_timeout(1500)
 
-        for page_number in range(1, settings.scraper_max_pages + 1):
+        drilldown_attempted = False
+        page_number = 1
+        while page_number <= settings.scraper_max_pages:
             result = await with_timeout(
                 sh.extract(_EXTRACT_INSTRUCTION, ScrapedJobs, page=page),
                 LLM_CALL_TIMEOUT_SECONDS,
@@ -247,11 +302,16 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
             # Stop condition 1: this page added nothing new — either we've
             # reached the real end (a "Next" control that loops back, or a
             # duplicate render) or we're stuck; either way, continuing
-            # would just keep spending on no signal.
+            # would just keep spending on no signal. Exception: page one of
+            # a landing page — try one drill-down hop first.
             if not new_this_page:
+                if page_number == 1 and not drilldown_attempted:
+                    drilldown_attempted = True
+                    if await _try_drilldown_to_listings(sh, page):
+                        continue  # re-extract from the listings page, same page_number
                 break
 
-            # Stop condition 2 (checked implicitly by the for-loop bound):
+            # Stop condition 2 (checked implicitly by the while-loop bound):
             # settings.scraper_max_pages caps worst-case spend even if a
             # page keeps legitimately yielding new jobs forever.
             if page_number == settings.scraper_max_pages:
@@ -280,8 +340,20 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
             except Exception:  # noqa: BLE001
                 break  # couldn't advance — stop rather than retry indefinitely
             await page.wait_for_timeout(1500)  # let the next page/appended jobs render
+            page_number += 1
     finally:
+        # sh.close() only detaches the Stagehand wrapper — it does NOT close
+        # the underlying Chrome browser (see chrome_launcher.py's own
+        # comment on this). Without also closing the session, the "scraper"
+        # profile's browser stays alive and already-claimed, so the next
+        # sync_company() call reuses it via get_or_launch() and immediately
+        # fails with "Stagehand has already been initialized" — the same
+        # one-way-extension-state-machine bug documented for the
+        # application-filling flow (FLAGGED.md #26-29), live-caught here too
+        # when two syncs ran back-to-back. Must close both, in this order,
+        # same as runner.py's fix.
         await sh.close()
+        await close_session(_SCRAPER_PROFILE_KEY)
 
     return inserted, updated
 

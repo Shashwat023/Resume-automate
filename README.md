@@ -119,7 +119,7 @@ cd backend
 pytest -q
 ```
 
-321 tests, all fakes/mocks for LLM and browser calls — no network or Chrome needed to run the suite.
+327 tests, all fakes/mocks for LLM and browser calls — no network or Chrome needed to run the suite.
 
 ---
 
