@@ -139,6 +139,7 @@ All backend settings live in `app/core/config.py`, overridable via `backend/.env
 | `CAPTCHA_POLLING_INTERVAL_SECONDS` | `5` | How often the 2captcha SDK polls for a result. |
 | `USE_REAL_CHROME` | `False` | Opt-in: launch consumer Chrome instead of the Chrome-for-Testing build. **Known not to work** — Stagehand's companion extension can't complete its handshake on a Stable-channel build (FLAGGED.md). Left in place as documented dead-end, not a supported path. |
 | `REAL_CHROME_EXECUTABLE_PATH` | *(auto-detect)* | Only used when `USE_REAL_CHROME=True`. |
+| `SCRAPER_MAX_PAGES` | `15` | Bound on the scraper's `extract()` fallback following "next page"/"load more" pagination. Each extra page costs one LLM call (~$0.005–0.015) — this caps worst-case spend if a page's pagination can't be reliably recognized. |
 
 **On `CAPTCHA_PROXY_URL`:** a solved 2captcha token is bound by Google to the IP that solved it. Without a shared proxy, 2captcha solves from its own datacenter IP while the browser submits from yours — and risk-based reCAPTCHA Enterprise rejects the mismatch regardless of token validity. This was the confirmed cause of a real "Please complete the reCAPTCHA" rejection on a genuinely-solved token. Format: `scheme://user:pass@host:port`.
 

@@ -18,10 +18,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from stagehand import Stagehand
 
+from app.core.config import get_settings
 from app.models.db_models import Job
 from app.services.browser.chrome_launcher import get_or_launch
 from app.services.engine.llm_client import openrouter_llm
-from app.services.engine.timeouts import with_timeout
+from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
 
 GREENHOUSE_BOARD_RE = re.compile(
     r"(?:job-boards\.greenhouse\.io|boards\.greenhouse\.io)/([\w-]+)"
@@ -174,15 +175,46 @@ async def _sync_lever(company_token: str, db: AsyncSession) -> tuple[int, int]:
     return inserted, updated
 
 
+_EXTRACT_INSTRUCTION = (
+    "List every open job posting visible on this page. For each one, give its "
+    "exact title, its location if shown, and the full URL to apply or view the "
+    "posting."
+)
+
+# A single extract() call only ever sees what's currently rendered — a real
+# job board or careers page routinely spreads its full listing across
+# several pages (numbered pagination, a "Next" button, or a "Load more"
+# button that appends more without navigating). Per user direction: follow
+# that pagination rather than silently stopping at page one. Phrased
+# generically (not "click Next") since the actual control varies by site —
+# observe() decides whether one exists at all.
+_PAGINATION_INSTRUCTION = (
+    "Find the control that shows more job listings beyond what's currently "
+    "visible — a 'Next page' button, a numbered link to the next page, or a "
+    "'Load more'/'Show more jobs' button. If every job posting on this page "
+    "is already shown and there is no such control, find nothing."
+)
+
+
 async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, int]:
     """
     Tier 2 fallback for any careers page that isn't a known ATS. Uses a
     dedicated "scraper" Chrome profile (see _SCRAPER_PROFILE_KEY) so this
     never shares cookies/session state with a user's logged-in application
     flow — scraping only ever browses public pages.
+
+    Paginates: extract the current page, look for a "more" control, click
+    it and repeat. Bounded three ways so this can never turn into an
+    unbounded LLM-spend loop — see each check below and
+    settings.scraper_max_pages's own docstring.
     """
+    settings = get_settings()
     session = await get_or_launch(_SCRAPER_PROFILE_KEY)
     sh = await Stagehand.create(browser=session.browser, model=openrouter_llm)
+    company_name = _company_name_from_url(company_url)
+    seen_apply_urls: set[str] = set()
+    inserted = 0
+    updated = 0
     try:
         page = (
             await sh.browser.context.active_page()
@@ -192,20 +224,74 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
         await with_timeout(page.wait_for_load_state("load"), what="wait_for_load_state")
         await page.wait_for_timeout(1500)
 
-        result = await sh.extract(
-            "List every open job posting visible on this page. For each one, give its "
-            "exact title, its location if shown, and the full URL to apply or view the "
-            "posting.",
-            ScrapedJobs,
-            page=page,
-        )
+        for page_number in range(1, settings.scraper_max_pages + 1):
+            result = await with_timeout(
+                sh.extract(_EXTRACT_INSTRUCTION, ScrapedJobs, page=page),
+                LLM_CALL_TIMEOUT_SECONDS,
+                what="extract()",
+            )
+
+            new_this_page = [
+                item for item in result.data.jobs if item.apply_url not in seen_apply_urls
+            ]
+            for item in result.data.jobs:
+                if item.apply_url:
+                    seen_apply_urls.add(item.apply_url)
+
+            page_inserted, page_updated = await _upsert_scraped_jobs(
+                new_this_page, company_name, db
+            )
+            inserted += page_inserted
+            updated += page_updated
+
+            # Stop condition 1: this page added nothing new — either we've
+            # reached the real end (a "Next" control that loops back, or a
+            # duplicate render) or we're stuck; either way, continuing
+            # would just keep spending on no signal.
+            if not new_this_page:
+                break
+
+            # Stop condition 2 (checked implicitly by the for-loop bound):
+            # settings.scraper_max_pages caps worst-case spend even if a
+            # page keeps legitimately yielding new jobs forever.
+            if page_number == settings.scraper_max_pages:
+                break
+
+            try:
+                obs = await with_timeout(
+                    sh.observe(_PAGINATION_INSTRUCTION, page=page),
+                    LLM_CALL_TIMEOUT_SECONDS,
+                    what="observe() (pagination)",
+                )
+            except Exception:  # noqa: BLE001
+                break  # best-effort — treat a failed pagination check as "no more pages"
+
+            # Stop condition 3: no pagination/load-more control found —
+            # this genuinely is the last page.
+            if not obs.data:
+                break
+
+            try:
+                await with_timeout(
+                    sh.act(obs.data[0], page=page),
+                    LLM_CALL_TIMEOUT_SECONDS,
+                    what="act() (pagination)",
+                )
+            except Exception:  # noqa: BLE001
+                break  # couldn't advance — stop rather than retry indefinitely
+            await page.wait_for_timeout(1500)  # let the next page/appended jobs render
     finally:
         await sh.close()
 
-    company_name = _company_name_from_url(company_url)
+    return inserted, updated
+
+
+async def _upsert_scraped_jobs(
+    items: list[ScrapedJob], company_name: str, db: AsyncSession
+) -> tuple[int, int]:
     inserted = 0
     updated = 0
-    for item in result.data.jobs:
+    for item in items:
         if not item.apply_url:
             continue
         existing = (
