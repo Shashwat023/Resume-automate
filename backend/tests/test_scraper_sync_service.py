@@ -328,10 +328,18 @@ async def test_extract_pagination_follows_next_page_until_none_found(
     fake = _FakeStagehandInstance(
         extract_results=[
             _FakeExtractResult(
-                [ScrapedJob(title="Engineer", location="Remote", apply_url="https://x.com/1")]
+                [
+                    ScrapedJob(
+                        title="Engineer", location="Remote", apply_url="https://x.com/1"
+                    )
+                ]
             ),
             _FakeExtractResult(
-                [ScrapedJob(title="Designer", location="Remote", apply_url="https://x.com/2")]
+                [
+                    ScrapedJob(
+                        title="Designer", location="Remote", apply_url="https://x.com/2"
+                    )
+                ]
             ),
         ],
         observe_results=[
@@ -361,7 +369,9 @@ async def test_extract_pagination_stops_when_a_page_yields_no_new_jobs(
 ):
     from app.services.scraper.sync_service import ScrapedJob
 
-    same_job = ScrapedJob(title="Engineer", location="Remote", apply_url="https://x.com/1")
+    same_job = ScrapedJob(
+        title="Engineer", location="Remote", apply_url="https://x.com/1"
+    )
     fake = _FakeStagehandInstance(
         extract_results=[
             _FakeExtractResult([same_job]),
@@ -393,7 +403,11 @@ async def test_extract_drilldown_follows_search_jobs_link_when_first_page_is_emp
         extract_results=[
             _FakeExtractResult([]),  # page 1: landing page, no jobs
             _FakeExtractResult(
-                [ScrapedJob(title="Engineer", location="Remote", apply_url="https://x.com/1")]
+                [
+                    ScrapedJob(
+                        title="Engineer", location="Remote", apply_url="https://x.com/1"
+                    )
+                ]
             ),  # after drilldown: real listings
         ],
         observe_results=[
@@ -460,7 +474,9 @@ async def test_extract_pagination_respects_max_page_cap(async_session, monkeypat
     monkeypatch.setattr(get_settings(), "scraper_max_pages", 2)
 
     def _unique_job(n):
-        return ScrapedJob(title=f"Job {n}", location="Remote", apply_url=f"https://x.com/{n}")
+        return ScrapedJob(
+            title=f"Job {n}", location="Remote", apply_url=f"https://x.com/{n}"
+        )
 
     # Every page yields a new job AND a pagination control — would loop
     # forever without the cap.

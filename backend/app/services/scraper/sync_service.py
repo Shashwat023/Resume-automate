@@ -287,7 +287,9 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
             )
 
             new_this_page = [
-                item for item in result.data.jobs if item.apply_url not in seen_apply_urls
+                item
+                for item in result.data.jobs
+                if item.apply_url not in seen_apply_urls
             ]
             for item in result.data.jobs:
                 if item.apply_url:
