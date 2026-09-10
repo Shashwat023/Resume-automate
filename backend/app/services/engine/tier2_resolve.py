@@ -302,6 +302,17 @@ async def _resolve_single_step(sh: Stagehand, page, instruction: str) -> str:
     return act_result.data.action_description
 
 
+def _select_option_instruction(field: FormField, value: str) -> str:
+    """The "now that the dropdown is open, click this option" instruction —
+    used by both the normal open-then-select path and the typeahead
+    recovery path, which previously each carried their own copy of the
+    identical wording."""
+    return (
+        f"Click the option '{value}' that is now visible in the open "
+        f"'{field.label}' dropdown"
+    )
+
+
 async def _type_then_reobserve_select(
     sh: Stagehand, page, field: FormField, value: str
 ):
@@ -334,12 +345,10 @@ async def _type_then_reobserve_select(
 
     await page.wait_for_timeout(500)  # let the filtered list render
 
-    select_instruction = (
-        f"Click the option '{value}' that is now visible in the open "
-        f"'{field.label}' dropdown"
-    )
     try:
-        return await _with_timeout(sh.observe(select_instruction, page=page))
+        return await _with_timeout(
+            sh.observe(_select_option_instruction(field, value), page=page)
+        )
     except Exception:  # noqa: BLE001
         return None
 
@@ -377,9 +386,10 @@ async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -
 
     await _wait_for_options_to_render(page)
 
-    select_instruction = f"Click the option '{value}' that is now visible in the open '{field.label}' dropdown"
     try:
-        obs_select = await _with_timeout(sh.observe(select_instruction, page=page))
+        obs_select = await _with_timeout(
+            sh.observe(_select_option_instruction(field, value), page=page)
+        )
     except Exception as exc:  # noqa: BLE001
         return f"ERROR:observe() (select step) failed: {_describe(exc)}"
 

@@ -120,6 +120,15 @@ class Settings(BaseSettings):
     real_chrome_executable_path: str | None = None  # None -> auto-detect
     real_chrome_profiles_dir: Path = BACKEND_DIR / ".real-chrome-profiles"
 
+    # Bound on the scraper's extract() pagination loop (sync_service.py) —
+    # per user direction: a careers page/job board isn't limited to one
+    # page's worth of postings, so the fallback now follows "next
+    # page"/"load more" controls and re-extracts. Capped so a page whose
+    # pagination control we can't recognize correctly (or a genuinely
+    # infinite feed) can't turn into an unbounded LLM-spend loop — each
+    # extra page costs one extract() call (~$0.005-0.015, see FLAGGED.md).
+    scraper_max_pages: int = 15
+
     resume_storage_dir: Path = BACKEND_DIR / "storage" / "resumes"
 
     portals_config_path: Path = BACKEND_DIR / "config" / "portals.yml"

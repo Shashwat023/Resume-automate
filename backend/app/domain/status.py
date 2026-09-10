@@ -11,7 +11,6 @@ infrastructure — it belongs in the domain layer.
 """
 
 QUEUED = "queued"
-CHECKING_URL = "checking_url"
 RUNNING = "running"
 NEEDS_INPUT = (
     "needs_input"  # Day 4 scope correction: 2FA only — everything else is automated

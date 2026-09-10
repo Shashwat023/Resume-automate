@@ -5,8 +5,6 @@ router today — only by the portals.yml seeding script — but the same
 boundary rule applies: nowhere else should query TrackedCompany directly.
 """
 
-from datetime import datetime
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,9 +40,3 @@ class TrackedCompanyRepository:
         stmt = select(TrackedCompany)
         result = await self._db.execute(stmt)
         return len(result.scalars().all())
-
-    async def mark_synced(self, careers_url: str, when: datetime) -> None:
-        existing = await self.get_by_careers_url(careers_url)
-        if existing is not None:
-            existing.last_synced_at = when
-            await self._db.commit()

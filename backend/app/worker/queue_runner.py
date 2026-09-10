@@ -131,19 +131,13 @@ def is_paused(application_id: str) -> bool:
     return event is not None and event.is_set()
 
 
-async def wait_for_resume(application_id: str) -> None:
-    event = _resume_events.setdefault(application_id, asyncio.Event())
-    event.clear()
-    await event.wait()
-
-
 async def wait_for_resume_or_cancel(
     application_id: str, timeout: float | None = None
 ) -> str:
     """Returns "resumed" or "cancelled" — whichever fires first — or
     "timeout" if neither fires within `timeout` seconds (default: wait
-    forever, unchanged for every existing caller). Use this (not the plain
-    wait_for_resume) at every blocking pause point, so a cancel signalled
+    forever, unchanged for every existing caller). Used at every blocking
+    pause point, so a cancel signalled
     while an application is paused (2FA, CAPTCHA escalation, or a user
     pause) is actually observed instead of leaving the task — and its
     Chrome session — blocked forever.
@@ -200,15 +194,6 @@ class InProcessQueue:
 
     async def signal_pause(self, application_id: str) -> None:
         await signal_pause(application_id)
-
-    def is_cancelled(self, application_id: str) -> bool:
-        return is_cancelled(application_id)
-
-    def is_paused(self, application_id: str) -> bool:
-        return is_paused(application_id)
-
-    def cleanup(self, application_id: str) -> None:
-        cleanup(application_id)
 
 
 queue = InProcessQueue()

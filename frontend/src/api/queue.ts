@@ -49,7 +49,7 @@ function mapBackendStatusToJobStatus(status: string): JobStatus {
 }
 
 // Human-readable label for the new intermediate statuses, used in the Queue UI
-export function describeBackendStatus(status: string): string {
+function describeBackendStatus(status: string): string {
   switch (status) {
     case 'checking_url':
       return 'Checking job link...';

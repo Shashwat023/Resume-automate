@@ -164,18 +164,6 @@ class RunEvent(Base):
     application: Mapped["Application"] = relationship(back_populates="events")
 
 
-class FieldCache(Base):
-    """(provider, form_signature) -> resolved field->selector map."""
-
-    __tablename__ = "field_cache"
-
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    form_signature: Mapped[str] = mapped_column(Text, primary_key=True)
-    selector_map: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    hits: Mapped[int] = mapped_column(default=0)
-
-
 class AnswerLibrary(Base):
     """
     question_hash -> approved answer, scoped per profile. `source` and

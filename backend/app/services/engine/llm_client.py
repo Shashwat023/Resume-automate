@@ -41,13 +41,6 @@ from app.core.config import get_settings
 settings = get_settings()
 
 
-async def unreachable_llm(params):
-    raise RuntimeError(
-        "LLM callback invoked during a Tier 0-only run — Tier 0 must be "
-        "purely deterministic. This indicates a bug, not a missing API key."
-    )
-
-
 def _blocks_to_openai_content(content) -> list[dict]:
     blocks = content if isinstance(content, list) else [content]
     parts = []
