@@ -19,23 +19,6 @@ export const useQueueStatusQuery = () => {
   });
 };
 
-export const useCreateQueueMutation = () => {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (payload: {
-      jobs: { id: string; title: string; company_name: string; apply_url: string }[];
-    }) => queueApi.createQueue(payload),
-    onSuccess: (results: any[]) => {
-      toast.success(`${results.length} application(s) queued successfully!`);
-      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Failed to queue applications');
-    },
-  });
-};
-
 // Day 4 Part H: per-row pause/resume, targeting an EXPLICIT application id
 // rather than only the queue's current job — this is what QueueTable's
 // per-row buttons use, so a mistakenly-queued job can be stopped before it

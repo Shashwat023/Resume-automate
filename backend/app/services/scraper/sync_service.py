@@ -45,6 +45,15 @@ class ScrapedJobs(BaseModel):
     jobs: list[ScrapedJob]
 
 
+def _result(inserted: int, updated: int, failed: int) -> dict:
+    return {
+        "success": failed == 0,
+        "jobs_inserted": inserted,
+        "jobs_updated": updated,
+        "failed": failed,
+    }
+
+
 async def sync_company(company_url: str, db: AsyncSession) -> dict:
     inserted = 0
     updated = 0
@@ -56,12 +65,7 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             inserted, updated = await _sync_greenhouse(board_token, db)
         except Exception:
             failed += 1
-        return {
-            "success": failed == 0,
-            "jobs_inserted": inserted,
-            "jobs_updated": updated,
-            "failed": failed,
-        }
+        return _result(inserted, updated, failed)
 
     lever_token = _detect_lever(company_url)
     if lever_token:
@@ -69,23 +73,13 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             inserted, updated = await _sync_lever(lever_token, db)
         except Exception:
             failed += 1
-        return {
-            "success": failed == 0,
-            "jobs_inserted": inserted,
-            "jobs_updated": updated,
-            "failed": failed,
-        }
+        return _result(inserted, updated, failed)
 
     try:
         inserted, updated = await _sync_via_extract(company_url, db)
-        return {
-            "success": True,
-            "jobs_inserted": inserted,
-            "jobs_updated": updated,
-            "failed": 0,
-        }
+        return _result(inserted, updated, 0)
     except Exception:
-        return {"success": False, "jobs_inserted": 0, "jobs_updated": 0, "failed": 1}
+        return _result(0, 0, 1)
 
 
 def _detect_greenhouse(url: str) -> str | None:
@@ -96,6 +90,15 @@ def _detect_greenhouse(url: str) -> str | None:
 def _detect_lever(url: str) -> str | None:
     m = LEVER_RE.search(url)
     return m.group(1) if m else None
+
+
+async def _find_job_by_apply_url(db: AsyncSession, apply_url: str) -> Job | None:
+    """The one place a Job is looked up by its unique apply_url — shared by
+    all three sync paths (Greenhouse, Lever, extract), which previously each
+    carried their own identical copy of this query."""
+    return (
+        await db.execute(select(Job).where(Job.apply_url == apply_url))
+    ).scalar_one_or_none()
 
 
 def _company_name_from_url(url: str) -> str:
@@ -116,9 +119,7 @@ async def _sync_greenhouse(board_token: str, db: AsyncSession) -> tuple[int, int
         apply_url = item.get("absolute_url")
         if not apply_url:
             continue
-        existing = (
-            await db.execute(select(Job).where(Job.apply_url == apply_url))
-        ).scalar_one_or_none()
+        existing = await _find_job_by_apply_url(db, apply_url)
         location = (item.get("location") or {}).get("name", "")
         if existing:
             existing.title = item.get("title", existing.title)
@@ -152,9 +153,7 @@ async def _sync_lever(company_token: str, db: AsyncSession) -> tuple[int, int]:
         apply_url = item.get("hostedUrl") or item.get("applyUrl")
         if not apply_url:
             continue
-        existing = (
-            await db.execute(select(Job).where(Job.apply_url == apply_url))
-        ).scalar_one_or_none()
+        existing = await _find_job_by_apply_url(db, apply_url)
         location = (item.get("categories") or {}).get("location", "")
         if existing:
             existing.title = item.get("text", existing.title)
@@ -368,9 +367,7 @@ async def _upsert_scraped_jobs(
     for item in items:
         if not item.apply_url:
             continue
-        existing = (
-            await db.execute(select(Job).where(Job.apply_url == item.apply_url))
-        ).scalar_one_or_none()
+        existing = await _find_job_by_apply_url(db, item.apply_url)
         if existing:
             existing.title = item.title or existing.title
             existing.location = item.location or existing.location
