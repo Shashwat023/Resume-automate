@@ -49,7 +49,24 @@ export const QueueControls = () => {
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      {status === 'running' ? (
+      {/*
+        `needsInput` is checked BEFORE `status === 'running'` on purpose. The
+        aggregate status now correctly reports a 2FA-blocked job as 'running'
+        (it IS the job being worked, just blocked on a human — see queue.ts),
+        which would otherwise render the Pause branch and silently drop the
+        deliberate "Waiting for you..." affordance this component exists to
+        show. Branching on the real current job first keeps that intact while
+        letting the aggregate stay truthful for everything else.
+      */}
+      {needsInput ? (
+        <button
+          disabled
+          title='Use "Take Control" above to complete 2FA first'
+          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg font-medium text-sm transition-colors disabled:opacity-50"
+        >
+          <Play className="w-4 h-4" /> Waiting for you...
+        </button>
+      ) : status === 'running' ? (
         <button
           onClick={() => pauseMutation.mutate()}
           disabled={pauseMutation.isPending}
@@ -61,12 +78,11 @@ export const QueueControls = () => {
         <button
           onClick={() => resumeMutation.mutate()}
           disabled={
-            resumeMutation.isPending || status === 'completed' || status === 'cancelled' || needsInput
+            resumeMutation.isPending || status === 'completed' || status === 'cancelled'
           }
-          title={needsInput ? 'Use "Take Control" above to complete 2FA first' : undefined}
           className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg font-medium text-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
         >
-          <Play className="w-4 h-4" /> {needsInput ? 'Waiting for you...' : 'Resume Queue'}
+          <Play className="w-4 h-4" /> Resume Queue
         </button>
       )}
 

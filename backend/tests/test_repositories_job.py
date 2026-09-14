@@ -122,3 +122,82 @@ async def test_get_by_id(async_session):
 async def test_get_missing_returns_none(async_session):
     repo = JobRepository(async_session)
     assert await repo.get(999) is None
+
+
+async def test_search_pagination_is_stable_when_created_at_ties(async_session):
+    """
+    FLAGGED.md #34.8: created_at is second-granularity, so a bulk scrape
+    inserting many jobs in one second gives them identical timestamps.
+    Ordering on created_at alone leaves those rows in an arbitrary order,
+    and LIMIT/OFFSET pagination over an arbitrary order can skip or repeat
+    rows between pages. Job.id breaks the tie deterministically.
+    """
+    from datetime import datetime
+
+    same_moment = datetime(2024, 1, 1, 12, 0, 0)
+    for n in range(6):
+        async_session.add(
+            Job(
+                title=f"Job {n}",
+                company_name="Acme",
+                apply_url=f"https://example.com/{n}",
+                created_at=same_moment,
+            )
+        )
+    await async_session.commit()
+
+    repo = JobRepository(async_session)
+    kwargs = dict(
+        keyword=None,
+        company_name=None,
+        location=None,
+        location_type=None,
+        ats=None,
+        industry=None,
+        posted_within_hours=None,
+        limit=2,
+        sort=None,
+    )
+
+    seen: list[int] = []
+    for page in (1, 2, 3):
+        jobs, _ = await repo.search(page=page, **kwargs)
+        seen.extend(j.id for j in jobs)
+
+    # Every row appears exactly once across the three pages.
+    assert sorted(seen) == sorted(set(seen))
+    assert len(seen) == 6
+
+
+async def test_search_sort_oldest_is_the_exact_reverse_of_default(async_session):
+    from datetime import datetime
+
+    same_moment = datetime(2024, 1, 1, 12, 0, 0)
+    for n in range(4):
+        async_session.add(
+            Job(
+                title=f"Job {n}",
+                company_name="Acme",
+                apply_url=f"https://example.com/{n}",
+                created_at=same_moment,
+            )
+        )
+    await async_session.commit()
+
+    repo = JobRepository(async_session)
+    kwargs = dict(
+        keyword=None,
+        company_name=None,
+        location=None,
+        location_type=None,
+        ats=None,
+        industry=None,
+        posted_within_hours=None,
+        page=1,
+        limit=10,
+    )
+
+    newest, _ = await repo.search(sort=None, **kwargs)
+    oldest, _ = await repo.search(sort="oldest", **kwargs)
+
+    assert [j.id for j in oldest] == list(reversed([j.id for j in newest]))

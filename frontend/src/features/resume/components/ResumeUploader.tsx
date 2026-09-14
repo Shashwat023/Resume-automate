@@ -8,6 +8,7 @@ import { DeleteResumeDialog } from './DeleteResumeDialog';
 import { ReplaceResumeDialog } from './ReplaceResumeDialog';
 import { useResumeStore } from '../../../store/resumeStore';
 import { useUploadResumeMutation, useDeleteResumeMutation } from '../services/resume.queries';
+import { resumeFileName } from '../../../lib/resumeFile';
 
 export const ResumeUploader = () => {
   const activeResume = useResumeStore((state) => state.activeResume);
@@ -83,7 +84,7 @@ export const ResumeUploader = () => {
           />
         </div>
         <div className="lg:col-span-2">
-          <ResumePreview url={activeResume.resume_url} fileName={activeResume.file_name} />
+          <ResumePreview url={activeResume.resume_url} fileName={resumeFileName(activeResume)} />
         </div>
 
         <DeleteResumeDialog 

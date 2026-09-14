@@ -108,13 +108,24 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
   });
 
   const total = items.length;
-  const completed = items.filter((i) => i.status === 'completed' || i.status === 'failed').length;
+  // "Done" means "will never move again", so a cancelled job counts here
+  // alongside completed/failed. Leaving it out put cancelled jobs in `total`
+  // with no way to ever leave `remaining`, so progress on a queue containing
+  // one could never reach 100% (FLAGGED.md #34.5).
+  const completed = items.filter(
+    (i) => i.status === 'completed' || i.status === 'failed' || i.status === 'cancelled'
+  ).length;
   // "Current" job includes waiting_for_user (needs_input/2FA) — it's still
   // the job actively being worked, just blocked on the user. Excluding it
   // here would hide CurrentJobCard (and the live-view entry point) at
   // exactly the moment the user most needs to see it.
   const running = items.find((i) => i.status === 'running' || i.status === 'waiting_for_user');
-  const hasRunning = running?.status === 'running';
+  // A job blocked on 2FA/manual input is still the job the queue is working
+  // on — it just can't progress without a human. Counting only 'running' here
+  // made the header report "Idle / No active jobs" while the panel directly
+  // beside it showed "Currently Processing" for that same application
+  // (FLAGGED.md #34.5).
+  const hasRunning = running !== undefined;
   const hasWaiting = items.some((i) => i.status === 'waiting');
 
   let overallStatus: QueueStatus = 'idle';

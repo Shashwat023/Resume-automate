@@ -2,11 +2,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queueApi } from '../../../api/queue';
 import { useQueueStore } from '../../../store/queueStore';
 import { getStoredProfileId } from '@/lib/session';
+import { useSettingsStore } from '../../../store/settingsStore';
 import { toast } from 'sonner';
 
 export const useQueueStatusQuery = () => {
   const setQueueState = useQueueStore((state) => state.setQueueState);
   const profileId = getStoredProfileId();
+  const pollingIntervalMs = useSettingsStore((s) => s.queuePollingIntervalMs);
 
   return useQuery({
     queryKey: ['queue-status', profileId],
@@ -15,7 +17,7 @@ export const useQueueStatusQuery = () => {
       setQueueState(response.data);
       return response.data;
     },
-    refetchInterval: 4000,
+    refetchInterval: pollingIntervalMs,
   });
 };
 

@@ -20,9 +20,11 @@ export interface Job {
 
 export interface Resume {
   id: string;
-  file_name: string;
+  // Optional on purpose: the backend's ResumeGetOut does not return a
+  // filename, only the URL it was stored under. Use lib/resumeFile's
+  // resumeFileName() to display it rather than reading this directly.
+  file_name?: string;
   resume_url: string;
-  size?: number;
   uploaded_at: string;
 }
 

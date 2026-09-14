@@ -359,3 +359,201 @@ Distinguished from two related, explicitly out-of-scope cases (see user discussi
 What's built: if the very first `extract()` call on the given URL finds zero postings, `_sync_via_extract` now tries exactly one drill-down hop — `observe()` for a single "Search Jobs"/"View Openings"/"Current Openings"-style link, `act()` to follow it, then re-`extract()` from the resulting page. If that retry is also empty, it stops for good — no repeated or recursive drilling. Costs at most 3 extra LLM calls (`observe`+`act`+`extract`), and only when page one is genuinely empty.
 
 Unit-tested: `test_extract_drilldown_follows_search_jobs_link_when_first_page_is_empty`, `test_extract_drilldown_not_attempted_when_no_link_found`, `test_extract_drilldown_stops_if_retry_still_empty`. 327 total passing. **Not yet live-tested** against a real landing-page careers site.
+
+## 34. End-to-end test pass on the post-cleanup tree — 7 bugs found, all deferred
+
+Ran a full E2E pass after the dead-code/duplicate-logic cleanup commit (`0029cea`), in three layers: a live-HTTP/WebSocket journey against an isolated backend (53 assertions), a **real-browser** run of the actual automation engine (real Chrome for Testing + Stagehand + CDP) against a local mock ATS form (20 assertions), and a real-browser walkthrough of every frontend route driving the live API.
+
+**All three layers passed** — 53/53, 20/20, and every route rendering against live data. Notably the engine run filled 8 fields from the accessibility tree, correctly attached the resume to `Resume/CV` but **not** `Cover Letter`, honoured the Tier 1 kill switch (no API key -> zero LLM spend), stopped one click short of Submit under `SUBMIT_ENABLED=False`, and released its Chrome session, per-profile lock and queue event maps cleanly. The cleanup commit caused **no regressions**: 327 backend tests, `tsc -b` clean, `vite build` clean, frontend vitest unchanged (same 3 pre-existing `QueueSummary.test.tsx` failures as before the cleanup).
+
+Test safety: the local `.env` has `SUBMIT_ENABLED=True`, so a real run would file a genuine application at a real employer. The whole pass ran on a throwaway DB + storage dir with submit forced off, no OpenRouter key, and `127.0.0.1`/`example.invalid` targets only. `backend/app.db` was never touched.
+
+The bugs below were found by that pass. **All of them are now fixed — see `#36`** for what each fix was and how it was verified. The original diagnoses are kept verbatim below, since the reasoning is what makes the fixes reviewable.
+
+### 34.1 — Profile form loads empty on first visit (looks like data loss) — highest priority
+`pages/ProfilePage.tsx` passes `defaultValues: (initialData as any) || {}` to `useForm`. `defaultValues` is captured on the **first render only**, which happens before `useProfileQuery()` resolves — and the `useEffect` that used to re-sync was deliberately removed (see the comment in that file) to stop the cursor jumping mid-type during autosave. Nothing replaced it, so the form is never told the data arrived.
+
+Masked in normal use because `profileStore` is a `persist`-ed zustand store: on the second and later visits the store is already hydrated from `localStorage` at first render, so the form fills correctly. It only bites on a genuinely fresh browser, a new device, or cleared site data.
+
+Reproduced deterministically: cleared `auto-apply-profile-state` from `localStorage` -> reloaded `/profile` -> every field blank (`firstName`/`lastName`/`email`/`phone` all `""`) while the server still held the full profile and the page header still rendered "Ada Lovelace" (the header reads the store, not the form). Reloading again -> all fields populated.
+
+Fix direction: `reset(data)` in a `useEffect` keyed on the resolved query data (not on store identity), so it fires once when data lands rather than on every store write. Restoring the old always-on sync would bring the cursor-jumping bug back.
+
+### 34.2 — A fresh clone cannot boot: `main.py` crashes on import
+`main.py` calls `app.mount("/storage/resumes", StaticFiles(directory=settings.resume_storage_dir))` at **module import**, but the directory is created by `lifespan()`, which runs later at startup. Hit on the very first launch of the isolated instance: `RuntimeError: Directory '...' does not exist`. Anyone cloning the repo and running uvicorn before the storage dir exists hits it. Fix: `mkdir(parents=True, exist_ok=True)` immediately before the `mount` call.
+
+### 34.3 — New users stare at a ~9s spinner on the resume page
+`GET /api/resume/{profile_id}` returning 404 is the normal "no resume uploaded yet" state, but `main.tsx` configures react-query with `retry: 2`, so it is retried as though transient — three requests with backoff before the upload dropzone appears. Fix: don't retry 404s (a `retry` predicate that returns `false` for a 404).
+
+### 34.4 — Resume card's "File Name" and "Size" are structurally always blank
+`ResumeGetOut` returns only `profile_id`, `resume_url`, `uploaded_at` — no filename, no byte size — yet `ResumeCard` renders a "File Name" row (renders empty) and "Size: Unknown size". The queue's `ConfirmQueueDialog` shows the name correctly because it derives it from the URL's last path segment. Fix either way: add `file_name`/`size_bytes` to the schema, or derive from the URL in the card as the dialog already does.
+
+### 34.5 — Queue header contradicts the panel next to it
+Observed live: the header read "Queue Status: **Idle** / No active jobs" while the panel immediately to its right read "**Currently Processing** — User Input Required" for the same application. `mapHistoryToQueueState` (`api/queue.ts`) only sets `overallStatus = 'running'` when some item maps to `running`; `waiting_for_user` (i.e. `needs_input`) is excluded, so a run blocked on 2FA/manual input reports the queue as idle.
+
+Related, same function: `completed` counts only `completed` + `failed`, so a **cancelled** job is in `total` but can never be in `completed` — progress is permanently short of 100%. Confirmed live at "2 / 3 done, 1 remaining" with the remaining job cancelled.
+
+### 34.6 — Dead settings control: queue polling interval does nothing
+`pages/SettingsPage.tsx` holds `const [pollingInterval, setPollingInterval] = useState('2000')` and renders a select labelled "Queue Polling Interval — 2 Seconds (Default)", but that value is never read by anything; `queue.queries.ts` hardcodes `refetchInterval: 4000`. So the control is inert **and** its default disagrees with the real interval.
+
+Worth noting this is dead code the cleanup pass in `0029cea` could not catch: `pollingInterval` *is* read (by the `<select value=...>`), so neither `noUnusedLocals` nor oxlint flags it. Only running the UI reveals it.
+
+### 34.7 — Breadcrumb is wrong on two routes; `/settings` is unreachable from the nav
+`DashboardLayout` derives the breadcrumb with `navItems.find(i => i.path === location.pathname)?.name || 'Dashboard'`. `navItems` has no entry for `/settings` or for an unknown path, so both `/settings` and the 404 page display the breadcrumb "Platform / Dashboard". `/settings` also has no sidebar link at all — the route exists and renders fine, but is only reachable by typing the URL.
+
+### 34.8 — Observation, not yet a bug: `created_at` ties make job ordering non-deterministic
+`Job.created_at` is `DateTime` with `server_default=func.now()` at **second** granularity. A bulk scrape inserting many jobs within the same second gives them identical timestamps, and `JobRepository.search` orders solely by `created_at` — so ties resolve arbitrarily and `LIMIT/OFFSET` pagination over them can skip or repeat rows between pages. Surfaced while writing the E2E: three jobs seeded in one statement were returned in the *same* order for both `sort=oldest` and the default newest-first, until the seed was given explicitly distinct timestamps. Fix: add `Job.id` as a tiebreaker to both order-by branches.
+
+### Not covered by this pass
+Live-view screencast against a real Chrome session (only the 4404-rejection path was exercised); the admin scrape button (real outbound network + LLM spend); real ATS submission; and the Tier 1 / Tier 2 LLM paths — the harness ran keyless deliberately, so everything past Tier 0 in the cascade is still only unit-tested.
+
+## 35. Category 3 (multi-track career portals) built, and the 3-category cascade collapsed from 9 LLM calls to 1 decision call
+
+Two requests that turned out to be the same change.
+
+### The problem with the old cascade
+
+Scraping an unknown careers page worked by *guessing and retrying*: assume the postings are on the pasted URL and `extract()`; if that came back empty, assume it's a landing page and `observe()` + `act()` + re-`extract()`. Each attempt was its own `extract`/`observe`/`act` round trip, so probing the page shape cost up to **9 LLM calls before a single job was read** — and category 3 was never reached at all, because the single drill-down hop followed exactly one link and then stopped.
+
+### What category 3 is
+
+A career portal that splits its openings across **several parallel tracks on the same site**, each behind its own "Search Jobs" button — Cargill's Professional / Production / Students sections being the live example. `#33` identified this shape and **explicitly deferred it** ("following one such link arbitrarily would miss the others... Deferred, not built"). Per user direction it is now built: every track is visited in turn and all of their postings are listed.
+
+### The fix: assess once, dispatch free
+
+One structured `extract()` call (`_assess_page`) now answers both questions in a single response — *"are the postings on this page?"* and *"if not, where are they?"* — returning `jobs` **and** a list of `sections`, each with a label and a URL.
+
+Asking for **URLs** rather than using `observe()` is the load-bearing detail. `observe()` returns an Action that only `act()` can execute — 2 LLM calls per hop — whereas a URL is navigable with `page.goto()` for free. That is what makes visiting N tracks affordable instead of costing 2N extra calls.
+
+| Page shape | LLM calls before | after |
+|---|---|---|
+| Cat 1 — postings on the pasted URL | 1 | **1** (the assessment returns them; no second extract of the same page) |
+| Cat 2 — one "Search Jobs" entry point | 4 | **2** |
+| Cat 3 — N parallel tracks | never reached | **1 + N** |
+
+Categories 2 and 3 are deliberately the *same* code path — the only difference is how many entry points came back.
+
+### Decisions worth challenging
+
+- **The category is derived, not asked for.** The schema has no `category` field. A model can answer `"multi_section"` and then return one section, at which point the label and the data disagree with no way to tell which is wrong. Counting the sections actually returned cannot contradict itself.
+- **A page that yields postings does NOT also chase its sections.** On a real listing page, links that look like "other sections" are usually filters over the *same* jobs, and following each costs a page load plus an `extract()` to re-discover postings the dedupe set then throws away. **Known cost of this choice:** a portal that both lists jobs directly *and* hides more behind parallel tracks will miss those tracks. Flagged rather than silently assumed away.
+- **`_usable_sections` assumes the answer may be wrong.** Relative hrefs are resolved against the current page; `mailto:`/`javascript:` are dropped; a link back to the page we're already on is dropped (a "Careers" nav link pointing at itself would otherwise burn a reload and an extract); duplicates are dropped ignoring fragment and trailing slash; and the whole list is capped by `SCRAPER_MAX_SECTIONS` (default 6) so a mis-identified nav menu or office-location list can't become an unbounded crawl.
+- **One dead section does not abandon the others** — a failed `goto()` skips that track and continues. Conversely an assessment-call failure still propagates, because that means we learned nothing about the page at all: the same "scrape failed" outcome the plain `extract()` had before.
+- **Dedupe is shared across sections**, so a graduate role listed under both "Professional" and "Students" is inserted once, not twice.
+
+### Not changed
+
+Pagination *within* a listing page still costs `observe()` + `act()` per page — that is a genuinely different control (often a button with no href) and was out of scope here. It remains the biggest remaining per-page cost and is the obvious next optimization if spend matters.
+
+### Testing
+
+12 new tests, **336 total passing**, ruff clean. Call counts are asserted exactly, not approximately — `test_category2_single_section_is_navigated_and_harvested` pins 2 extracts and **0** `act()` calls; `test_category3_visits_every_section_and_lists_all_jobs` pins 4 extracts for 3 tracks and asserts the exact `goto()` sequence. Also covered: cross-track dedupe, the `max_sections` cap, a dead section not aborting the run, and category 1 not chasing sections.
+
+**Not yet live-tested** against a real multi-track portal (e.g. `careers.cargill.com/en`). The unit tests fix the control flow and the call counts; they cannot tell us whether the model reliably distinguishes real track entry points from nav chrome on a specific real site. That needs one live run to confirm.
+
+## 36. Cleanup pass: every bug from `#34` fixed, plus a test suite that was silently testing nothing
+
+Follow-up sweep over the whole system (test run + dead-code/duplication/complexity hunt). All eight items from `#34` are resolved; two further problems were found during the sweep itself.
+
+### Found during this sweep (not in `#34`)
+
+**`QueueSummary.test.tsx` was asserting against a component that never rendered.** `vi.mock('../../../store/queueStore', ...)` — but the test file sits one directory deeper (`__tests__/`) than the component, so three levels resolved to `features/queue/store/queueStore`, a path that does not exist. The factory was registered against a module nothing imports, the real store was used, `queueState` was `null`, the component early-returned `null`, and all three tests failed against an empty `<body><div /></body>`. The sibling `TimelineCard.test.tsx` uses four levels for `../../../../types` — the inconsistency was right there. Fixed to `../../../../store/queueStore`; **8/8 frontend tests now pass** where it was 5/8.
+
+Worth noting what this masked: these three failures had been dismissed as "pre-existing" in `#34`'s baseline, which is exactly how a broken test stops being a signal. The component had *zero* real coverage the whole time.
+
+**`QueueControls` would have silently lost its "Waiting for you..." affordance.** Caught while verifying the `#34.5` fix in a live browser, not by any test. Making the aggregate status correctly report a 2FA-blocked job as `running` meant `QueueControls` took its `status === 'running'` branch and rendered **Pause Queue** instead of the deliberately-disabled "Waiting for you..." button that `#30`/`#31` exist to provide. Fixed by checking `needsInput` *before* the status branch, so the aggregate can stay truthful without regressing the affordance. The now-unreachable `needsInput` ternaries inside the Resume button were removed.
+
+### `#34` fixes
+
+- **34.1 Profile form empty on first visit** — `reset()` once, in an effect keyed on the resolved query data and guarded by a ref, rather than restoring the always-on store sync (which is what caused the cursor-jumping the old effect was deleted for). Verified live on a fully-cleared browser: all fields populate; then typing into City and waiting out the autosave debounce leaves the value **and the caret position (12) and focus** intact, and the server received `Cambridge UK` with name/email/phone/company **not** clobbered by `formToBackend`'s `New User` / `user_<ts>@example.com` / `0000000000` fallbacks.
+- **34.2 Fresh clone can't boot** — `mkdir(parents=True, exist_ok=True)` before the `StaticFiles` mount in `main.py`, since that mount runs at import time and `lifespan()` is too late.
+- **34.3 ~9s spinner for new users** — `retry` is now a predicate that refuses to retry a 404. This required preserving the status code: the axios interceptor flattened errors to a bare `Error`, discarding it, so `ApiError`/`isNotFound` were added in `api/axios.ts`. Verified live: **exactly one** `GET /api/resume/1 → 404` where there were three, dropzone renders immediately.
+- **34.4 Resume card blank File Name / Size** — `lib/resumeFile.ts::resumeFileName()` derives the name from the stored URL's last segment. `ConfirmQueueDialog` was already doing this inline, so this also removes a duplicated derivation; `ResumeToolbar` and `ResumeUploader` now share it too. The **Size** row was deleted outright — `ResumeGetOut` has no size field, so it could only ever render "Unknown size". `Resume.file_name` is now optional, because the API genuinely does not send it.
+- **34.5 Queue header contradicted the panel beside it** — `waiting_for_user` now counts as active in the aggregate status *and* in `QueueSummary`'s subtitle; `cancelled` now counts toward "done" so progress can reach 100%. Verified live: header reads "Running / 1 job(s) running" next to "Currently Processing — User Input Required", with the correct disabled button.
+- **34.6 Dead settings controls** — the polling selector is now real: `store/settingsStore.ts` (persisted, same pattern as `themeStore`) feeds `refetchInterval` in `useQueueStatusQuery`, and the option list no longer claims a "2 Seconds (Default)" that disagreed with the hardcoded 4000ms. The **Desktop Notifications** toggle was **deleted** — nothing anywhere calls the Notification API, and making it work is a feature, not a cleanup. Persistence verified live (`{"queuePollingIntervalMs":8000}`); the refetch cadence itself could not be measured, because the automated browser pane reports `visibilityState: 'hidden'` and react-query correctly suspends interval refetching when the document is hidden.
+- **34.7 Wrong breadcrumb, unreachable route** — unmatched paths no longer claim to be "Dashboard"; `/settings` added to the sidebar, and `ROUTES.QUEUE` now used instead of a hardcoded `'/queue'`.
+- **34.8 `created_at` ties** — `Job.id` added as a tiebreaker to both order-by branches in `JobRepository.search`. Two regression tests seed six jobs sharing one timestamp and assert that paging sees each row exactly once, and that `sort=oldest` is the exact reverse of the default.
+
+### Result
+
+**338 backend tests** (+2) and **8/8 frontend tests** (from 5/8) passing; ruff, `tsc -b`, oxlint and `vite build` all clean. No new dead exports were introduced — `ApiError` and `DEFAULT_QUEUE_POLLING_INTERVAL_MS` were un-exported once the scan flagged them as unused outside their own module.
+
+## 37. Real root cause of category 3 (`#35`) never actually working: plain `str` URL fields never got Stagehand's own real-href resolution — **superseded, see `#38`**
+
+**This entry's fix (the `format: "uri"` schema hint) was itself live-tested against the same URL and found wrong — it crashed the extract() call outright.** Left below verbatim, same convention `#26`→`#27`→`#28`→`#29` already established in this file: each wrong attempt is real information, not noise to quietly delete. `#38` is the corrected account, ending in a fix actually confirmed against the live site.
+
+Live-caught by the user against `https://careers.cargill.com/en` — exactly the multi-track shape `#35` was built for. The log showed **one** assessment `extract()` call, then `stagehand.close()` — no section navigation, no jobs, `0 jobs_inserted`. `#35`'s own unit tests all passed and gave no warning, because they fake `sh.extract()` directly with a Python object, bypassing the exact mechanism that was actually broken.
+
+### Root cause, confirmed by reading Stagehand's own bundled extension JS, not guessed
+
+First ruled out the obvious guess (JS-only buttons with no href): fetched `careers.cargill.com/en`'s raw HTML directly (no browser, no LLM — plain `httpx.get`) and confirmed its three tracks are ordinary `<a class="button-like" href="/professional-jobs">Search Jobs</a>` links — trivially present, real hrefs, nothing exotic.
+
+The actual cause lives in `stagehand/_extension/service-worker.js`. `extract()` does **not** hand the model raw HTML — it hands it an accessibility TREE (role + visible label per node, e.g. `link: Search Jobs (Professional Jobs)`), which never includes the href at all. Separately, `extract()` builds its own `combinedUrlMap` (real node-id → real href) while snapshotting. Before generation, `transformSchema` rewrites any schema field whose JSON Schema carries `"format": "uri"` (a Zod `.url()` check) into a plain node-id string, so the model only has to copy an id it can actually **see** printed in the tree — then `injectUrls` swaps that id back for the real href from `combinedUrlMap` after the model responds. A field with no such format hint gets none of this: the model is asked to produce a URL as free text from a tree that never shows one, and correctly declines rather than hallucinating — which is why `sections` came back empty instead of wrong.
+
+`ListingSection.url` (added in `#35`) was plain `str`. So was the pre-existing `ScrapedJob.apply_url`, meaning this likely undermined every category's URL reliability, not just category 3's sections — `#32`'s "130/130 jobs" live success on `jobs.ashbyhq.com/notion` was apparently a case where enough real URL text happened to be visible in that site's own tree, not evidence the mechanism was sound in general.
+
+### Fix: give both URL fields the same hint pydantic's `HttpUrl`/`AnyUrl` emit automatically
+
+`pydantic.HttpUrl`/`AnyUrl` emit `{"format": "uri"}` in their JSON Schema, which is what actually triggers Stagehand's resolution — confirmed directly (`model_json_schema()` on all three: `HttpUrl`, `AnyUrl`, and plain `str`, only the first two carry `format`). But adopting `HttpUrl`/`AnyUrl` themselves was rejected: Stagehand's own `injectUrls` legitimately substitutes `""` when a node id doesn't resolve (a link that disappeared between snapshot and generation), and a strict URL type would raise inside the **SDK's own** re-validation of the model's response (`schema.model_validate(result.data)`, in `stagehand.py`) — crashing the whole `extract()` call over one unresolved field rather than just leaving it empty.
+
+Used `Annotated[str, Field(json_schema_extra={"format": "uri"})]` instead — gets the same `format: "uri"` hint (verified via `model_json_schema()`) while staying a lenient `str` on the Python side (verified `ScrapedJob(apply_url="")` and `ListingSection(url="")` both construct without error). Applied to both `ScrapedJob.apply_url` and `ListingSection.url`.
+
+### Also built: a click-based fallback for the case that turned out NOT to be Cargill's problem, but is real elsewhere
+
+Per direction to make the agent able to "search for buttons and crawl for each one of them": `_usable_sections` previously **dropped** any section with no resolvable URL outright. It now keeps a section that has a real label but no URL (deduped on normalized label text, still counted toward `SCRAPER_MAX_SECTIONS`), and `_navigate_to_section` dispatches per-section: `goto()` when a URL resolved (free, unchanged), or one `observe()` + `act()` pair to find and click the button by its label when it didn't (2 LLM calls, only paid when actually needed). A portal can mix both kinds of section in the same run. A section that fails either way is skipped, not fatal — same "one dead entry point, keep going" contract the URL path already had.
+
+### Testing
+
+10 new tests, **348 total passing**, ruff clean. Two are schema-shape regressions that would have caught this exact bug before it ever reached a live run (`apply_url`/`ListingSection.url` must carry `format: "uri"`), one confirms the lenient-empty-string tolerance that rules out `HttpUrl`/`AnyUrl`, and the rest cover the click-fallback: kept-not-dropped, dedup, the limit, a pure-click category-3 run, a run mixing URL and click sections, and a failed click not aborting the others.
+
+**Not yet live-reconfirmed against Cargill itself** — the schema fix is the direct, mechanically-verified cause of what the log showed, and the click fallback is unit-tested control flow, but neither has been run against the real page since this fix. That's the next live call to spend, when you're ready to spend it.
+
+## 38. `#37`'s fix live-tested and found wrong; the real, fully live-confirmed fix — four sequential real bugs, all found by actually running against `careers.cargill.com/en`
+
+Per direct instruction: "test the same url on urself and resolve it accordingly." Ran the real `_sync_via_extract()` against the real Cargill URL, with a real OpenRouter key, eleven times over — each failure diagnosed from a real traceback or real inserted rows, never guessed. What follows is the honest sequence, not a cleaned-up version of it.
+
+### Attempt 1 (`#37`'s fix) — crashed outright
+
+`ListingSection.url`/`ScrapedJob.apply_url` given a `"format": "uri"` hint so Stagehand's node-id substitution would resolve real hrefs. First live call:
+
+```
+stagehand.rpc_client.RPCError: [
+  {"code": "invalid_format", "format": "url",
+   "path": ["structuredContent", "sections", 0, "url"], ...},
+  ... (one per section)
+]
+```
+
+Traced into the extension's own re-validation path: Stagehand's substitution genuinely finds and injects the REAL href — but Cargill's hrefs are RELATIVE (`/professional-jobs`, confirmed via a raw `httpx.get` of the page — ordinary `<a href>` tags, nothing exotic), and the field's `.url()` check requires an ABSOLUTE url. The real, correctly-resolved value fails Stagehand's own strictness. A genuine upstream incompatibility with relative hrefs — common in real sites — not fixable from a JSON Schema hint on our side. **Reverted**: both fields are back to plain `str`, no format hint, full stop. Category 3's click-fallback (`_navigate_to_section`, already built in `#35`) is now the PRIMARY way a section is reached, not a backstop.
+
+### Attempt 2 — silent false success: 9 "jobs" that were 3 duplicates of landing-page noise
+
+With the crash gone, `_sync_via_extract` returned `inserted=9` — looked like progress. Direct DB inspection showed otherwise: the same 3 unrelated "spotlight" postings (Taiwan/Colombia/Colorado — clearly a rotating widget, not the real job boards), written **three times** with three different garbage `apply_url` values (`[0-2987]`, `0-4830`, `0-6673`). The model, lacking any real href to copy, had echoed the tree's own internal `[id]` bracket notation as if it were a URL — and `urljoin()` happily resolved that garbage into something with a valid scheme+netloc, so the OLD dispatch logic (`if assessment.jobs: harvest here and STOP — never touch sections`) took the category-1 branch and never visited a single one of the three real tracks. This was the exact risk `#35` had explicitly flagged and accepted as a known cost ("a portal that both lists jobs directly AND hides more behind parallel tracks will miss those tracks") — now confirmed real on the first genuine multi-track portal tested, not hypothetical.
+
+**Fixed**: `assessment.jobs` and `assessment.sections` are no longer mutually exclusive — both are harvested unconditionally. Sections are visited FIRST (so a click-fallback section sees the exact page state the assessment did), then the landing page is explicitly reloaded via `goto()` before harvesting its own jobs+pagination last.
+
+### Attempt 3 — the University track failed because the browser was on the wrong page
+
+Re-tested: Professional Jobs' click-fallback correctly found and clicked its real button, landing on a genuine search-results URL (`.../search-jobs?...job_type=Professional`) and harvesting **33 real, distinct postings**. Production Jobs also clicked through correctly. University Jobs then failed — `observe()` found nothing to click. Root cause: after Production's navigation succeeded, the browser was left on Production's OWN page, and University's button only ever existed on the ORIGINAL landing page. Sections were being visited in a plain loop with no reset between them.
+
+**Fixed**: every section now starts from an unconditional `page.goto(company_url)` reset, not just the last one before the final on-page-jobs harvest. A free, deterministic navigation was judged cheaper than any cleverness about which section "probably" still has a fresh page.
+
+Also newly caught in this same pass: `_assess_page`'s single `extract()` call raised `RPCError: invalid_type` (array items that weren't objects) on a later attempt — plain LLM structured-output flakiness on this one call, unrelated to anything above. Given a single flaky response can happen to any extract() call, and Tier 1 already has a proven "one retry, no repair prompt needed" pattern for exactly this (`tier1_map.py`'s `_chat_with_repair`), `_assess_page` now gets the same: one retry at the identical instruction before letting a second failure propagate.
+
+### Attempt 4 — all three real tracks reached; then a fourth, deeper bug: 0 of 73 jobs had a real link
+
+With sections 1-3 all confirmed reaching genuine, distinct search-results URLs and real job titles flowing in (Professional: 18, University: 18, plus several generic nav items — "Career Areas," "Jobs by Category" — the model also flagged as "sections," a known, already-accepted, bounded cost from `#35`'s own design, not a new bug), the run finished with `inserted=40`. Direct inspection of what actually landed: **every single one of the 73 rows written across this test session had a garbage `apply_url`** — not the bracket-notation shape from Attempt 2, but a bare requisition-number-looking string (`"13147"`, `"13151"`, ...), presumably a Job ID visible as plain text near each posting. Same root cause as Attempt 2 (no real href visible in the tree, so the model invents SOME plausible-looking token), on a different field, in a shape the earlier fix's narrow `\d+-\d+` pattern never matched.
+
+**Fixed**: a separate, stricter validator for `apply_url` specifically — `_looks_like_real_apply_url` requires a genuine absolute `http(s)://` URL, full stop. This is not an approximation for this field the way the sections check is: an `apply_url` is stored and used STANDALONE (`<a href={job.apply_url}>`), with no "current page" to resolve a relative path against, so there is no legitimate non-absolute form for it to take. Anything that fails is treated exactly like a missing apply_url already was — dropped, not written. All 73 garbage rows from this test session were deleted from `app.db`.
+
+### What's confirmed live vs. what's still open
+
+**Confirmed, live, against the real site**: the crawl now correctly discovers and navigates to every real track on a genuine multi-track portal (all three of Professional/Production/University reached via observe()+act(), each landing on a distinct, real, correct search-results URL), harvests real distinct job titles/locations from them, and no longer writes fabricated links into the database.
+
+**Still open, found by this same pass, not yet solved**: Cargill's individual job POSTINGS apparently never expose a real, extractable href via Stagehand's plain-text `extract()` either — confirmed directly, 0 of 73 harvested postings had a usable apply_url. The new validation correctly refuses to write those as fake links (the right behavior — no silent corruption), but the practical result is that a sync against Cargill today still inserts **zero** usable jobs, even though the crawl mechanism itself is now proven correct. Recovering a real apply_url per posting would need a fundamentally different mechanism than what exists now — e.g. a deterministic `page.evaluate()` DOM read keyed by matching titles, bypassing the LLM's text-based extraction for this one field entirely — since an `observe()+act()` click-fallback per JOB (as opposed to per SECTION, where there are only a handful) is not viable at the scale of a page with dozens to hundreds of postings. Not attempted this pass; flagged as the next real gap, not silently assumed solved.
+
+### Testing
+
+15 more tests on top of `#37`'s 10 (**374 total passing**), ruff clean, including: the reverted schema now asserted absent (guards against the crash silently reappearing), the mutually-exclusive dispatch bug's fix (jobs-and-sections harvested together, exact `goto()` sequences pinned), the per-section reset (also pinned by exact `goto()` sequence), the assessment retry (one retry then give up, not a loop), and the broader `apply_url` validator (bare numbers, node-ids, and relative paths all rejected; genuine absolute URLs kept) — the last of these parametrized directly against the real garbage values seen live (`"13147"`, `"[0-583]"`, `"0-4830"`).
+
+Also worth carrying forward, independent of this specific site: this whole sequence is a second, independent confirmation of the pattern `#29` already named — a confident, source-grounded fix, live-tested, found wrong, twice over in this pass alone (Attempts 1 and 2 each seemed complete when written). Neither unit tests written before a live run, nor careful reading of the SDK's source, substituted for actually running it.

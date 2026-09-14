@@ -37,6 +37,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Created here, not only in lifespan(): StaticFiles raises at construction
+# if the directory is missing, and this mount runs at IMPORT time — before
+# lifespan() ever gets a chance to create it. A fresh clone therefore died
+# on startup with "RuntimeError: Directory '...' does not exist" (caught
+# live, FLAGGED.md #34.2). lifespan() still creates it too, harmlessly.
+settings.resume_storage_dir.mkdir(parents=True, exist_ok=True)
+
 app.mount(
     "/storage/resumes",
     StaticFiles(directory=str(settings.resume_storage_dir)),

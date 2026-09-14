@@ -52,10 +52,16 @@ class JobRepository:
         count_stmt = select(func.count()).select_from(stmt.subquery())
         total = (await self._db.execute(count_stmt)).scalar_one()
 
+        # Job.id is a tiebreaker, not decoration: created_at is second-
+        # granularity, and a bulk scrape inserts many jobs inside the same
+        # second, so ordering on created_at alone leaves those rows in an
+        # arbitrary order. SQL is free to return a different arbitrary
+        # order per query, which makes LIMIT/OFFSET pagination over them
+        # silently skip or repeat rows between pages (FLAGGED.md #34.8).
         if sort == "oldest":
-            stmt = stmt.order_by(Job.created_at.asc())
+            stmt = stmt.order_by(Job.created_at.asc(), Job.id.asc())
         else:
-            stmt = stmt.order_by(Job.created_at.desc())
+            stmt = stmt.order_by(Job.created_at.desc(), Job.id.desc())
 
         stmt = stmt.offset((page - 1) * limit).limit(limit)
         jobs = (await self._db.execute(stmt)).scalars().all()

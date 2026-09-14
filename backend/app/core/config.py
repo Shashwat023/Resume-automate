@@ -129,6 +129,18 @@ class Settings(BaseSettings):
     # extra page costs one extract() call (~$0.005-0.015, see FLAGGED.md).
     scraper_max_pages: int = 15
 
+    # Bound on the "category 3" fan-out (sync_service.py): a careers portal
+    # that splits its openings across several parallel tracks — Cargill's
+    # Professional / Production / Students sections, each behind its own
+    # "Search Jobs" button — must have ALL of them visited, not just the
+    # first (which is what the old single drill-down hop did). Each section
+    # is a separate listing page costing at least one extract() call, plus
+    # its own pagination, so the fan-out is capped: a page whose "sections"
+    # we mis-identify (a nav menu, a footer, a list of office locations)
+    # can't turn into an unbounded crawl. 6 covers every real multi-track
+    # portal seen so far with headroom.
+    scraper_max_sections: int = 6
+
     resume_storage_dir: Path = BACKEND_DIR / "storage" / "resumes"
 
     portals_config_path: Path = BACKEND_DIR / "config" / "portals.yml"
