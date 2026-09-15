@@ -20,7 +20,9 @@ export const useProfileStore = create<ProfileState>()(
           // In a real app we'd validate against zod schema here too
           set({ profile: parsed });
           return true;
-        } catch (e) {
+        } catch {
+          // Malformed JSON from an imported backup — the caller shows the
+          // failure to the user; there is nothing here to recover from.
           return false;
         }
       },

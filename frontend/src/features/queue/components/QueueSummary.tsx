@@ -22,7 +22,12 @@ export const QueueSummary = () => {
   const { status, progress, stats, items } = queueState;
   
   const waitingCount = items.filter(i => i.status === 'waiting').length;
-  const runningCount = items.filter(i => i.status === 'running').length;
+  // Counts 'waiting_for_user' too: a job blocked on 2FA is still an active
+  // job. Without it the card read "Running" over the subtitle "No active
+  // jobs" — the same contradiction, one line lower (FLAGGED.md #34.5).
+  const runningCount = items.filter(
+    i => i.status === 'running' || i.status === 'waiting_for_user'
+  ).length;
   const completedCount = items.filter(i => i.status === 'completed').length;
   const failedCount = items.filter(i => i.status === 'failed').length;
 

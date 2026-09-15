@@ -157,6 +157,21 @@ async def map_fields(
     errored: list[tuple[str, str]] = []
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
+    def result() -> Tier1Result:
+        """One place that assembles the return value — this function has
+        three exit points (nothing left after the answers library, no API
+        key, and the normal end) that previously each repeated the same
+        seven positional arguments in the same order."""
+        return Tier1Result(
+            filled,
+            from_library,
+            for_tier2,
+            low_confidence_filled,
+            unanswered,
+            errored,
+            usage,
+        )
+
     # Same "does a sibling Country selector exist" signal tier0_harvest.py
     # uses — computed once here so any phone-like field Tier 1 ends up
     # applying (see _apply's phone-normalization note) gets the same
@@ -197,30 +212,14 @@ async def map_fields(
         remaining.append(f)
 
     if not remaining:
-        return Tier1Result(
-            filled,
-            from_library,
-            for_tier2,
-            low_confidence_filled,
-            unanswered,
-            errored,
-            usage,
-        )
+        return result()
 
     if not settings.openrouter_api_key:
         # Kill switch: no key configured -> the app must stay runnable
         # without one. Nothing to fill these with, so they're genuinely
         # left blank (not a confidence decision — there's no LLM call at all).
         unanswered.extend(f.label for f in remaining)
-        return Tier1Result(
-            filled,
-            from_library,
-            for_tier2,
-            low_confidence_filled,
-            unanswered,
-            errored,
-            usage,
-        )
+        return result()
 
     messages = build_prompt(profile, remaining, resume_facts)
     parsed, call_usage = await _chat_with_repair(messages)
@@ -271,15 +270,7 @@ async def map_fields(
 
     unanswered.extend(f.label for f in missing)
 
-    return Tier1Result(
-        filled,
-        from_library,
-        for_tier2,
-        low_confidence_filled,
-        unanswered,
-        errored,
-        usage,
-    )
+    return result()
 
 
 async def _apply_answers(

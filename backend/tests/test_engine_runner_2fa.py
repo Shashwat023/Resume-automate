@@ -621,3 +621,64 @@ async def test_session_is_closed_before_the_profile_lock_releases(
 
     assert lock_state_at_close == [True]
     assert get_profile_lock(str(application.profile_id)).locked() is False
+
+
+async def test_run_fails_fast_on_a_job_with_no_real_apply_url(
+    async_session, monkeypatch
+):
+    """
+    Real, live-caught bug: a job scraped before the scraper's own apply_url
+    validation existed (FLAGGED.md #38) can sit in the jobs table with a
+    non-URL value — a bare requisition number like "8-12876" echoed by the
+    extract() model when it had no real href to copy. Nothing previously
+    checked that before calling page.goto(), so a real run launched a full
+    Chrome session only to have Chrome's own CDP layer reject the
+    navigation outright (RPCError: -32000 Cannot navigate to invalid URL) —
+    ending in FAILED either way, but only after fully paying for a browser
+    launch, and with an error message that named the CDP protocol, not the
+    actual problem (the JOB record itself).
+    """
+    profile = Profile(full_name="Jordan Smith", email="j@example.com", phone="123")
+    async_session.add(profile)
+    await async_session.commit()
+    await async_session.refresh(profile)
+
+    job = Job(
+        title="Account Executive",
+        company_name="salesforce.com",
+        location="Remote",
+        status="active",
+        apply_url="8-12876",  # exactly the garbage shape seen live
+    )
+    async_session.add(job)
+    await async_session.commit()
+    await async_session.refresh(job)
+
+    application = Application(profile_id=profile.id, job_id=job.id, status=st.QUEUED)
+    async_session.add(application)
+    await async_session.commit()
+    await async_session.refresh(application)
+
+    class _CtxWrapper:
+        async def __aenter__(self):
+            return async_session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(runner, "async_session_factory", lambda: _CtxWrapper())
+
+    launch_calls = []
+
+    async def _fake_get_or_launch(profile_key):
+        launch_calls.append(profile_key)
+        raise AssertionError("must not launch a browser for an unusable apply_url")
+
+    monkeypatch.setattr(runner, "get_or_launch", _fake_get_or_launch)
+
+    await runner.run_application(application.id)
+
+    await async_session.refresh(application)
+    assert application.status == "failed"
+    assert "8-12876" in application.error
+    assert launch_calls == []  # failed before any browser work started

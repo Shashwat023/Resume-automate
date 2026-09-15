@@ -19,7 +19,7 @@ The frontend (`Career-Ops-V3`, client-approved) is used as-is; this repo is the 
 ## What it does
 
 1. **Profile + resume** — a candidate profile and an uploaded resume (PDF/DOCX/text). The resume is parsed twice: once for raw text (used to fill "describe your experience"-style fields) and once into structured facts (employment history, education, skills) via one LLM call, cached so it's paid for **once per resume**, not once per application.
-2. **Job discovery** — `POST /api/admin/sync` scrapes a company's postings: known-ATS JSON APIs first (Greenhouse, Lever — free, instant), falling back to a Stagehand `extract()` pass against the company's own careers page for anything else.
+2. **Job discovery** — `POST /api/admin/sync` scrapes a company's postings: known-ATS JSON APIs first (Greenhouse, Lever — free, instant), falling back to Stagehand for anything else. The fallback makes **one** assessment call that reads the page and decides its shape, then dispatches: postings already on the pasted URL are harvested in place; a single "Search Jobs" entry point is followed; and a portal split across several parallel tracks (Professional / Production / Students) has every track visited in turn. Navigation between sections is a plain `goto()`, so the fan-out costs no extra LLM calls.
 3. **Automated application** — queue a job, and the engine launches a real (headed) Chrome, navigates to the posting, and runs the Tier 0→1→2 cascade to fill every field: personal details from the profile, academic/professional details from the resume, everything else answered by the LLM.
 4. **CAPTCHA solving** — via 2captcha, automatically, no human step.
 5. **Submission + verification** — clicks the real Submit control and reads the result page to tell a confirmation from a validation error (one bounded retry on the latter). Gated behind `SUBMIT_ENABLED` (default `False`) so nothing gets sent to a real employer by accident.
@@ -119,7 +119,7 @@ cd backend
 pytest -q
 ```
 
-321 tests, all fakes/mocks for LLM and browser calls — no network or Chrome needed to run the suite.
+375 tests, all fakes/mocks for LLM and browser calls — no network or Chrome needed to run the suite.
 
 ---
 
@@ -139,6 +139,8 @@ All backend settings live in `app/core/config.py`, overridable via `backend/.env
 | `CAPTCHA_POLLING_INTERVAL_SECONDS` | `5` | How often the 2captcha SDK polls for a result. |
 | `USE_REAL_CHROME` | `False` | Opt-in: launch consumer Chrome instead of the Chrome-for-Testing build. **Known not to work** — Stagehand's companion extension can't complete its handshake on a Stable-channel build (FLAGGED.md). Left in place as documented dead-end, not a supported path. |
 | `REAL_CHROME_EXECUTABLE_PATH` | *(auto-detect)* | Only used when `USE_REAL_CHROME=True`. |
+| `SCRAPER_MAX_PAGES` | `15` | Bound on the scraper's `extract()` fallback following "next page"/"load more" pagination. Each extra page costs one LLM call (~$0.005–0.015) — this caps worst-case spend if a page's pagination can't be reliably recognized. |
+| `SCRAPER_MAX_SECTIONS` | `6` | Bound on how many parallel listing sections the scraper will visit on one portal (Cargill-style Professional / Production / Students tracks). Each section is its own listing page costing at least one `extract()` call — this caps spend if a nav menu or location list is mistaken for career tracks. |
 
 **On `CAPTCHA_PROXY_URL`:** a solved 2captcha token is bound by Google to the IP that solved it. Without a shared proxy, 2captcha solves from its own datacenter IP while the browser submits from yours — and risk-based reCAPTCHA Enterprise rejects the mismatch regardless of token validity. This was the confirmed cause of a real "Please complete the reCAPTCHA" rejection on a genuinely-solved token. Format: `scheme://user:pass@host:port`.
 

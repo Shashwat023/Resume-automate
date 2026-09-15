@@ -5,8 +5,6 @@ on the DB session or infrastructure — that indirection is what makes the
 service layer testable with fakes.
 """
 
-from collections.abc import AsyncIterator
-
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,11 +21,6 @@ from app.services.profile_service import ProfileService
 from app.services.resume.storage import LocalFilesystemStorage
 from app.services.resume_service import ResumeService
 from app.worker import queue_runner
-
-DbDep = AsyncIterator[AsyncSession]
-
-__all__ = ["get_db"]
-
 
 # ---- Repositories ----
 

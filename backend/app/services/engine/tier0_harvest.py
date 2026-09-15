@@ -31,7 +31,6 @@ from stagehand import Page
 
 from app.domain.semantic_dictionary import match_field, resolve_value
 from app.services.engine.field_fill import fill_textbox
-from app.services.engine.timeouts import with_timeout
 
 # Role is USUALLY a single bare word (StaticText/ListMarker/textbox/...),
 # but the file-upload control on a real Greenhouse form renders as a
@@ -287,12 +286,3 @@ async def fill_deterministic(
             errored.append((f.label, str(exc)))
 
     return HarvestResult(filled=filled, unmatched=unmatched, errored=errored)
-
-
-async def harvest_and_fill(
-    page: Page, profile: dict, resume_file_path: str | None = None
-) -> HarvestResult:
-    """Convenience wrapper: snapshot + collect + fill in one call (Tier-0-only callers)."""
-    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
-    fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
-    return await fill_deterministic(page, fields, profile, resume_file_path)

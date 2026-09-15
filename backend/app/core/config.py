@@ -120,6 +120,40 @@ class Settings(BaseSettings):
     real_chrome_executable_path: str | None = None  # None -> auto-detect
     real_chrome_profiles_dir: Path = BACKEND_DIR / ".real-chrome-profiles"
 
+    # Bound on the scraper's extract() pagination loop (sync_service.py) —
+    # per user direction: a careers page/job board isn't limited to one
+    # page's worth of postings, so the fallback now follows "next
+    # page"/"load more" controls and re-extracts. Capped so a page whose
+    # pagination control we can't recognize correctly (or a genuinely
+    # infinite feed) can't turn into an unbounded LLM-spend loop — each
+    # extra page costs one extract() call (~$0.005-0.015, see FLAGGED.md).
+    scraper_max_pages: int = 15
+
+    # Bound on the "category 3" fan-out (sync_service.py): a careers portal
+    # that splits its openings across several parallel tracks — Cargill's
+    # Professional / Production / Students sections, each behind its own
+    # "Search Jobs" button — must have ALL of them visited, not just the
+    # first (which is what the old single drill-down hop did). Each section
+    # is a separate listing page costing at least one extract() call, plus
+    # its own pagination, so the fan-out is capped: a page whose "sections"
+    # we mis-identify (a nav menu, a footer, a list of office locations)
+    # can't turn into an unbounded crawl. 6 covers every real multi-track
+    # portal seen so far with headroom.
+    scraper_max_sections: int = 6
+
+    # How long a tracked company (config/portals.yml, seeded into
+    # TrackedCompany) stays "already covered" after a sync attempt before
+    # the bulk "sync all tracked companies" job (see
+    # services/scraper/bulk_sync_service.py) will attempt it again — per
+    # explicit user direction, matching a daily-click habit: a company
+    # synced this morning isn't re-hit again today, only once ~20h have
+    # passed. Applies regardless of whether that attempt succeeded or
+    # failed — a company that errors every time still only costs one
+    # attempt per window, not one per bulk-sync loop iteration, which
+    # would otherwise burn the whole run's budget retrying the same
+    # broken site forever.
+    tracked_company_resync_hours: int = 20
+
     resume_storage_dir: Path = BACKEND_DIR / "storage" / "resumes"
 
     portals_config_path: Path = BACKEND_DIR / "config" / "portals.yml"

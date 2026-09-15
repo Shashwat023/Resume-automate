@@ -24,6 +24,20 @@ async def lifespan(app: FastAPI):
 
     set_run_fn(run_application)
 
+    # A "sync all tracked companies" pass found still marked "running" here
+    # is necessarily a crash artifact — no background task survives a
+    # server restart — so it's reset to "paused" rather than left claiming
+    # a run is active that nothing is actually driving. See
+    # bulk_sync_service.py's own docstring for why this state is persisted
+    # (not an in-memory flag like the apply queue's pause/resume) in the
+    # first place: a multi-hour, possibly multi-day operation has to
+    # survive exactly this kind of restart.
+    from app.services.scraper.bulk_sync_service import (
+        recover_stale_running_state_on_startup,
+    )
+
+    await recover_stale_running_state_on_startup()
+
     yield
 
 
@@ -36,6 +50,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Created here, not only in lifespan(): StaticFiles raises at construction
+# if the directory is missing, and this mount runs at IMPORT time — before
+# lifespan() ever gets a chance to create it. A fresh clone therefore died
+# on startup with "RuntimeError: Directory '...' does not exist" (caught
+# live, FLAGGED.md #34.2). lifespan() still creates it too, harmlessly.
+settings.resume_storage_dir.mkdir(parents=True, exist_ok=True)
 
 app.mount(
     "/storage/resumes",

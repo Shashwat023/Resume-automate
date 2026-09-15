@@ -2,11 +2,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queueApi } from '../../../api/queue';
 import { useQueueStore } from '../../../store/queueStore';
 import { getStoredProfileId } from '@/lib/session';
+import { useSettingsStore } from '../../../store/settingsStore';
 import { toast } from 'sonner';
 
 export const useQueueStatusQuery = () => {
   const setQueueState = useQueueStore((state) => state.setQueueState);
   const profileId = getStoredProfileId();
+  const pollingIntervalMs = useSettingsStore((s) => s.queuePollingIntervalMs);
 
   return useQuery({
     queryKey: ['queue-status', profileId],
@@ -15,24 +17,7 @@ export const useQueueStatusQuery = () => {
       setQueueState(response.data);
       return response.data;
     },
-    refetchInterval: 4000,
-  });
-};
-
-export const useCreateQueueMutation = () => {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (payload: {
-      jobs: { id: string; title: string; company_name: string; apply_url: string }[];
-    }) => queueApi.createQueue(payload),
-    onSuccess: (results: any[]) => {
-      toast.success(`${results.length} application(s) queued successfully!`);
-      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || 'Failed to queue applications');
-    },
+    refetchInterval: pollingIntervalMs,
   });
 };
 

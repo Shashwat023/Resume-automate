@@ -2,8 +2,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { QueueSummary } from '../QueueSummary';
 
-// Mock the Zustand store
-vi.mock('../../../store/queueStore', () => ({
+// Mock the Zustand store.
+// NOTE the four levels: vi.mock resolves relative to THIS file, which sits one
+// directory deeper (__tests__/) than the component it tests. Three levels
+// pointed at features/queue/store/queueStore — a path that doesn't exist — so
+// the factory was registered against a module nothing imports, the real store
+// was used, queueState was null, and the component rendered nothing at all.
+vi.mock('../../../../store/queueStore', () => ({
   useQueueStore: (selector: any) => selector({
     queueState: {
       status: 'running',

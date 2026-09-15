@@ -1,5 +1,6 @@
-import { FileText, Calendar, HardDrive, Link } from 'lucide-react';
+import { FileText, Calendar, Link } from 'lucide-react';
 import type { Resume } from '../../../types';
+import { resumeFileName } from '../../../lib/resumeFile';
 import { toast } from 'sonner';
 
 interface ResumeCardProps {
@@ -7,12 +8,6 @@ interface ResumeCardProps {
 }
 
 export const ResumeCard = ({ resume }: ResumeCardProps) => {
-  const formatSize = (bytes?: number) => {
-    if (!bytes) return 'Unknown size';
-    const mb = bytes / (1024 * 1024);
-    return `${mb.toFixed(2)} MB`;
-  };
-
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-US', {
       year: 'numeric',
@@ -37,17 +32,7 @@ export const ResumeCard = ({ resume }: ResumeCardProps) => {
           </div>
           <div className="min-w-0">
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-0.5">File Name</p>
-            <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{resume.file_name}</p>
-          </div>
-        </div>
-
-        <div className="flex items-start gap-3">
-          <div className="p-2 bg-indigo-50 dark:bg-indigo-900/30 rounded-lg text-indigo-600 dark:text-indigo-400 shrink-0">
-            <HardDrive className="w-5 h-5" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-0.5">Size</p>
-            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{formatSize(resume.size)}</p>
+            <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{resumeFileName(resume)}</p>
           </div>
         </div>
 

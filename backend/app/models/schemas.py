@@ -211,3 +211,25 @@ class AdminSyncOut(BaseModel):
     jobs_inserted: int
     jobs_updated: int
     failed: int
+
+
+class TrackedCompanySyncStatusOut(BaseModel):
+    """
+    "Sync all tracked companies" (config/portals.yml), separate from the
+    manual paste-a-URL flow above. status: "idle" (never run) | "running"
+    | "paused" | "completed" (a full pass finished; the next Start begins
+    a fresh one). total_eligible/processed describe THIS pass only —
+    companies already covered within the resync window aren't counted at
+    all, matching how the frontend should read this as "progress on what's
+    left to do," not "progress across all tracked companies ever."
+    """
+
+    status: str
+    total_eligible: int
+    processed: int
+    jobs_inserted: int
+    jobs_updated: int
+    companies_failed: int
+    current_company_name: str | None = None
+    started_at: datetime | None = None
+    updated_at: datetime
