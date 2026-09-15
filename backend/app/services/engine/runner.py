@@ -150,6 +150,32 @@ async def run_application(application_id: str) -> None:
                 await db.commit()
                 return
 
+            # Real, live-caught bug: a job scraped before the scraper's own
+            # apply_url validation existed (see sync_service.py's
+            # _looks_like_real_apply_url, FLAGGED.md #38) can sit in the
+            # jobs table with a non-URL value — a bare requisition number
+            # like "8-12876" — from the extract() model echoing SOME
+            # plausible-looking text when it had no real href to copy.
+            # Nothing here checked that before calling `page.goto()`, so
+            # Chrome's own CDP layer rejected it outright
+            # (`RPCError: -32000 Cannot navigate to invalid URL`) — the
+            # application still ended up FAILED (the outer try/except two
+            # blocks down already catches this), but with zero indication
+            # to the user that the JOB record itself, not the run, is what's
+            # broken, and only after fully launching a Chrome session for
+            # nothing. Checked here, before any browser work starts, so the
+            # failure is both cheap and says what's actually wrong.
+            if not job.apply_url.startswith(("http://", "https://")):
+                application.status = st.FAILED
+                application.error = (
+                    f"This job's stored link isn't a real URL "
+                    f"({job.apply_url!r}) — it was likely scraped before a "
+                    f"broken source page could be read correctly. Re-sync "
+                    f"this company or remove the job rather than retrying."
+                )
+                await db.commit()
+                return
+
             profile_dict = {
                 c.name: getattr(profile, c.name) for c in profile.__table__.columns
             }

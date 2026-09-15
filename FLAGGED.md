@@ -557,3 +557,45 @@ With sections 1-3 all confirmed reaching genuine, distinct search-results URLs a
 15 more tests on top of `#37`'s 10 (**374 total passing**), ruff clean, including: the reverted schema now asserted absent (guards against the crash silently reappearing), the mutually-exclusive dispatch bug's fix (jobs-and-sections harvested together, exact `goto()` sequences pinned), the per-section reset (also pinned by exact `goto()` sequence), the assessment retry (one retry then give up, not a loop), and the broader `apply_url` validator (bare numbers, node-ids, and relative paths all rejected; genuine absolute URLs kept) — the last of these parametrized directly against the real garbage values seen live (`"13147"`, `"[0-583]"`, `"0-4830"`).
 
 Also worth carrying forward, independent of this specific site: this whole sequence is a second, independent confirmation of the pattern `#29` already named — a confident, source-grounded fix, live-tested, found wrong, twice over in this pass alone (Attempts 1 and 2 each seemed complete when written). Neither unit tests written before a live run, nor careful reading of the SDK's source, substituted for actually running it.
+
+## 39. Live test run for enqueue+apply — 97 pre-existing garbage-URL jobs found live-blocking real applications, a defensive check added, and one real application successfully filed end to end
+
+Per direct instruction to test the real enqueue-and-apply flow, with `SUBMIT_ENABLED=True` in the live `.env` and explicit authorization for a genuine submission if the test reached that point.
+
+### Real bug: 97 jobs already in the database had an unusable `apply_url`, crashing real runs
+
+First attempt (a real `salesforce.com` job) failed immediately: `RPCError: -32000 Cannot navigate to invalid URL`. The job's stored `apply_url` was `"8-12876"` — exactly the node-id-echo garbage shape root-caused and fixed for the SCRAPER in `#38` — but these specific 97 rows (77 `jobs.ashbyhq.com`, 20 `salesforce.com`) had been written to `app.db` by scrapes that ran *before* that fix existed. `#38`'s fix stops the garbage from being written to NEW rows; it does nothing for rows already sitting in the database, and nothing in `runner.py` had ever validated `job.apply_url` before handing it straight to `page.goto()`.
+
+Notable in passing: the 77 `jobs.ashbyhq.com` rows are very likely the SAME 77 `#32` reported as a live success ("130 jobs... 77 inserted") — confirming the suspicion raised in `#38` that that success was never actually verified to have real, usable links.
+
+**Fixed two ways:**
+1. `runner.py` now checks `job.apply_url.startswith(("http://", "https://"))` immediately after the profile/job lookup — before any Chrome session is launched — and fails the application with a clear, actionable message (names the bad value, suggests re-syncing) instead of a raw CDP protocol error after a wasted browser launch. Unit-tested (`test_run_fails_fast_on_a_job_with_no_real_apply_url`): confirms no browser is launched at all for a job with the exact live-caught garbage shape.
+2. The 97 known-bad rows (and the two applications that had already failed against them) were deleted from `app.db` after a backup — 751 real jobs remained, all with genuine URLs.
+
+### Real, unresolved ambiguity: a submit-time crash whose outcome couldn't be determined from logs alone
+
+A full run against a live Anthropic posting (`job-boards.greenhouse.io/anthropic/...`) filled every field correctly through Tier 0/1/2 — including "Why Anthropic?" and "Agreement to Arbitrate," both historically the most failure-prone fields in this entire project's history (`#13`, `#19`, `#21`) — solved CAPTCHA twice, and then crashed at exactly the submit step: `RPCError: -32001 Session with given id not found`.
+
+That specific error text is a **standard Chrome DevTools Protocol** message, not one either the Stagehand SDK or its bundled extension emits — grepped both, no hits. It's classically raised when a CDP session's target has been invalidated by a full navigation, which is exactly what a genuinely successful submit → confirmation-page redirect would trigger. Weight of evidence: the click most likely fired, and the crash happened on the post-click confirmation read-back — meaning **the run recorded `failed`, but a real application may well have actually gone through.**
+
+This could not be resolved from the available logs (no snapshot or intermediate event was written between the CAPTCHA-solved line and the crash), and root-causing it further would need either reproducing it live again — itself risking a genuine duplicate application if the first one *did* submit — or deeper instrumentation of the exact CDP call that failed. Per direct instruction, **left alone rather than guessed at**: the application was not retried, and the user was told to verify independently (email / Greenhouse applicant portal) rather than have this assumed either way.
+
+**Not yet fixed, flagged for later**: `_submit_and_verify` has no defense against this specific CDP-session-invalidation class of error — a `-32001`-style failure right after a click should arguably be treated as "outcome unknown, do NOT let this look like a clean retry candidate" rather than a plain `failed` indistinguishable from every other failure reason. Worth a distinct status or at minimum a message calling out the ambiguity explicitly, so the UI doesn't imply "safe to retry" when it might not be.
+
+### Real, separate bug: a stale/expired job listing produces a misleading error instead of naming the actual problem
+
+Redirected to Figma next (skipping Anthropic per direct instruction to avoid the ambiguity above). The first Figma job tried (`boards.greenhouse.io/figma/jobs/5364702004?gh_jid=...` — note the legacy, non-`job-boards` domain) failed in 10 seconds: `submit button not found`, having filled exactly one field (`EMAIL`). Direct `httpx.get` of that URL (no browser, no LLM) showed why: it 302-redirects to `https://www.figma.com/careers/` — Figma's generic marketing careers page, not a job posting at all. The listing had simply expired since it was scraped; the "EMAIL" field was very likely a newsletter signup on the landing page, not an application form field.
+
+**Confirmed this is not a rare edge case**: all 157 `figma` rows in `app.db` share this same legacy `boards.greenhouse.io` URL pattern (vs. `anthropic`/`pistontechnologies`'s current `job-boards.greenhouse.io`), meaning most or all of them are equally likely stale.
+
+**Also confirmed while investigating**: `db_models.py`'s own `Application` docstring lists a status vocabulary including `checking_url`, `rescraped_retry_queued`, `link_expired_rescraping`, `link_expired_rescraped_still_unavailable` — exactly the concept needed here (detect an expired link, automatically re-scrape, retry) — but grepping the entire `app/` tree turns up **zero references to any of these outside that one docstring**. This was planned vocabulary from an earlier design pass that was never actually built; `domain/status.py`'s real, live vocabulary has no such states. A dead listing today just fails with whatever confusing symptom its redirect target happens to produce (`submit button not found` here; something else on a different dead-link shape) rather than a clear "this job posting no longer exists."
+
+**Not fixed this pass** — building real link-expiry detection and an automatic re-scrape/retry flow is a genuine feature, not a quick-test-session fix; flagged here so it isn't lost, and because the status vocabulary already half-exists in a docstring is exactly the kind of thing worth knowing before someone assumes it's already built.
+
+### What actually succeeded
+
+Third attempt, `pistontechnologies` (real `job-boards.greenhouse.io` posting, freshness confirmed via a plain `httpx.get` before enqueueing — no redirect, real form fields present): a complete, unambiguous, real success. Full log: 6 Tier 0 fields, 6 Tier 1 fields (2 from cache), 2 Tier 2 fields (one via a targeted repair pass after the first attempt left "Cover Letter" unhandled), CAPTCHA solved twice (pre-fill and pre-submit), a real submit click, and `"Submission confirmed: Thank you for applying"` read directly off the resulting page. **A real job application was filed.**
+
+### Result
+
+**375 backend tests** (+1), ruff clean. `app.db` backed up before the 97-row cleanup (`app.db.bak.<timestamp>`); 751 real jobs remain.
