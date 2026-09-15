@@ -1,11 +1,14 @@
 """
 All SQLAlchemy query construction for TrackedCompany lives here, following
-the same repository pattern as the other aggregates. Not used by any
-router today — only by the portals.yml seeding script — but the same
-boundary rule applies: nowhere else should query TrackedCompany directly.
+the same repository pattern as the other aggregates — nowhere else should
+query TrackedCompany directly. Used by the portals.yml seeding script and,
+since the "sync all tracked companies" feature, by
+services/scraper/bulk_sync_service.py too.
 """
 
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db_models import TrackedCompany
@@ -40,3 +43,38 @@ class TrackedCompanyRepository:
         stmt = select(TrackedCompany)
         result = await self._db.execute(stmt)
         return len(result.scalars().all())
+
+    def _eligible_stmt(self, cutoff: datetime):
+        """enabled AND (never synced OR last synced before `cutoff`) — the
+        one query both `count_eligible` and `next_eligible` share, so the
+        two can never disagree about what counts as "still to do"."""
+        return select(TrackedCompany).where(
+            TrackedCompany.enabled.is_(True),
+            or_(
+                TrackedCompany.last_synced_at.is_(None),
+                TrackedCompany.last_synced_at < cutoff,
+            ),
+        )
+
+    async def count_eligible(self, cutoff: datetime) -> int:
+        stmt = select(func.count()).select_from(self._eligible_stmt(cutoff).subquery())
+        return (await self._db.execute(stmt)).scalar_one()
+
+    async def next_eligible(self, cutoff: datetime) -> TrackedCompany | None:
+        """
+        The bulk sync's entire "resume where it left off" mechanism: no
+        separate cursor is stored anywhere. `mark_synced` moves a company's
+        `last_synced_at` to now the instant it's attempted (success or
+        failure), which drops it out of this same eligibility query — so
+        re-running this after a pause, a server restart, or on a fresh day
+        naturally returns whatever hasn't been touched yet, in a stable,
+        deterministic order.
+        """
+        stmt = self._eligible_stmt(cutoff).order_by(TrackedCompany.id.asc()).limit(1)
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def mark_synced(self, careers_url: str, when: datetime) -> None:
+        existing = await self.get_by_careers_url(careers_url)
+        if existing is not None:
+            existing.last_synced_at = when
+            await self._db.commit()

@@ -9,6 +9,7 @@ a careers page can't be resolved directly) is the first thing cut under
 time pressure per PLAN.md's cut list.
 """
 
+import logging
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -23,6 +24,8 @@ from app.models.db_models import Job
 from app.services.browser.chrome_launcher import close_session, get_or_launch
 from app.services.engine.llm_client import openrouter_llm
 from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
+
+logger = logging.getLogger(__name__)
 
 # Real bug, live-caught against https://careers.cargill.com/en (a genuine
 # category-3 multi-track portal — Professional/Production/University Jobs,
@@ -121,6 +124,7 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
         try:
             inserted, updated = await _sync_greenhouse(board_token, db)
         except Exception:
+            logger.exception("Greenhouse sync failed for %s", company_url)
             failed += 1
         return _result(inserted, updated, failed)
 
@@ -129,6 +133,7 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
         try:
             inserted, updated = await _sync_lever(lever_token, db)
         except Exception:
+            logger.exception("Lever sync failed for %s", company_url)
             failed += 1
         return _result(inserted, updated, failed)
 
@@ -136,6 +141,7 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
         inserted, updated = await _sync_via_extract(company_url, db)
         return _result(inserted, updated, 0)
     except Exception:
+        logger.exception("Extract-based sync failed for %s", company_url)
         return _result(0, 0, 1)
 
 

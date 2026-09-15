@@ -141,6 +141,19 @@ class Settings(BaseSettings):
     # portal seen so far with headroom.
     scraper_max_sections: int = 6
 
+    # How long a tracked company (config/portals.yml, seeded into
+    # TrackedCompany) stays "already covered" after a sync attempt before
+    # the bulk "sync all tracked companies" job (see
+    # services/scraper/bulk_sync_service.py) will attempt it again — per
+    # explicit user direction, matching a daily-click habit: a company
+    # synced this morning isn't re-hit again today, only once ~20h have
+    # passed. Applies regardless of whether that attempt succeeded or
+    # failed — a company that errors every time still only costs one
+    # attempt per window, not one per bulk-sync loop iteration, which
+    # would otherwise burn the whole run's budget retrying the same
+    # broken site forever.
+    tracked_company_resync_hours: int = 20
+
     resume_storage_dir: Path = BACKEND_DIR / "storage" / "resumes"
 
     portals_config_path: Path = BACKEND_DIR / "config" / "portals.yml"
