@@ -37,12 +37,19 @@ class Settings(BaseSettings):
     # `-32602 Invalid mouse button` CDP errors and slow (~15-80s, some
     # >120s) observe() calls — both a latency and a reliability problem for
     # this tier's job (deciding real clicks against custom widgets).
-    # deepseek/deepseek-v3.2 chosen per user direction: better reasoning
-    # than Qwen for this kind of agentic action-generation, at roughly
-    # half Qwen's per-token cost ($0.27/$0.40 vs $0.60/$3.60 per M
-    # in/out, OpenRouter pricing as of 2026-09-03). Do not swap this model
-    # again without asking first — confirmed standing constraint.
-    openrouter_model_tier2: str = "z-ai/glm-4.6"
+    # Switched again to openai/gpt-4o-mini per direct user request
+    # (FLAGGED.md #43), replacing z-ai/glm-4.6: live A/B testing the exact
+    # same real captured prompt+DOM against 4 models showed glm-4.6 (via
+    # OpenRouter's only available provider for it, Venice) NEVER returned
+    # valid JSON despite response_format — 3 different malformed shapes
+    # across repeated attempts (free-form prose, markdown-fenced, wrong
+    # field names). gpt-4o-mini was the only one of the 4 that reliably
+    # produced schema-valid JSON AND correctly identified real page
+    # content (the other schema-compliant model, gemini-2.5-flash, found
+    # nothing on the same page both times) — and at roughly a third of
+    # glm-4.6's per-token cost. See llm_client.py's _make_strict_compatible
+    # for the schema fix OpenAI's strict mode specifically required.
+    openrouter_model_tier2: str = "openai/gpt-4o-mini"
     # Day 4 scope correction: no longer gates whether a field gets filled
     # (Tier 1 always answers) — gates only whether an answer is cached into
     # the answers library. See tier1_map.py::map_fields.

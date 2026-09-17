@@ -358,27 +358,6 @@ search_queries:
 
 tracked_companies:
 
-  - name: 4Liberty
-    careers_url: https://www.4liberty.com/
-    notes: 'Confidence: High, Status: Verified or clear official match'
-    enabled: true
-    scan_method: websearch
-    scan_query: 'site:https://www.4liberty.com careers OR jobs'
-
-  - name: Accenture
-    careers_url: https://www.accenture.com/
-    notes: 'Confidence: High, Status: Verified or clear official match'
-    enabled: true
-    scan_method: websearch
-    scan_query: 'site:https://www.accenture.com careers OR jobs'
-
-  - name: ACCIONA
-    careers_url: https://www.acciona.com/
-    notes: 'Confidence: High, Status: Verified or clear official match'
-    enabled: true
-    scan_method: websearch
-    scan_query: 'site:https://www.acciona.com careers OR jobs'
-
   - name: ACS Professional Staffing
     careers_url: https://www.acsprostaffing.com/
     notes: 'Confidence: High, Status: Verified or clear official match'
@@ -420,20 +399,6 @@ tracked_companies:
     enabled: true
     scan_method: websearch
     scan_query: 'site:https://www.airswift.com careers OR jobs'
-
-  - name: Akima
-    careers_url: https://www.akima.com/
-    notes: 'Confidence: High, Status: Verified or clear official match'
-    enabled: true
-    scan_method: websearch
-    scan_query: 'site:https://www.akima.com careers OR jobs'
-
-  - name: Alberici
-    careers_url: https://www.alberici.com/
-    notes: 'Confidence: High, Status: Verified or clear official match'
-    enabled: true
-    scan_method: websearch
-    scan_query: 'site:https://www.alberici.com careers OR jobs'
 
   - name: Allied Reliability
     careers_url: https://www.alliedreliability.com/
