@@ -110,6 +110,35 @@ async def test_run_loop_processes_every_eligible_company_and_stops_when_none_lef
     assert final["current_company_name"] is None
 
 
+async def test_run_loop_pauses_without_marking_when_credits_run_out(
+    async_session, monkeypatch
+):
+    """Out of OpenRouter credits: the rest of the list must NOT be marked
+    synced with 0 jobs — pause, and Resume retries the same company."""
+    _patch_session(monkeypatch, async_session)
+    await _add_company(async_session, "Acme", "https://acme.com/careers")
+    await _add_company(async_session, "Globex", "https://globex.com/careers")
+    calls = []
+
+    async def fake_sync_company(url, db):
+        calls.append(url)
+        return {"success": False, "jobs_inserted": 0, "jobs_updated": 0,
+                "failed": 1, "out_of_credits": True}
+
+    monkeypatch.setattr(bulk_sync_service, "sync_company", fake_sync_company)
+    async_session.add(TrackedCompanySyncState(id=1, status="running", total_eligible=2))
+    await async_session.commit()
+
+    await bulk_sync_service._run_loop()
+
+    assert len(calls) == 1  # stopped at the first company
+    final = await bulk_sync_service.get_status()
+    assert final["status"] == "paused"
+    assert final["processed"] == 0 and final["companies_failed"] == 0
+    repo = TrackedCompanyRepository(async_session)
+    assert await repo.count_eligible(_far_future_cutoff()) == 2  # nothing marked synced
+
+
 async def test_run_loop_stops_at_the_next_boundary_when_paused(
     async_session, monkeypatch
 ):
