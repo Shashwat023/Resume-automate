@@ -25,6 +25,8 @@ guessed — see PLAN.md Part C for the full writeup). The load-bearing facts:
 """
 
 import json
+import logging
+import re
 
 import httpx
 from stagehand import LLMImageContent, LLMRole, LLMTextContent, LLMUsage
@@ -39,6 +41,61 @@ from stagehand._generated.models import (
 from app.core.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+_NULLABLE_SCHEMA_KEYS = {"const", "enum"}
+_DROPPED_SCHEMA_KEYS = {"default", "examples"}
+
+
+def _strict_schema(node):
+    """
+    OpenAI (strict json_schema) rejects what Stagehand generates: objects
+    whose `additionalProperties` is an untyped placeholder ("schema must
+    have a 'type' key"), and properties left out of `required`. Normalize
+    to what strict mode demands — every object closed and fully required,
+    null-valued keys (pydantic dump artifacts) dropped. Still valid JSON
+    Schema, so lenient providers (Gemini etc.) are unaffected.
+    """
+    if isinstance(node, list):
+        return [_strict_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {
+        key: _strict_schema(value)
+        for key, value in node.items()
+        if key not in _DROPPED_SCHEMA_KEYS
+        and (value is not None or key in _NULLABLE_SCHEMA_KEYS)
+    }
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+        out["required"] = list((out.get("properties") or {}).keys())
+    return out
+
+
+def _parse_structured_text(text: str):
+    """
+    Models routed through OpenRouter often wrap JSON in ```json fences or
+    prepend reasoning/<think> text even under json_schema mode. Try the
+    plain parse first, then fall back to the outermost {...} block.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+    logger.warning(
+        "LLM structured output was not valid JSON (finish_reason unknown to "
+        "parser); raw reply (first 500 chars): %r",
+        text[:500],
+    )
+    return None
 
 
 def _blocks_to_openai_content(content) -> list[dict]:
@@ -72,6 +129,22 @@ def _messages_to_openai(params) -> list[dict]:
     return openai_messages
 
 
+# Set when OpenRouter answers 402 (credits / key spending limit exhausted).
+# Stagehand wraps callback exceptions into its own RPCError, losing the
+# type, so callers (the scraper) check this instead of parsing messages.
+_credits_exhausted: str | None = None
+
+
+def credits_exhausted() -> str | None:
+    """OpenRouter's 402 message if the last call ran out of credits, else None."""
+    return _credits_exhausted
+
+
+def clear_credits_exhausted() -> None:
+    global _credits_exhausted
+    _credits_exhausted = None
+
+
 async def _call_openrouter(body: dict) -> dict:
     if not settings.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
@@ -81,7 +154,18 @@ async def _call_openrouter(body: dict) -> dict:
             headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
             json=body,
         )
-        resp.raise_for_status()
+        global _credits_exhausted
+        if resp.status_code == 402:
+            _credits_exhausted = resp.text[:300]
+        elif not resp.is_error:
+            _credits_exhausted = None
+        if resp.is_error:
+            # raise_for_status() alone drops OpenRouter's explanation (e.g.
+            # which schema/param the model rejected) — keep it in the error.
+            raise RuntimeError(
+                f"OpenRouter {resp.status_code} for model {body.get('model')}: "
+                f"{resp.text[:800]}"
+            )
         return resp.json()
 
 
@@ -94,7 +178,17 @@ def _usage_from_openai(data: dict) -> LLMUsage:
     )
 
 
-async def openrouter_llm(params):
+def openrouter_llm_for(model: str):
+    """A Stagehand model callback pinned to a specific model (the scraper's
+    fallback run uses this instead of the configured Tier-2 default)."""
+
+    async def callback(params):
+        return await openrouter_llm(params, model=model)
+
+    return callback
+
+
+async def openrouter_llm(params, model: str | None = None):
     """
     Real OpenRouter-backed callback for Tier 2 (Stagehand observe/act).
     Branches on the exact param type Stagehand hands us, per the contract
@@ -103,7 +197,15 @@ async def openrouter_llm(params):
     discriminates them; see PLAN.md).
     """
     openai_messages = _messages_to_openai(params)
-    body = {"model": settings.openrouter_model_tier2, "messages": openai_messages}
+    body = {
+        "model": model or settings.openrouter_model_tier2,
+        "messages": openai_messages,
+        # Stagehand never sends a limit, and without one OpenRouter reserves
+        # the model's full output window (65,536 for Gemini) against the
+        # key's budget — live-caught as a 402 "can only afford 60166" while
+        # real replies here are < ~3k tokens.
+        "max_tokens": settings.openrouter_tier2_max_tokens,
+    }
     if params.temperature is not None:
         body["temperature"] = params.temperature
     if params.stop_sequences:
@@ -121,7 +223,7 @@ async def openrouter_llm(params):
             "json_schema": {
                 "name": params.response_format.name,
                 "strict": True,
-                "schema": schema_dict,
+                "schema": _strict_schema(schema_dict),
             },
         }
 
@@ -132,10 +234,7 @@ async def openrouter_llm(params):
     content_block = LLMMessageContentBlock(root=LLMTextContent(type="text", text=text))
 
     if is_structured:
-        try:
-            structured = json.loads(text)
-        except json.JSONDecodeError:
-            structured = None
+        structured = _parse_structured_text(text)
         return LLMStructuredGenerateResult(
             role=LLMRole.assistant,
             content=[content_block],
