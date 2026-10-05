@@ -11,6 +11,8 @@ time pressure per PLAN.md's cut list.
 
 import logging
 import re
+from contextvars import ContextVar
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -22,7 +24,11 @@ from stagehand import Stagehand
 from app.core.config import get_settings
 from app.models.db_models import Job
 from app.services.browser.chrome_launcher import close_session, get_or_launch
-from app.services.engine.llm_client import openrouter_llm
+from app.services.engine.llm_client import (
+    credits_exhausted,
+    openrouter_llm,
+    openrouter_llm_for,
+)
 from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
 
 logger = logging.getLogger(__name__)
@@ -137,12 +143,91 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             failed += 1
         return _result(inserted, updated, failed)
 
-    try:
-        inserted, updated = await _sync_via_extract(company_url, db)
-        return _result(inserted, updated, 0)
-    except Exception:
-        logger.exception("Extract-based sync failed for %s", company_url)
-        return _result(0, 0, 1)
+    # Retry policy — retries exist for FAILURES, never for empty sites:
+    #   - a run that stores >= scraper_fallback_min_jobs jobs ends it;
+    #   - a run that crashed, or left evidence it missed postings (posting-
+    #     like links on the page, or jobs the model listed that had no real
+    #     link — see _ExtractEvidence), is retried with the primary model up
+    #     to `scraper_primary_attempts` runs total, then ONCE with the
+    #     fallback model;
+    #   - a clean run that found nothing and saw no posting links is a site
+    #     with no listings: stop after that single run, zero extra spend.
+    settings = get_settings()
+    attempts = max(1, settings.scraper_primary_attempts)
+    failed = 0
+    for attempt in range(1, attempts + 1):
+        failed = 0
+        evidence = _ExtractEvidence()
+        token = _evidence.set(evidence)
+        try:
+            got_inserted, got_updated = await _sync_via_extract(company_url, db)
+            inserted += got_inserted
+            updated += got_updated
+        except Exception:
+            logger.exception(
+                "Extract-based sync failed for %s (attempt %d/%d)",
+                company_url, attempt, attempts,
+            )
+            failed = 1
+        finally:
+            _evidence.reset(token)
+
+        if inserted + updated >= settings.scraper_fallback_min_jobs:
+            return _result(inserted, updated, 0)
+        if credits_exhausted():
+            return _out_of_credits(company_url, inserted, updated)
+        missed = (
+            failed
+            or evidence.job_links_max >= settings.scraper_retry_min_job_links
+            or evidence.unresolved_model_jobs >= 2
+            or evidence.blank_assessment_with_job_entry
+        )
+        if not missed:
+            logger.info(
+                "%s: no job postings found and none visible on the page — "
+                "treating as a site with no listings, not retrying",
+                company_url,
+            )
+            return _result(inserted, updated, 0)
+        logger.info(
+            "%s: attempt %d/%d with %s looks like a miss (crashed=%s, posting "
+            "links seen=%d, unmatched model jobs=%d, found nothing despite job "
+            "links=%s)",
+            company_url, attempt, attempts, settings.openrouter_model_tier2,
+            bool(failed), evidence.job_links_max, evidence.unresolved_model_jobs,
+            evidence.blank_assessment_with_job_entry,
+        )
+
+    fallback = (settings.openrouter_model_tier2_fallback or "").strip()
+    if fallback and fallback != settings.openrouter_model_tier2:
+        logger.info(
+            "%s: still %d job(s) after %d attempt(s) with %s, falling back to %s",
+            company_url, inserted + updated, attempts,
+            settings.openrouter_model_tier2, fallback,
+        )
+        try:
+            got_inserted, got_updated = await _sync_via_extract(
+                company_url, db, model=fallback
+            )
+            return _result(inserted + got_inserted, updated + got_updated, 0)
+        except Exception:
+            logger.exception("Fallback extract sync failed for %s", company_url)
+            failed = 1
+            if credits_exhausted():
+                return _out_of_credits(company_url, inserted, updated)
+
+    return _result(inserted, updated, failed)
+
+
+def _out_of_credits(company_url: str, inserted: int, updated: int) -> dict:
+    """Retrying or falling back can't help when the key has no budget left —
+    every call would 402 the same way. Flag it so the bulk sync pauses
+    instead of marking the rest of the list as synced with 0 jobs."""
+    logger.error(
+        "%s: OpenRouter credits/key limit exhausted — stopping this company. %s",
+        company_url, credits_exhausted(),
+    )
+    return {**_result(inserted, updated, 1), "out_of_credits": True}
 
 
 def _detect_greenhouse(url: str) -> str | None:
@@ -311,6 +396,7 @@ async def _assess_page(sh, page) -> PageAssessment:
     """
     last_error: Exception | None = None
     for _attempt in range(2):
+        await _dismiss_overlays(page)
         try:
             result = await with_timeout(
                 sh.extract(_ASSESS_INSTRUCTION, PageAssessment, page=page),
@@ -372,6 +458,311 @@ def _looks_like_internal_reference(value: str) -> bool:
 def _looks_like_real_apply_url(value: str) -> bool:
     parsed = urlparse(value.strip())
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+async def _wait_for_load(page) -> None:
+    """
+    Waits for the page's "load" event but never fails the sync over it.
+    Stagehand gives up after 15s, and ad/tracker-heavy sites (acciona.com,
+    actalentservices.com) routinely miss that while their content is
+    already fully readable — failing there threw away whole companies.
+    """
+    try:
+        await with_timeout(page.wait_for_load_state("load"), what="wait_for_load_state")
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Page load event slow, continuing anyway: %s", str(exc)[:120])
+
+
+# Cookie/consent banners and marketing popups overlay the page (often
+# aria-modal), so the accessibility tree extract()/observe() read shows only
+# the overlay and the model finds no jobs. Policy, deterministic and LLM-free:
+#   - consent banners: always REJECT — never accept, never fill anything in.
+#     Known consent-platform reject buttons first (searched inside open
+#     shadow roots too — consentmanager.net renders there, e.g. airswift.com),
+#     then any reject-worded button inside a consent-looking container; a
+#     banner with no reject option is hidden rather than accepted.
+#   - other popups (newsletter/promo/chat modals, e.g. Popup Maker on
+#     atcsplc.com): click their close control, or hide them.
+_DISMISS_OVERLAYS_JS = r"""
+(() => {
+  const actions = [];
+  const roots = [];
+  const collectRoots = root => {
+    roots.push(root);
+    root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) collectRoots(e.shadowRoot); });
+  };
+  collectRoots(document);
+  const deepAll = sel => roots.flatMap(r => Array.from(r.querySelectorAll(sel)));
+  const vis = e => {
+    if (!e || !e.isConnected) return false;
+    const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const label = e => (e.innerText || e.value || e.getAttribute('aria-label') || e.title || '')
+    .trim().replace(/\s+/g, ' ');
+  const ancestors = function* (el) {
+    for (let p = el, i = 0; p && i < 20; i++) {
+      yield p;
+      p = p.parentElement || (p.getRootNode && p.getRootNode().host) || null;
+    }
+  };
+  const hide = e => e.style.setProperty('display', 'none', 'important');
+
+  // 1. Consent: reject.
+  const KNOWN_REJECT = [
+    '#onetrust-reject-all-handler', '#CybotCookiebotDialogBodyButtonDecline',
+    '#CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll', '.cmpboxbtnno',
+    '#didomi-notice-disagree-button', '.cky-btn-reject', '.cmplz-deny',
+    '.osano-cm-denyAll', '.iubenda-cs-reject-btn', '#truste-consent-required',
+    '.fc-cta-do-not-consent', '[data-testid="uc-deny-all-button"]',
+    '[data-cookiefirst-action="reject"]', '.js-cookie-reject'
+  ];
+  let consentDone = false;
+  for (const sel of KNOWN_REJECT) {
+    const b = deepAll(sel).find(vis);
+    if (b) { b.click(); actions.push('rejected:' + sel); consentDone = true; break; }
+  }
+  const CONSENT_BOX = /cookie|consent|privacy|gdpr|cmp|onetrust|didomi|cky|usercentrics/i;
+  const inConsentBox = el => {
+    for (const p of ancestors(el)) {
+      const tag = (p.id || '') + ' ' + (typeof p.className === 'string' ? p.className : '');
+      if (CONSENT_BOX.test(tag)) return true;
+    }
+    return false;
+  };
+  if (!consentDone) {
+    const REJECT_TEXT = /^(reject|decline|deny|refuse|disagree)( all)?( cookies)?$|^(use |accept )?(only )?(strictly )?(necessary|essential|required)( cookies)?( only)?$|^continue without accepting$|^(rechazar|refuser|ablehnen)( todo| todas| tout| alle)?( las cookies)?$|^(tout refuser|alle ablehnen|nur notwendige)$/i;
+    const b = deepAll('button, a, [role="button"], input[type="button"], input[type="submit"]')
+      .find(e => { const t = label(e); return t && t.length <= 60 && REJECT_TEXT.test(t) && vis(e) && inConsentBox(e); });
+    if (b) { b.click(); actions.push('rejected:' + label(b)); consentDone = true; }
+  }
+  if (!consentDone) {
+    const banners = deepAll('#cmpwrapper,[id*="cookie" i],[class*="cookie" i],[id*="consent" i],[class*="consent" i],' +
+      '[id*="onetrust" i],[id*="cmpbox" i],[id*="didomi" i],[class*="cky-" i],[id*="usercentrics" i]')
+      .filter(e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
+        // Only a real banner: fixed on screen, says it's about cookies, and
+        // isn't page content (job lists and nav bars carry many links).
+        return vis(e) && s.position === 'fixed' && r.width > 150 && r.height > 60
+          && /cookie|consent|privacy|personal data/i.test(e.innerText || '')
+          && e.querySelectorAll('a').length < 15; });
+    banners.forEach(hide);
+    if (banners.length) actions.push('hid-consent:' + banners.length);
+  }
+
+  // 2. Other popups: close (never submit anything).
+  const POPUP = '[role="dialog"],[aria-modal="true"],[class*="popup" i],[id*="popup" i],[class*="modal" i],' +
+    '[class*="pum-" i],[class*="newsletter" i],[class*="lightbox" i],[class*="leadinModal" i]';
+  const CLOSE_SEL = '.pum-close,.leadinModal-close,.modal-close,.popup-close,.close,' +
+    '[aria-label="Close" i],[aria-label*="close" i],[title*="close" i],[data-dismiss="modal"]';
+  const CLOSE_TEXT = /^(close|×|✕|✖|x|no,? thanks|not now|maybe later|dismiss|skip)$/i;
+  const safe = e => e.tagName !== 'A' || !e.getAttribute('href') || /^(#|javascript:)/i.test(e.getAttribute('href'));
+  const popups = deepAll(POPUP).filter(e => {
+    const s = getComputedStyle(e), r = e.getBoundingClientRect();
+    return vis(e) && s.position === 'fixed' && r.width > 200 && r.height > 100
+      && e.querySelectorAll('a').length < 10
+      && !CONSENT_BOX.test((e.id || '') + ' ' + (typeof e.className === 'string' ? e.className : ''));
+  });
+  for (const pop of popups) {
+    if (!vis(pop)) continue;
+    const btn = Array.from(pop.querySelectorAll(CLOSE_SEL)).find(e => vis(e) && safe(e))
+      || Array.from(pop.querySelectorAll('button, [role="button"], a, span'))
+           .find(e => vis(e) && safe(e) && CLOSE_TEXT.test(label(e)));
+    if (btn) { btn.click(); actions.push('closed-popup:' + (label(btn) || btn.className).slice(0, 30)); }
+    else { hide(pop); actions.push('hid-popup'); }
+  }
+  if (actions.length) {
+    document.documentElement.style.overflow = 'auto';
+    if (document.body) document.body.style.overflow = 'auto';
+  }
+  return actions.join(', ');
+})()
+"""
+
+
+async def _dismiss_overlays(page) -> None:
+    """Run before every LLM read of a page — banners and popups can appear late."""
+    try:
+        outcome = await with_timeout(page.evaluate(_DISMISS_OVERLAYS_JS), what="evaluate(overlays)")
+    except Exception:  # noqa: BLE001
+        return
+    if outcome:
+        logger.info("Overlays handled: %s", outcome)
+        # Rejecting consent often reloads the page — let it settle before
+        # the next accessibility snapshot, or the model reads a blank page.
+        await page.wait_for_timeout(1500)
+        await _wait_for_load(page)
+
+
+_ANCHORS_JS = """
+Array.from(document.querySelectorAll('a[href]')).map(a => ({
+  href: a.href,
+  text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim()
+}))
+"""
+
+
+def _norm_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip().lower()
+
+
+async def _page_links(page) -> tuple[str, list[tuple[str, str]], set[str]]:
+    """The page's real <a> links as (absolute href, normalized text)."""
+    try:
+        current = await page.url()
+        anchors = await with_timeout(page.evaluate(_ANCHORS_JS), what="evaluate(anchors)")
+    except Exception:  # noqa: BLE001
+        return "", [], set()
+    links = [
+        (a["href"].split("#")[0], _norm_text(a.get("text", "")))
+        for a in anchors or []
+        if isinstance(a, dict) and _looks_like_real_apply_url(a.get("href") or "")
+    ]
+    return current, links, {href.rstrip("/") for href, _ in links}
+
+
+def _snap_to_real_link(url, label, current, links, real_hrefs) -> str:
+    """
+    A model-supplied URL is kept only if it's an actual link on the page
+    (relative ones resolved first); otherwise the label is matched against
+    link text. Returns "" when nothing real matches.
+    """
+    if url:
+        absolute = urljoin(current, url.strip()).split("#")[0]
+        if absolute.rstrip("/") in real_hrefs:
+            return absolute
+    text = _norm_text(label)
+    if not text:
+        return ""
+    match = [h for h, t in links if t == text] or [h for h, t in links if text in t]
+    return match[0] if match else ""
+
+
+# ---- "were jobs missed?" evidence, gathered for free from real page links ----
+#
+# sync_company retries (and finally falls back to a stronger model) only
+# when a run FAILED — crashed, or demonstrably missed postings that are on
+# the page. A site that simply lists no jobs must cost exactly one run:
+# re-running it with any model just burns tokens (benchmark: atcsplc.com
+# and accenture.com gave 0 for all 7 models tested).
+
+_JOB_PATH_SEGMENTS = {
+    "job", "jobs", "position", "positions", "vacancy", "vacancies", "opening",
+    "openings", "posting", "postings", "requisition", "requisitions", "req",
+    "job-details", "jobdetails", "job-detail", "jobdetail", "careers-job",
+}
+_JOB_QUERY_KEYS = {"jobid", "job_id", "jid", "gh_jid", "reqid", "req_id",
+                   "requisitionid", "postingid", "jobreqid"}
+_ATS_HOSTS = (
+    "myworkdayjobs.com", "icims.com", "taleo.net", "successfactors", "greenhouse.io",
+    "lever.co", "smartrecruiters.com", "ashbyhq.com", "workable.com", "jobvite.com",
+    "bamboohr.com", "recruitee.com", "breezy.hr", "paylocity.com", "ultipro.com",
+    "ukg.net", "oraclecloud.com", "dayforcehcm.com",
+)
+
+
+def _looks_like_job_posting_link(href: str) -> bool:
+    """A link to ONE posting (not a listing/category page): a job-ish path
+    segment followed by an id-like tail, a job id in the query, or a deep
+    link into a known ATS."""
+    parsed = urlparse(href)
+    host = parsed.netloc.lower()
+    segments = [seg for seg in parsed.path.lower().split("/") if seg]
+    for i, seg in enumerate(segments[:-1]):
+        tail = segments[i + 1]
+        if seg in _JOB_PATH_SEGMENTS and (
+            any(ch.isdigit() for ch in tail) or (len(tail) >= 12 and "-" in tail)
+        ):
+            return True
+    query_keys = {kv.split("=", 1)[0].lower() for kv in parsed.query.split("&") if "=" in kv}
+    if query_keys & _JOB_QUERY_KEYS:
+        return True
+    return any(ats in host for ats in _ATS_HOSTS) and len(segments) >= 2 and any(
+        ch.isdigit() for ch in parsed.path
+    )
+
+
+@dataclass
+class _ExtractEvidence:
+    job_links_max: int = 0  # most posting-like links seen on any one visited page
+    unresolved_model_jobs: int = 0  # jobs the model listed that had no real link
+    # The first look at the page found neither jobs nor sections although
+    # the page plainly links somewhere job-related — the model missed the
+    # way in (live: Luna on actalentservices.com, 2 calls, then gave up).
+    blank_assessment_with_job_entry: bool = False
+
+
+_evidence: ContextVar["_ExtractEvidence | None"] = ContextVar("_extract_evidence", default=None)
+
+
+_JOB_ENTRY_TEXT = re.compile(
+    r"\b(jobs?|careers?|vacanc(y|ies)|openings?|open positions|join (us|our team)|"
+    r"work (with|for) us|we'?re hiring|search jobs|find jobs)\b",
+    re.I,
+)
+
+
+def _has_job_entry_link(links: list[tuple[str, str]]) -> bool:
+    for href, text in links:
+        parsed = urlparse(href)
+        if _JOB_ENTRY_TEXT.search(text or ""):
+            return True
+        if parsed.netloc.lower().startswith(("careers.", "jobs.")) or re.search(
+            r"/(careers?|jobs?)(/|$)", parsed.path.lower()
+        ):
+            return True
+    return False
+
+
+def _record_blank_assessment(links: list[tuple[str, str]]) -> None:
+    ev = _evidence.get()
+    if ev is not None and _has_job_entry_link(links):
+        ev.blank_assessment_with_job_entry = True
+
+
+def _record_page_evidence(links: list[tuple[str, str]], unresolved_model_jobs: int = 0) -> None:
+    ev = _evidence.get()
+    if ev is None:
+        return
+    ev.job_links_max = max(
+        ev.job_links_max, sum(1 for href, _ in links if _looks_like_job_posting_link(href))
+    )
+    ev.unresolved_model_jobs += unresolved_model_jobs
+
+
+async def _resolve_apply_urls_from_dom(page, jobs: list[ScrapedJob]) -> None:
+    """
+    extract() reads the accessibility tree, which carries no hrefs, so the
+    model either leaves apply_url empty or invents one (see the format:uri
+    note at the top of this module for why Stagehand's own href resolution
+    can't be used). The page's real <a> elements DO have them — `a.href` is
+    already absolute, so relative links are resolved for free. No LLM cost.
+    """
+    current, links, real_hrefs = await _page_links(page)
+    if links:
+        for job in jobs:
+            job.apply_url = _snap_to_real_link(
+                job.apply_url, job.title, current, links, real_hrefs
+            )
+    _record_page_evidence(
+        links, unresolved_model_jobs=sum(1 for j in jobs if j.title and not j.apply_url)
+    )
+
+
+async def _resolve_section_urls_from_dom(page, sections: list["ListingSection"]) -> None:
+    """
+    Same problem for section entry points: live-caught on airswift.com, a
+    model returned plausible-looking but nonexistent section URLs
+    (/jobs/engineering instead of the page's real /candidates/engineering-jobs),
+    so every section scraped a dead page and the company yielded 0 jobs.
+    An unverifiable URL is cleared, which sends that section down the
+    existing click-by-label fallback instead.
+    """
+    current, links, real_hrefs = await _page_links(page)
+    _record_page_evidence(links)
+    if not links:
+        return
+    for section in sections:
+        section.url = _snap_to_real_link(section.url, section.label, current, links, real_hrefs)
 
 
 def _usable_sections(
@@ -456,14 +847,13 @@ async def _navigate_to_section(sh, page, section: "ListingSection") -> bool:
     if section.url:
         try:
             await page.goto(section.url)
-            await with_timeout(
-                page.wait_for_load_state("load"), what="wait_for_load_state"
-            )
+            await _wait_for_load(page)
         except Exception:  # noqa: BLE001
             return False
         await page.wait_for_timeout(1500)
         return True
 
+    await _dismiss_overlays(page)
     try:
         obs = await with_timeout(
             sh.observe(
@@ -488,7 +878,7 @@ async def _navigate_to_section(sh, page, section: "ListingSection") -> bool:
         return False
 
     try:
-        await with_timeout(page.wait_for_load_state("load"), what="wait_for_load_state")
+        await _wait_for_load(page)
     except Exception:  # noqa: BLE001
         pass  # an in-page SPA route change may never fire a "load" event
     await page.wait_for_timeout(1500)
@@ -526,6 +916,7 @@ async def _harvest_listing(
             jobs = pending
             pending = None
         else:
+            await _dismiss_overlays(page)
             try:
                 result = await with_timeout(
                     sh.extract(_EXTRACT_INSTRUCTION, ScrapedJobs, page=page),
@@ -557,8 +948,16 @@ async def _harvest_listing(
         for job in jobs:
             if job.apply_url and not _looks_like_real_apply_url(job.apply_url):
                 job.apply_url = ""
+        await _resolve_apply_urls_from_dom(page, jobs)
 
-        new_this_page = [j for j in jobs if j.apply_url not in seen_apply_urls]
+        # Only a job with a real, not-yet-seen link counts as progress. An
+        # unresolvable one ("" apply_url) used to count as "new" on every
+        # page, so stop condition 1 never fired and pagination ran to
+        # scraper_max_pages storing nothing (live: acciona.com, ~7k tokens
+        # per page for 8+ pages, 0 jobs).
+        new_this_page = [
+            j for j in jobs if j.apply_url and j.apply_url not in seen_apply_urls
+        ]
         for job in jobs:
             if job.apply_url:
                 seen_apply_urls.add(job.apply_url)
@@ -582,6 +981,7 @@ async def _harvest_listing(
         if page_number == max_pages:
             break
 
+        await _dismiss_overlays(page)
         try:
             obs = await with_timeout(
                 sh.observe(_PAGINATION_INSTRUCTION, page=page),
@@ -610,7 +1010,9 @@ async def _harvest_listing(
     return inserted, updated
 
 
-async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, int]:
+async def _sync_via_extract(
+    company_url: str, db: AsyncSession, model: str | None = None
+) -> tuple[int, int]:
     """
     Fallback for any careers page that isn't a known ATS. Uses a dedicated
     "scraper" Chrome profile (see _SCRAPER_PROFILE_KEY) so this never
@@ -637,10 +1039,16 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
     Spend is bounded on both axes: scraper_max_sections caps how many
     listing pages we'll visit, scraper_max_pages caps pagination within
     each one.
+
+    `model` overrides the configured Tier-2 model for this one run (used
+    by sync_company's fallback retry).
     """
     settings = get_settings()
     session = await get_or_launch(_SCRAPER_PROFILE_KEY)
-    sh = await Stagehand.create(browser=session.browser, model=openrouter_llm)
+    sh = await Stagehand.create(
+        browser=session.browser,
+        model=openrouter_llm_for(model) if model else openrouter_llm,
+    )
     company_name = _company_name_from_url(company_url)
     seen_apply_urls: set[str] = set()
     inserted = 0
@@ -651,7 +1059,7 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
             or await sh.browser.context.new_page()
         )
         await page.goto(company_url)
-        await with_timeout(page.wait_for_load_state("load"), what="wait_for_load_state")
+        await _wait_for_load(page)
         await page.wait_for_timeout(1500)
 
         assessment = await _assess_page(sh, page)
@@ -686,6 +1094,10 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
         # jobs pays a few extra, capped LLM calls to re-discover postings
         # the dedupe set then discards — accepted, since the alternative
         # just proved itself capable of a total, silent failure.
+        await _resolve_section_urls_from_dom(page, assessment.sections)
+        if not assessment.jobs and not assessment.sections:
+            _, links, _ = await _page_links(page)
+            _record_blank_assessment(links)
         sections = _usable_sections(
             assessment.sections, company_url, settings.scraper_max_sections
         )
@@ -705,9 +1117,7 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
         # exists to get right.
         for section in sections:
             await page.goto(company_url)
-            await with_timeout(
-                page.wait_for_load_state("load"), what="wait_for_load_state"
-            )
+            await _wait_for_load(page)
             await page.wait_for_timeout(1500)
 
             if not await _navigate_to_section(sh, page, section):
@@ -730,9 +1140,7 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
                 # one pointless goto() on the common case (a genuine
                 # single-listing page with no sections at all).
                 await page.goto(company_url)
-                await with_timeout(
-                    page.wait_for_load_state("load"), what="wait_for_load_state"
-                )
+                await _wait_for_load(page)
                 await page.wait_for_timeout(1500)
 
             page_inserted, page_updated = await _harvest_listing(
