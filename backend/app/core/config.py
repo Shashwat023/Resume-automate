@@ -43,6 +43,25 @@ class Settings(BaseSettings):
     # in/out, OpenRouter pricing as of 2026-09-03). Do not swap this model
     # again without asking first — confirmed standing constraint.
     openrouter_model_tier2: str = "z-ai/glm-4.6"
+    # Scraper-only retry policy. A company's extract-based sync is tried up
+    # to `scraper_primary_attempts` times with the primary Tier-2 model,
+    # stopping as soon as one run stores `scraper_fallback_min_jobs` jobs;
+    # if every attempt comes back short (or crashes), it's re-run ONCE with
+    # this fallback model — never more. Picked
+    # from a 7-model benchmark on 2026-10-04 (gpt-5.6-luna primary: 96% of
+    # jobs found at ~1/7 Gemini's cost; Gemini 3.8 Flash found 99.7% and
+    # recovered the one site Luna missed). Empty string disables it.
+    openrouter_model_tier2_fallback: str = "google/gemini-3.8-flash"
+    # Cap on one Tier-2/Stagehand reply. Largest seen in the benchmark was
+    # ~3k tokens (a 30-job page); 16k leaves room for ~200 postings.
+    openrouter_tier2_max_tokens: int = 16000
+    scraper_primary_attempts: int = 3
+    scraper_fallback_min_jobs: int = 1
+    # A 0-job run is only retried if it crashed or the visited pages showed
+    # at least this many links to individual postings (evidence the model
+    # missed them). Below it the site is treated as having no listings and
+    # is not re-run — retrying an empty site only burns tokens.
+    scraper_retry_min_job_links: int = 3
     # Day 4 scope correction: no longer gates whether a field gets filled
     # (Tier 1 always answers) — gates only whether an answer is cached into
     # the answers library. See tier1_map.py::map_fields.
