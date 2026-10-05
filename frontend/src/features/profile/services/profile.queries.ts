@@ -7,6 +7,7 @@ import type { ProfileFormValues } from '../schema';
 
 // ── Backend → Frontend mapping ────────────────────────────────────────
 function backendToForm(b: BackendProfile): ProfileFormValues {
+  const x = b.extra ?? {};
   return {
     personal: {
       firstName: b.full_name?.split(' ')[0] ?? '',
@@ -21,70 +22,78 @@ function backendToForm(b: BackendProfile): ProfileFormValues {
     contact: {
       email: b.email ?? '',
       phone: b.phone ?? '',
-      alternatePhone: '',
+      alternatePhone: x.contact?.alternatePhone ?? '',
       country: b.country ?? '',
       state: b.state ?? '',
       city: b.city ?? '',
       postalCode: b.postal_code ?? '',
       fullAddress: b.address ?? '',
-      timezone: '',
+      timezone: x.contact?.timezone ?? '',
     },
     professional: {
       currentJobTitle: b.current_title ?? '',
       currentCompany: b.current_company ?? '',
       yearsOfExperience: b.years_of_experience ?? 0,
-      totalExperience: 0,
-      industry: '',
-      employmentStatus: '',
+      totalExperience: x.professional?.totalExperience ?? 0,
+      industry: x.professional?.industry ?? '',
+      employmentStatus: x.professional?.employmentStatus ?? '',
       noticePeriod: b.notice_period ?? '',
     },
-    education: [],
-    employment: [],
+    education: (b.education as ProfileFormValues['education']) ?? [],
+    employment: (b.employment as ProfileFormValues['employment']) ?? [],
     social: {
       linkedin: b.linkedin_url ?? '',
       github: b.github_url ?? '',
       portfolio: b.portfolio_url ?? '',
       twitter: b.twitter_url ?? '',
-      kaggle: '',
-      huggingFace: '',
-      stackOverflow: '',
+      kaggle: x.social?.kaggle ?? '',
+      huggingFace: x.social?.huggingFace ?? '',
+      stackOverflow: x.social?.stackOverflow ?? '',
     },
     workAuthorization: {
-      currentCountry: b.country ?? '',
+      currentCountry: x.workAuthorization?.currentCountry ?? b.country ?? '',
       visaStatus: b.visa_status ?? '',
-      workAuthorization: b.visa_status ?? '',
+      workAuthorization: x.workAuthorization?.workAuthorization ?? b.visa_status ?? '',
       sponsorshipRequired: b.sponsorship_required ?? false,
-      eligibleCountries: [],
+      eligibleCountries: x.workAuthorization?.eligibleCountries ?? [],
       willingToRelocate: b.willing_to_relocate ?? false,
-      remoteOnly: false,
+      remoteOnly: x.workAuthorization?.remoteOnly ?? false,
     },
     salary: {
       currentSalary: b.current_salary ?? '',
       expectedSalary: b.expected_salary ?? '',
-      currency: 'USD',
-      employmentType: '',
-      preferredJobType: '',
+      currency: x.salary?.currency ?? 'USD',
+      employmentType: x.salary?.employmentType ?? '',
+      preferredJobType: x.salary?.preferredJobType ?? '',
     },
     preferences: {
-      preferredLocations: b.preferred_location ? [b.preferred_location] : [],
-      preferredRoles: b.preferred_job_title ? [b.preferred_job_title] : [],
-      preferredIndustries: [],
-      preferredAts: [],
-      remote: false,
-      hybrid: false,
-      onsite: false,
-      travelPercentage: '',
+      preferredLocations:
+        x.preferences?.preferredLocations ?? (b.preferred_location ? [b.preferred_location] : []),
+      preferredRoles:
+        x.preferences?.preferredRoles ?? (b.preferred_job_title ? [b.preferred_job_title] : []),
+      preferredIndustries: x.preferences?.preferredIndustries ?? [],
+      preferredAts: x.preferences?.preferredAts ?? [],
+      remote: x.preferences?.remote ?? false,
+      hybrid: x.preferences?.hybrid ?? false,
+      onsite: x.preferences?.onsite ?? false,
+      travelPercentage: x.preferences?.travelPercentage ?? '',
     },
     skills: b.skills ?? [],
     summary: b.summary ?? '',
     additional: {
-      veteranStatus: '',
-      disabilityStatus: '',
-      genderIdentity: '',
-      pronouns: '',
-      raceEthnicity: '',
+      veteranStatus: x.additional?.veteranStatus ?? '',
+      disabilityStatus: x.additional?.disabilityStatus ?? '',
+      genderIdentity: x.additional?.genderIdentity ?? '',
+      pronouns: x.additional?.pronouns ?? '',
+      raceEthnicity: x.additional?.raceEthnicity ?? '',
     },
   };
+}
+
+/** Graduation year from a free-form date ("2025", "2025-06", "Jun 2025"). */
+function yearOf(date?: string): number | undefined {
+  const m = date?.match(/\b(19|20)\d{2}\b/);
+  return m ? Number(m[0]) : undefined;
 }
 
 // ── Frontend → Backend mapping ────────────────────────────────────────
@@ -121,6 +130,39 @@ function formToBackend(f: ProfileFormValues): Omit<BackendProfile, 'id' | 'creat
     preferred_job_title: f.preferences.preferredRoles[0] || undefined,
     skills: f.skills?.length ? f.skills : undefined,
     summary: f.summary || undefined,
+    // The first education entry also fills the flat columns the application
+    // engine reads when it answers "highest degree / university / grad year".
+    highest_degree: f.education?.[0]?.degree || undefined,
+    university: f.education?.[0]?.university || undefined,
+    graduation_year: yearOf(f.education?.[0]?.endDate),
+    education: f.education ?? [],
+    employment: f.employment ?? [],
+    extra: {
+      contact: { alternatePhone: f.contact.alternatePhone, timezone: f.contact.timezone },
+      professional: {
+        totalExperience: f.professional.totalExperience,
+        industry: f.professional.industry,
+        employmentStatus: f.professional.employmentStatus,
+      },
+      social: {
+        kaggle: f.social.kaggle,
+        huggingFace: f.social.huggingFace,
+        stackOverflow: f.social.stackOverflow,
+      },
+      workAuthorization: {
+        currentCountry: f.workAuthorization.currentCountry,
+        workAuthorization: f.workAuthorization.workAuthorization,
+        eligibleCountries: f.workAuthorization.eligibleCountries,
+        remoteOnly: f.workAuthorization.remoteOnly,
+      },
+      salary: {
+        currency: f.salary.currency,
+        employmentType: f.salary.employmentType,
+        preferredJobType: f.salary.preferredJobType,
+      },
+      preferences: f.preferences,
+      additional: f.additional,
+    },
   };
 }
 
