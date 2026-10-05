@@ -180,6 +180,211 @@ async def test_sync_company_falls_back_to_extract_for_unknown_ats(
     }
 
 
+def _saw_posting_links(count=10):
+    """What a real run records when its pages had posting links it didn't store."""
+    sync_service._evidence.get().job_links_max = count
+
+
+def _retry_settings(monkeypatch, attempts=3, fallback="google/gemini-3.8-flash"):
+    settings = sync_service.get_settings()
+    monkeypatch.setattr(settings, "openrouter_model_tier2", "openai/gpt-5.6-luna")
+    monkeypatch.setattr(settings, "openrouter_model_tier2_fallback", fallback)
+    monkeypatch.setattr(settings, "scraper_primary_attempts", attempts)
+    monkeypatch.setattr(settings, "scraper_fallback_min_jobs", 1)
+    monkeypatch.setattr(settings, "scraper_retry_min_job_links", 3)
+
+
+async def test_sync_company_stops_retrying_once_an_attempt_finds_jobs(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if len(calls) == 1:
+            _saw_posting_links()
+            return 0, 0
+        return 4, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None]  # primary twice, fallback never touched
+    assert result["jobs_inserted"] == 4 and result["success"] is True
+
+
+async def test_sync_company_falls_back_once_after_three_empty_attempts(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if model is None:
+            _saw_posting_links()
+            return 0, 0
+        return 15, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None, None, "google/gemini-3.8-flash"]
+    assert result == {"success": True, "jobs_inserted": 15, "jobs_updated": 0, "failed": 0}
+
+
+async def test_sync_company_crashing_attempts_count_toward_the_three(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None, None, "google/gemini-3.8-flash"]
+    assert result["success"] is False and result["failed"] == 1
+
+
+async def test_sync_company_skips_fallback_when_disabled(async_session, monkeypatch):
+    _retry_settings(monkeypatch, fallback="")
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        _saw_posting_links()
+        return 0, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None, None]
+    assert result["jobs_inserted"] == 0 and result["success"] is True
+
+
+async def test_sync_company_does_not_retry_a_site_with_no_listings(
+    async_session, monkeypatch
+):
+    """Clean run, 0 jobs, no posting links anywhere: one run, no fallback."""
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        sync_service._evidence.get().job_links_max = 1  # below the threshold
+        return 0, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None]
+    assert result == {"success": True, "jobs_inserted": 0, "jobs_updated": 0, "failed": 0}
+
+
+async def test_sync_company_retries_when_model_listed_jobs_without_real_links(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if len(calls) == 1:
+            sync_service._evidence.get().unresolved_model_jobs = 5
+            return 0, 0
+        return 3, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None]
+    assert result["jobs_inserted"] == 3
+
+
+async def test_sync_company_retries_when_first_look_missed_obvious_job_links(
+    async_session, monkeypatch
+):
+    """Live case: Luna on actalentservices.com returned nothing on the
+    homepage (no jobs, no sections) though it links to careers.* — a miss."""
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if len(calls) == 1:
+            sync_service._evidence.get().blank_assessment_with_job_entry = True
+            return 0, 0
+        return 15, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/", async_session)
+
+    assert calls == [None, None]
+    assert result["jobs_inserted"] == 15
+
+
+@pytest.mark.parametrize(
+    "links,expected",
+    [
+        ([("https://careers.actalentservices.com/in/en", "")], True),
+        ([("https://example.com/about", "Join our team")], True),
+        ([("https://example.com/careers/", "Learn more")], True),
+        ([("https://example.com/about", "About us"), ("https://example.com/news", "News")], False),
+    ],
+)
+def test_has_job_entry_link(links, expected):
+    assert sync_service._has_job_entry_link(links) is expected
+
+
+@pytest.mark.parametrize(
+    "href,expected",
+    [
+        ("https://www.airswift.com/jobs/senior-system-architect-1281276", True),
+        ("https://www.careers-page.com/dilectus-workforce-solutions/job/7X57X433", True),
+        ("https://example.com/careers/job-details?jobId=12345", True),
+        ("https://acme.wd5.myworkdayjobs.com/External/job/Austin/Engineer_R123", True),
+        ("https://www.airswift.com/jobs", False),
+        ("https://www.airswift.com/jobs?page_num=2", False),
+        ("https://www.airswift.com/candidates/it-jobs", False),
+        ("https://www.airswift.com/blog/job-interview-questions", False),
+        ("https://example.com/careers", False),
+    ],
+)
+def test_looks_like_job_posting_link(href, expected):
+    assert sync_service._looks_like_job_posting_link(href) is expected
+
+
+async def test_sync_company_stops_retrying_when_credits_are_exhausted(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        monkeypatch.setattr(sync_service, "credits_exhausted", lambda: "402 no credits")
+        raise RuntimeError("OpenRouter 402")
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None]  # no Luna retries, no Gemini fallback
+    assert result["out_of_credits"] is True and result["success"] is False
+
+
 async def test_sync_company_reports_failure_when_extract_raises(
     async_session, monkeypatch
 ):
