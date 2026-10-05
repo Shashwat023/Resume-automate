@@ -61,10 +61,43 @@ class ChromeSession:
     )
     process: subprocess.Popen | None = None  # only set for the real-Chrome path
     extension_id: str | None = None
+    user_data_dir: Path | None = None  # set for the Stagehand-launched path
 
     @property
     def cdp_url(self) -> str:
         return f"http://localhost:{self.port}"
+
+
+def _kill_profile_chrome(user_data_dir: Path) -> None:
+    """
+    Kills any Chrome still running against this user-data-dir. Chrome
+    hands a second launch on the SAME profile to the already-running
+    instance (opening an about:blank tab and exiting), so the new debug
+    port never opens and Stagehand times out. Stagehand's own launch gives
+    us no process handle to terminate, so we find the leftovers by their
+    --user-data-dir argument instead.
+    """
+    needle = str(user_data_dir).replace("'", "''")
+    if sys.platform == "win32":
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*{needle}*' }} | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                "-ErrorAction SilentlyContinue }",
+            ],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        subprocess.run(
+            ["pkill", "-f", f"--user-data-dir={user_data_dir}"],
+            capture_output=True,
+            check=False,
+        )
 
 
 def _free_port() -> int:
@@ -252,6 +285,9 @@ async def get_or_launch(profile_key: str) -> ChromeSession:
     else:
         user_data_dir = settings.chrome_profiles_dir / profile_key
         user_data_dir.mkdir(parents=True, exist_ok=True)
+        # A leftover Chrome from an earlier run/failed launch would swallow
+        # this launch (see _kill_profile_chrome) and cause a 60s timeout.
+        await asyncio.to_thread(_kill_profile_chrome, user_data_dir)
 
         proxy_kwargs: dict = {}
         if settings.captcha_proxy_url:
@@ -303,6 +339,7 @@ async def get_or_launch(profile_key: str) -> ChromeSession:
             port=port,
             browser=browser,
             extension_id=extension_id,
+            user_data_dir=user_data_dir,
         )
 
     _sessions[profile_key] = session
@@ -316,3 +353,8 @@ async def close_session(profile_key: str) -> None:
     await session.browser.close()
     if session.process is not None:
         session.process.terminate()
+    if session.user_data_dir is not None:
+        # Stagehand-launched Chrome has no process handle, and browser.close()
+        # doesn't reliably end it — kill by profile so the next launch isn't
+        # swallowed by it.
+        await asyncio.to_thread(_kill_profile_chrome, session.user_data_dir)
