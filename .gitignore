@@ -58,3 +58,7 @@ cmd.txt
 
 # --- Claude Code / Personal IDE config ---
 .claude/
+
+
+# -- docs --
+docs/
