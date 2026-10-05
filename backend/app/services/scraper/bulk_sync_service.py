@@ -31,6 +31,7 @@ from app.core.db import async_session_factory
 from app.models.db_models import TrackedCompanySyncState
 from app.repositories.tracked_company_repository import TrackedCompanyRepository
 from app.scripts.seed_portals import seed as seed_tracked_companies
+from app.services.engine.llm_client import clear_credits_exhausted
 from app.services.scraper.sync_service import sync_company
 
 logger = logging.getLogger(__name__)
@@ -135,10 +136,12 @@ async def start_or_resume() -> dict:
             state.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
         state.status = "running"
         state.current_company_name = None
+        state.last_company_error = None
         await _commit_state(db, state)
         result = _to_dict(state)
 
     _pause_requested.clear()
+    clear_credits_exhausted()  # the user topped up (or is retrying) — try again
     _active_task = asyncio.create_task(_run_loop())
     return result
 
@@ -218,6 +221,22 @@ async def _run_loop() -> None:
                     "jobs_updated": 0,
                     "failed": 1,
                 }
+
+            if result.get("out_of_credits"):
+                # Don't mark this company synced or count it — every company
+                # after it would fail the same way. Pause so Resume (after
+                # topping up the OpenRouter key) retries this same company.
+                async with async_session_factory() as db:
+                    state = await _get_or_create_state(db)
+                    state.status = "paused"
+                    state.current_company_name = None
+                    state.last_company_error = (
+                        "OpenRouter credits / API key limit exhausted — top up or "
+                        f"raise the key limit, then Resume. Stopped at: {company_name}"
+                    )
+                    await _commit_state(db, state)
+                logger.error("Bulk sync paused: OpenRouter credits exhausted at %s", careers_url)
+                return
 
             async with async_session_factory() as db:
                 repo = TrackedCompanyRepository(db)
