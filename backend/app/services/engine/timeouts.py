@@ -26,6 +26,10 @@ PAGE_CALL_TIMEOUT_SECONDS = 60
 LLM_CALL_TIMEOUT_SECONDS = 120
 
 
+class LLMTimeoutError(TimeoutError):
+    """The model didn't answer in time. Retrying the same model is pointless."""
+
+
 def describe(exc: BaseException) -> str:
     """`TimeoutError`'s `str()` is empty — the exact "silent failure" shape
     already fixed once in runner.py. Without the type name a timeout logs
@@ -45,4 +49,5 @@ async def with_timeout(
     try:
         return await asyncio.wait_for(coro, timeout=seconds)
     except TimeoutError as exc:
-        raise TimeoutError(f"{what} exceeded {seconds}s") from exc
+        error = LLMTimeoutError if seconds >= LLM_CALL_TIMEOUT_SECONDS else TimeoutError
+        raise error(f"{what} exceeded {seconds}s") from exc

@@ -3,6 +3,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.db_models import Job
+from app.services.engine.timeouts import LLMTimeoutError
 from app.services.scraper import sync_service
 
 
@@ -252,6 +253,371 @@ async def test_sync_company_crashing_attempts_count_toward_the_three(
 
     assert calls == [None, None, None, "google/gemini-3.8-flash"]
     assert result["success"] is False and result["failed"] == 1
+
+
+async def test_sync_company_primary_timeout_goes_straight_to_fallback(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if model is None:
+            raise LLMTimeoutError("extract() (page assessment) exceeded 120s")
+        return 3, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, "google/gemini-3.8-flash"]  # one primary try, then fallback
+    assert result == {"success": True, "jobs_inserted": 3, "jobs_updated": 0, "failed": 0}
+
+
+async def test_sync_company_jobs_returned_but_none_saved_is_a_failure(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+
+    async def fake_extract(url, db, model=None):
+        sync_service._evidence.get().unresolved_model_jobs = 10
+        return 0, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert result["success"] is False and result["failed"] == 1
+    assert result["jobs_inserted"] == 0
+
+
+class _IframePage:
+    def __init__(self, url, iframes):
+        self._url, self._iframes = url, iframes
+
+    async def url(self):
+        return self._url
+
+    async def evaluate(self, script):
+        return self._iframes
+
+
+def _frame(src, w=800, h=1200, name="", title=""):
+    return {"src": src, "name": name, "title": title, "w": w, "h": h}
+
+
+async def test_listing_iframe_found_for_cross_origin_job_board():
+    page = _IframePage(
+        "https://www.4liberty.com/careers/job-openings",
+        [
+            _frame("https://www.youtube.com/embed/abc"),
+            _frame("https://www2.appone.com/Search/Search.aspx?results=yes", name="4LCareers"),
+        ],
+    )
+    assert await sync_service._find_listing_iframe_src(page) == (
+        "https://www2.appone.com/Search/Search.aspx?results=yes"
+    )
+
+
+async def test_listing_iframe_accepted_when_width_reports_zero():
+    page = _IframePage(
+        "https://www.4liberty.com/careers/job-openings",
+        [_frame("https://www2.appone.com/Search/Search.aspx?results=yes", w=0, h=1250)],
+    )
+    assert await sync_service._find_listing_iframe_src(page) is not None
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("View All Job Openings", True),
+        ("Search Jobs", True),
+        ("Careers", True),
+        ("Explore open positions", True),
+        ("null", True),
+        ("N/A", True),
+        ("Project Manager, Network Communications", False),
+        ("Data Analyst", False),
+        ("Executive Operations Partner", False),
+    ],
+)
+def test_nav_label_titles_are_not_jobs(title, expected):
+    assert sync_service._looks_like_nav_label(title) is expected
+
+
+async def test_listing_iframe_ignores_same_site_small_and_unrelated_frames():
+    page = _IframePage(
+        "https://www.example.com/careers",
+        [
+            _frame("https://www.example.com/jobs-widget"),
+            _frame("https://jobs.other.com/search", w=100, h=100),
+            _frame("https://widgets.other.com/map"),
+        ],
+    )
+    assert await sync_service._find_listing_iframe_src(page) is None
+
+
+async def test_call_openrouter_retries_without_reasoning_when_model_requires_it(monkeypatch):
+    import httpx
+
+    from app.services.engine import llm_client
+
+    seen = []
+
+    def handler(request):
+        import json
+
+        body = json.loads(request.content)
+        seen.append("reasoning" in body)
+        if "reasoning" in body:
+            return httpx.Response(
+                400, json={"error": {"message": "Reasoning is mandatory for this endpoint"}}
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        llm_client.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler)),
+    )
+    monkeypatch.setattr(llm_client.settings, "openrouter_api_key", "k")
+    monkeypatch.setattr(llm_client, "_reasoning_mandatory", set())
+
+    body = {"model": "m/reasoner", "messages": [], "reasoning": {"enabled": False}}
+    assert (await llm_client._call_openrouter(dict(body)))["choices"][0]["message"]["content"] == "OK"
+    await llm_client._call_openrouter(dict(body))
+
+    assert seen == [True, False, False]  # retried once, then remembered
+
+
+HOME = "https://www.4liberty.com/"
+CAREERS = "https://www.4liberty.com/careers"
+OPENINGS = "https://www.4liberty.com/careers/job-openings"
+
+
+def test_job_entry_links_ranks_and_filters_like_4liberty():
+    links = [
+        ("https://www.4liberty.com/services", "services"),
+        ("https://www.4liberty.com/careers", "careers"),
+        ("https://www.4liberty.com/about", "about"),
+        ("https://www.4liberty.com/careers/job-openings", "view all job openings"),
+        ("https://www.4liberty.com/careers/login", "sign in"),
+        ("https://www.4liberty.com/jobs/12345", "senior engineer"),
+        ("https://twitter.com/4liberty", "careers on twitter"),
+        ("https://www.4liberty.com/brochure.pdf", "careers brochure"),
+        ("https://www.4liberty.com/privacy", "privacy"),
+    ]
+    assert sync_service._job_entry_links(links, HOME, set(), limit=5) == [
+        OPENINGS,
+        CAREERS,
+    ]
+    assert sync_service._job_entry_links(links, HOME, {CAREERS}, limit=5) == [OPENINGS]
+
+
+class _SiteGraphPage:
+    """Fake browser: goto() moves between pages, evaluate() returns that page's anchors."""
+
+    def __init__(self, graph):
+        self.graph, self.current, self.visits = graph, HOME, []
+
+    async def goto(self, url):
+        self.current = url
+        self.visits.append(url)
+
+    async def url(self):
+        return self.current
+
+    async def evaluate(self, script):
+        return [{"href": h, "text": t} for h, t in self.graph.get(self.current, [])]
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+def _patch_explore_io(monkeypatch, harvest):
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "_wait_for_load", noop)
+    monkeypatch.setattr(sync_service, "_dismiss_overlays", noop)
+    monkeypatch.setattr(sync_service, "_harvest_listing", harvest)
+
+
+async def test_explore_follows_three_hops_to_the_listing_page(async_session, monkeypatch):
+    page = _SiteGraphPage(
+        {
+            HOME: [(CAREERS, "Careers"), ("https://www.4liberty.com/about", "About")],
+            CAREERS: [(OPENINGS, "View All Job Openings"), (HOME, "Home")],
+            OPENINGS: [],
+        }
+    )
+    harvested = []
+
+    async def fake_harvest(sh, pg, db, name, seen, max_pages, first_page_jobs=None):
+        harvested.append(pg.current)
+        return (10, 0) if pg.current == OPENINGS else (0, 0)
+
+    _patch_explore_io(monkeypatch, fake_harvest)
+
+    result = await sync_service._explore_job_entry_links(None, page, async_session, "4Liberty", HOME, set())
+
+    assert result == (10, 0)
+    assert harvested == [CAREERS, OPENINGS]
+
+
+async def test_explore_never_revisits_a_page_and_reports_no_jobs(async_session, monkeypatch):
+    page = _SiteGraphPage(
+        {
+            HOME: [(CAREERS, "Careers")],
+            CAREERS: [(HOME, "Careers home"), (CAREERS, "Careers")],
+        }
+    )
+    harvested = []
+
+    async def fake_harvest(sh, pg, db, name, seen, max_pages, first_page_jobs=None):
+        harvested.append(pg.current)
+        return 0, 0
+
+    _patch_explore_io(monkeypatch, fake_harvest)
+
+    result = await sync_service._explore_job_entry_links(None, page, async_session, "X", HOME, set())
+
+    assert result == (0, 0)
+    assert harvested == [CAREERS]  # the self/home links were already visited
+
+
+async def test_explore_respects_the_page_budget(async_session, monkeypatch):
+    settings = sync_service.get_settings()
+    monkeypatch.setattr(settings, "scraper_max_explore_pages", 2)
+    graph = {
+        HOME: [
+            (f"https://www.4liberty.com/teams/{name}", f"Jobs in {name}")
+            for name in ("alpha", "beta", "gamma")
+        ]
+    }
+    page = _SiteGraphPage(graph)
+    harvested = []
+
+    async def fake_harvest(sh, pg, db, name, seen, max_pages, first_page_jobs=None):
+        harvested.append(pg.current)
+        return 0, 0
+
+    _patch_explore_io(monkeypatch, fake_harvest)
+
+    await sync_service._explore_job_entry_links(None, page, async_session, "X", HOME, set())
+
+    assert len(harvested) == 2
+
+
+ACC = "https://www.accenture.com/in-en/careers/jobdetails?id=ATCI-{n}_en&title={t}"
+
+
+def test_repeated_titles_match_their_links_in_page_order():
+    links = [
+        (ACC.format(n=1, t="Custom+Software+Engineer"), "read full job description"),
+        (ACC.format(n=1, t="Custom+Software+Engineer"), "custom software engineer"),
+        (ACC.format(n=2, t="Enterprise+Technology+Architect"), "enterprise technology architect"),
+        (ACC.format(n=3, t="Custom+Software+Engineer"), "custom software engineer"),
+    ]
+    real = {h.rstrip("/") for h, _ in links}
+    used = set()
+    picks = [
+        sync_service._snap_to_real_link("", title, "https://www.accenture.com/", links, real, used)
+        for title in ("Custom Software Engineer", "Enterprise Technology Architect", "Custom Software Engineer")
+    ]
+    assert picks == [links[0][0], links[2][0], links[3][0]]
+    assert sync_service._snap_to_real_link(
+        "", "Custom Software Engineer", "https://www.accenture.com/", links, real, used
+    ) == ""  # no fourth link left
+
+
+def test_job_detail_pages_are_postings_not_entry_links():
+    detail = ACC.format(n=5, t="Custom+Software+Engineer")
+    assert sync_service._looks_like_job_posting_link(detail) is True
+    links = [
+        (detail, "custom software engineer"),
+        ("https://www.accenture.com/in-en/blogs/blogs-careers", "careers blog"),
+        ("https://www.accenture.com/in-en/careers/jobsearch", "job search"),
+    ]
+    assert sync_service._job_entry_links(links, "https://www.accenture.com/in-en/careers", set(), 5) == [
+        "https://www.accenture.com/in-en/careers/jobsearch"
+    ]
+
+
+async def test_page_links_add_the_url_title_as_a_second_match_key():
+    class Page:
+        async def url(self):
+            return "https://www.accenture.com/in-en/careers/jobsearch"
+
+        async def evaluate(self, script):
+            return [
+                {
+                    "href": ACC.format(n=1, t="Custom+Software+Engineer"),
+                    "text": "Read full job description",
+                    "alt": "Custom Software Engineer",
+                }
+            ]
+
+    _, links, _ = await sync_service._page_links(Page())
+
+    assert [t for _, t in links] == ["read full job description", "custom software engineer"]
+
+
+class _ActResult:
+    def __init__(self, success, message=""):
+        self.data = type("D", (), {"success": success, "message": message})()
+
+
+class _PagSh:
+    """Fake Stagehand: act() outcome per action, in call order."""
+
+    def __init__(self, outcomes):
+        self.outcomes, self.acted = list(outcomes), []
+
+    async def act(self, action, page=None):
+        self.acted.append(action)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _PagPage:
+    def __init__(self, dom_clicks=True):
+        self.dom_clicks, self.evaluated = dom_clicks, 0
+
+    async def evaluate(self, script):
+        self.evaluated += 1
+        return self.dom_clicks
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+async def test_pagination_first_candidate_success_never_touches_the_dom():
+    sh, page = _PagSh([_ActResult(True)]), _PagPage()
+    assert await sync_service._advance_pagination(sh, page, ["next"]) is True
+    assert sh.acted == ["next"] and page.evaluated == 0
+
+
+async def test_pagination_falls_through_candidates_then_to_a_dom_click():
+    err = "-32602 Invalid mouse button"
+    # candidate "a": act fails, then the hardened retry's two re-acts fail too
+    # (no selector, so no send_click_event); candidate "b": act raises.
+    sh = _PagSh(
+        [_ActResult(False, err), _ActResult(False, err), _ActResult(False, err), RuntimeError("boom")]
+    )
+    page = _PagPage(dom_clicks=True)
+
+    assert await sync_service._advance_pagination(sh, page, ["a", "b"]) is True
+    assert page.evaluated == 1
+
+
+async def test_pagination_reports_failure_when_nothing_can_advance():
+    sh, page = _PagSh([RuntimeError("x")]), _PagPage(dom_clicks=False)
+    assert await sync_service._advance_pagination(sh, page, ["a"]) is False
 
 
 async def test_sync_company_skips_fallback_when_disabled(async_session, monkeypatch):

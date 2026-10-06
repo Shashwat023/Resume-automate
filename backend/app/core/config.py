@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # half Qwen's per-token cost ($0.27/$0.40 vs $0.60/$3.60 per M
     # in/out, OpenRouter pricing as of 2026-09-03). Do not swap this model
     # again without asking first — confirmed standing constraint.
-    openrouter_model_tier2: str = "z-ai/glm-4.6"
+    openrouter_model_tier2: str = "qwen/qwen3.5-122b-a10b"
     # Scraper-only retry policy. A company's extract-based sync is tried up
     # to `scraper_primary_attempts` times with the primary Tier-2 model,
     # stopping as soon as one run stores `scraper_fallback_min_jobs` jobs;
@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # Cap on one Tier-2/Stagehand reply. Largest seen in the benchmark was
     # ~3k tokens (a 30-job page); 16k leaves room for ~200 postings.
     openrouter_tier2_max_tokens: int = 16000
+    # Live-caught 2026-10-05: with hidden "thinking" on, glm-4.6 and Qwen3.5
+    # spent 100+s (one Qwen reply: 6.9k tokens vs Gemini's ~1k) on a page
+    # assessment, tripping the 120s extract() cap. Scraping needs no reasoning.
+    openrouter_disable_reasoning: bool = True
     scraper_primary_attempts: int = 3
     scraper_fallback_min_jobs: int = 1
     # A 0-job run is only retried if it crashed or the visited pages showed
@@ -159,6 +163,15 @@ class Settings(BaseSettings):
     # can't turn into an unbounded crawl. 6 covers every real multi-track
     # portal seen so far with headroom.
     scraper_max_sections: int = 6
+
+    # Deterministic "follow the job links" exploration (sync_service.py
+    # _explore_job_entry_links), used when the normal flow saved 0 jobs.
+    # Live-caught on 4liberty.com: home -> Careers -> "View All Job Openings"
+    # -> listings (in an iframe) is three hops, and the model-picked
+    # one-hop flow stopped at /careers. Depth counts pages expanded from the
+    # landing page; the page budget caps LLM extract calls (one per page).
+    scraper_max_explore_depth: int = 3
+    scraper_max_explore_pages: int = 8
 
     # How long a tracked company (config/portals.yml, seeded into
     # TrackedCompany) stays "already covered" after a sync attempt before

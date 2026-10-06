@@ -29,7 +29,13 @@ from app.services.engine.llm_client import (
     openrouter_llm,
     openrouter_llm_for,
 )
-from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
+from app.services.engine.tier2_resolve import _TRANSIENT_ACT_ERROR, _act_with_retry
+from app.services.engine.timeouts import (
+    LLM_CALL_TIMEOUT_SECONDS,
+    LLMTimeoutError,
+    describe,
+    with_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,14 +161,25 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
     settings = get_settings()
     attempts = max(1, settings.scraper_primary_attempts)
     failed = 0
+    attempt = 0
+    dropped = 0
     for attempt in range(1, attempts + 1):
         failed = 0
+        timed_out = False
         evidence = _ExtractEvidence()
         token = _evidence.set(evidence)
         try:
             got_inserted, got_updated = await _sync_via_extract(company_url, db)
             inserted += got_inserted
             updated += got_updated
+        except LLMTimeoutError as exc:
+            logger.error(
+                "%s: %s with %s (attempt %d/%d)",
+                company_url, describe(exc), settings.openrouter_model_tier2,
+                attempt, attempts,
+            )
+            failed = 1
+            timed_out = True
         except Exception:
             logger.exception(
                 "Extract-based sync failed for %s (attempt %d/%d)",
@@ -171,11 +188,19 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             failed = 1
         finally:
             _evidence.reset(token)
+            dropped = max(dropped, evidence.unresolved_model_jobs)
 
         if inserted + updated >= settings.scraper_fallback_min_jobs:
             return _result(inserted, updated, 0)
         if credits_exhausted():
             return _out_of_credits(company_url, inserted, updated)
+        if timed_out:
+            logger.info(
+                "%s: primary model timed out — skipping its remaining attempts, "
+                "going straight to the fallback model",
+                company_url,
+            )
+            break
         missed = (
             failed
             or evidence.job_links_max >= settings.scraper_retry_min_job_links
@@ -188,7 +213,7 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
                 "treating as a site with no listings, not retrying",
                 company_url,
             )
-            return _result(inserted, updated, 0)
+            return _finish(company_url, inserted, updated, 0, dropped)
         logger.info(
             "%s: attempt %d/%d with %s looks like a miss (crashed=%s, posting "
             "links seen=%d, unmatched model jobs=%d, found nothing despite job "
@@ -202,20 +227,46 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
     if fallback and fallback != settings.openrouter_model_tier2:
         logger.info(
             "%s: still %d job(s) after %d attempt(s) with %s, falling back to %s",
-            company_url, inserted + updated, attempts,
+            company_url, inserted + updated, attempt,
             settings.openrouter_model_tier2, fallback,
         )
+        fallback_evidence = _ExtractEvidence()
+        token = _evidence.set(fallback_evidence)
         try:
             got_inserted, got_updated = await _sync_via_extract(
                 company_url, db, model=fallback
             )
-            return _result(inserted + got_inserted, updated + got_updated, 0)
+            return _finish(
+                company_url,
+                inserted + got_inserted,
+                updated + got_updated,
+                0,
+                max(dropped, fallback_evidence.unresolved_model_jobs),
+            )
         except Exception:
             logger.exception("Fallback extract sync failed for %s", company_url)
             failed = 1
             if credits_exhausted():
                 return _out_of_credits(company_url, inserted, updated)
+        finally:
+            _evidence.reset(token)
 
+    return _finish(company_url, inserted, updated, failed, dropped)
+
+
+def _finish(
+    company_url: str, inserted: int, updated: int, failed: int, dropped: int
+) -> dict:
+    """A run where the model returned jobs but none could be saved (no usable
+    apply URL) is a failure, not a clean "no listings" result — otherwise the
+    company is reported successful with 0 jobs and hidden for the resync window."""
+    if not failed and not (inserted + updated) and dropped:
+        logger.error(
+            "%s: model returned %d job(s) but none had a usable apply URL — "
+            "nothing saved, marking this company failed",
+            company_url, dropped,
+        )
+        failed = 1
     return _result(inserted, updated, failed)
 
 
@@ -404,7 +455,11 @@ async def _assess_page(sh, page) -> PageAssessment:
                 what="extract() (page assessment)",
             )
             return result.data
+        except LLMTimeoutError:
+            logger.error("Page assessment timed out (%ds) — not retrying", LLM_CALL_TIMEOUT_SECONDS)
+            raise
         except Exception as exc:  # noqa: BLE001
+            logger.warning("Page assessment try %d/2 failed: %s", _attempt + 1, describe(exc))
             last_error = exc
     raise last_error
 
@@ -593,12 +648,200 @@ async def _dismiss_overlays(page) -> None:
         await _wait_for_load(page)
 
 
+# Not just <a>: acciona.com renders each posting as a custom element,
+# <a-oferta header="PILING MANAGER" href="/.../job-detail?id=...">, whose link
+# is an attribute no `a[href]` scan sees — all its postings were dropped.
 _ANCHORS_JS = """
-Array.from(document.querySelectorAll('a[href]')).map(a => ({
-  href: a.href,
-  text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim()
-}))
+Array.from(document.querySelectorAll('[href]:not(link):not(base)')).map(el => {
+  let href = '';
+  let raw = el.getAttribute('href') || '';
+  // appone.com (4Liberty's job board): href="Javascript:jsNewWindow('https://...MainInfoReq.asp?R_ID=...')"
+  const embedded = raw.match(/^\\s*javascript:[^'"]*['"](https?:\\/\\/[^'"]+)['"]/i);
+  if (embedded) raw = embedded[1];
+  try { href = new URL(raw, document.baseURI).href; } catch (e) {}
+  let text = (el.getAttribute('header') || el.innerText || el.textContent ||
+              el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+  // accenture.com: card links read "Read full job description" but their URL
+  // carries the job title (.../jobdetails?id=...&title=Custom+Software+Engineer),
+  // so it is returned as a second match key.
+  let alt = '';
+  if (href) {
+    try {
+      const q = new URL(href).searchParams;
+      alt = (q.get('title') || q.get('jobtitle') || q.get('job_title') || '').trim();
+    } catch (e) {}
+  }
+  return { href, text, alt };
+})
 """
+
+
+_IFRAMES_JS = """
+Array.from(document.querySelectorAll('iframe[src]')).map(f => {
+  const r = f.getBoundingClientRect();
+  return {src: f.src, name: f.name || '', title: f.title || '',
+          w: Math.round(r.width), h: Math.round(r.height)};
+})
+"""
+
+# Live-caught on 4liberty.com/careers/job-openings: all 10 postings sit in a
+# cross-origin <iframe src="https://www2.appone.com/Search/Search.aspx?...">.
+# The accessibility snapshot and the anchor scan only see the top frame, so
+# the model returned titles with no linkable URL and every one was dropped.
+_IFRAME_JOB_HINT = re.compile(
+    r"job|career|search|position|opening|vacanc|apply|recruit|employ|talent|hiring",
+    re.I,
+)
+_IFRAME_IGNORED_HOSTS = (
+    "youtube", "youtu.be", "vimeo", "google", "doubleclick", "facebook",
+    "twitter", "linkedin", "instagram", "tiktok", "hotjar", "intercom", "drift",
+    "recaptcha", "hcaptcha", "cloudflare", "onetrust", "cookiebot", "trustarc",
+    "consentmanager", "hubspot", "calendly", "typeform", "zendesk", "livechat",
+)
+
+
+_ENTRY_SCORES = (
+    (
+        re.compile(
+            r"view all|see all|all (jobs|openings|positions)|open positions|"
+            r"job openings|current openings|search jobs|find jobs|browse jobs",
+            re.I,
+        ),
+        3,
+    ),
+    (re.compile(r"\b(jobs?|openings?|positions?|vacanc(y|ies)|opportunities)\b", re.I), 2),
+    (
+        re.compile(
+            r"\b(careers?|join us|join our team|work with us|work for us|we'?re hiring)\b",
+            re.I,
+        ),
+        1,
+    ),
+)
+_ENTRY_PATH = re.compile(
+    r"/(careers?|jobs?|job-openings?|openings?|vacanc(y|ies)|positions?|"
+    r"opportunities|join-us|work-with-us|work-for-us)(/|$)",
+    re.I,
+)
+_ENTRY_EXCLUDE = re.compile(
+    r"\b(log ?in|sign ?in|sign ?up|register|alerts?|subscribe|privacy|cookies?|"
+    r"terms|saved|my account|returning candidates?)\b",
+    re.I,
+)
+_ENTRY_PATH_EXCLUDE = re.compile(
+    r"/(blogs?|news|press|insights?|events?|investors?|stories|articles?|saved-jobs)(/|$)",
+    re.I,
+)
+_NON_PAGE_SUFFIXES = (".pdf", ".doc", ".docx", ".zip", ".png", ".jpg", ".jpeg", ".gif")
+
+
+def _job_entry_links(
+    links: list[tuple[str, str]], current_url: str, visited: set[str], limit: int
+) -> list[str]:
+    """Links on this page that plausibly lead toward the job listings, best
+    first: same-site (or known-ATS) links whose text or path says jobs/
+    careers/openings, excluding individual postings, login/alert pages,
+    files, and anything already visited."""
+    here = _registrable(urlparse(current_url).netloc)
+    scored: list[tuple[float, int, str]] = []
+    seen: set[str] = set()
+    for href, text in links:
+        key = href.split("#")[0].rstrip("/")
+        if key in visited or key in seen:
+            continue
+        parsed = urlparse(href)
+        host = parsed.netloc.lower()
+        if _registrable(host) != here and not any(ats in host for ats in _ATS_HOSTS):
+            continue
+        if (
+            _looks_like_job_posting_link(href)
+            or _ENTRY_EXCLUDE.search(text or "")
+            or _ENTRY_PATH_EXCLUDE.search(parsed.path)
+            or parsed.path.lower().endswith(_NON_PAGE_SUFFIXES)
+        ):
+            continue
+        score: float = max((s for rx, s in _ENTRY_SCORES if rx.search(text or "")), default=0)
+        if not score and _ENTRY_PATH.search(parsed.path):
+            score = 0.5
+        if not score:
+            continue
+        seen.add(key)
+        scored.append((score, len(scored), href))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [href for _, _, href in scored[:limit]]
+
+
+# Live-caught on 4liberty.com/careers: the model returned the "View All Job
+# Openings" button as a posting, and it was saved as a job.
+_NAV_LABEL_TITLE = re.compile(
+    r"^\s*(view|see|browse|search|explore|find|show|all)\b.{0,40}\b"
+    r"(jobs?|openings?|positions?|careers?|vacancies|opportunities)\b.{0,20}$"
+    r"|^\s*(careers?|jobs?|open positions|current openings|job openings|"
+    r"join us|apply now)\s*$",
+    re.I,
+)
+
+
+_JUNK_TITLES = {"", "null", "none", "n/a", "na", "undefined", "untitled"}
+
+
+def _looks_like_nav_label(title: str) -> bool:
+    """Not a real posting: a navigation label, or a placeholder the model
+    emitted for "nothing here" (live: a job titled the string 'null')."""
+    return (title or "").strip().lower() in _JUNK_TITLES or bool(
+        _NAV_LABEL_TITLE.match(title or "")
+    )
+
+
+def _registrable(host: str) -> str:
+    return ".".join(host.lower().split(".")[-2:])
+
+
+async def _find_listing_iframe_src(page) -> str | None:
+    """URL of a large, visible, cross-origin iframe that looks like a job
+    board (e.g. an embedded ATS search), else None. Free: one JS evaluation."""
+    try:
+        current = await page.url()
+        frames = await with_timeout(page.evaluate(_IFRAMES_JS), what="evaluate(iframes)")
+    except Exception:  # noqa: BLE001
+        return None
+    page_host = _registrable(urlparse(current).netloc)
+    for frame in frames or []:
+        if not isinstance(frame, dict):
+            continue
+        src = (frame.get("src") or "").split("#")[0]
+        host = urlparse(src).netloc.lower()
+        if not _looks_like_real_apply_url(src) or not host:
+            continue
+        if _registrable(host) == page_host or any(h in host for h in _IFRAME_IGNORED_HOSTS):
+            continue
+        # Either dimension: 4liberty's iframe has no width attribute and
+        # reports w=0 (h=1250) until its container lays out.
+        if frame.get("w", 0) < 300 and frame.get("h", 0) < 300:
+            continue
+        hint = " ".join(
+            [src, str(frame.get("name", "")), str(frame.get("title", ""))]
+        )
+        if _IFRAME_JOB_HINT.search(hint) or any(ats in host for ats in _ATS_HOSTS):
+            return src
+    return None
+
+
+async def _enter_listing_iframe(page) -> bool:
+    """Navigate the page into an embedded job-board iframe, so the extractor
+    and the link scan see its content as the top-level document."""
+    src = await _find_listing_iframe_src(page)
+    if not src:
+        return False
+    logger.info("Listing is inside an embedded iframe — opening it directly: %s", src)
+    try:
+        await with_timeout(page.goto(src), what="goto(iframe)")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not open listing iframe %s: %s", src, describe(exc))
+        return False
+    await _wait_for_load(page)
+    await page.wait_for_timeout(1500)
+    return True
 
 
 def _norm_text(value: str) -> str:
@@ -612,29 +855,47 @@ async def _page_links(page) -> tuple[str, list[tuple[str, str]], set[str]]:
         anchors = await with_timeout(page.evaluate(_ANCHORS_JS), what="evaluate(anchors)")
     except Exception:  # noqa: BLE001
         return "", [], set()
-    links = [
-        (a["href"].split("#")[0], _norm_text(a.get("text", "")))
-        for a in anchors or []
-        if isinstance(a, dict) and _looks_like_real_apply_url(a.get("href") or "")
-    ]
+    links: list[tuple[str, str]] = []
+    for a in anchors or []:
+        if not isinstance(a, dict) or not _looks_like_real_apply_url(a.get("href") or ""):
+            continue
+        href = a["href"].split("#")[0]
+        text = _norm_text(a.get("text", ""))
+        links.append((href, text))
+        alt = _norm_text(a.get("alt", ""))
+        if alt and alt != text:
+            links.append((href, alt))
     return current, links, {href.rstrip("/") for href, _ in links}
 
 
-def _snap_to_real_link(url, label, current, links, real_hrefs) -> str:
+def _snap_to_real_link(url, label, current, links, real_hrefs, used=None) -> str:
     """
     A model-supplied URL is kept only if it's an actual link on the page
     (relative ones resolved first); otherwise the label is matched against
     link text. Returns "" when nothing real matches.
+
+    `used` (shared across one page's jobs) makes repeated titles match their
+    links in page order instead of all taking the first: accenture lists
+    "Custom Software Engineer" four times, each with its own link.
     """
     if url:
         absolute = urljoin(current, url.strip()).split("#")[0]
         if absolute.rstrip("/") in real_hrefs:
+            if used is not None:
+                used.add(absolute.rstrip("/"))
             return absolute
     text = _norm_text(label)
     if not text:
         return ""
-    match = [h for h, t in links if t == text] or [h for h, t in links if text in t]
-    return match[0] if match else ""
+    taken = used if used is not None else set()
+    match = [h for h, t in links if t == text and h.rstrip("/") not in taken] or [
+        h for h, t in links if text in t and h.rstrip("/") not in taken
+    ]
+    if not match:
+        return ""
+    if used is not None:
+        used.add(match[0].rstrip("/"))
+    return match[0]
 
 
 # ---- "were jobs missed?" evidence, gathered for free from real page links ----
@@ -675,6 +936,13 @@ def _looks_like_job_posting_link(href: str) -> bool:
             return True
     query_keys = {kv.split("=", 1)[0].lower() for kv in parsed.query.split("&") if "=" in kv}
     if query_keys & _JOB_QUERY_KEYS:
+        return True
+    # .../jobdetails?id=ATCI-123 (accenture): a detail page named by its last segment.
+    if (
+        segments
+        and segments[-1] in {"jobdetails", "job-details", "jobdetail", "job-detail", "job-posting"}
+        and ("id" in query_keys or any(ch.isdigit() for ch in parsed.query))
+    ):
         return True
     return any(ats in host for ats in _ATS_HOSTS) and len(segments) >= 2 and any(
         ch.isdigit() for ch in parsed.path
@@ -739,13 +1007,23 @@ async def _resolve_apply_urls_from_dom(page, jobs: list[ScrapedJob]) -> None:
     """
     current, links, real_hrefs = await _page_links(page)
     if links:
+        used: set[str] = set()
         for job in jobs:
             job.apply_url = _snap_to_real_link(
-                job.apply_url, job.title, current, links, real_hrefs
+                job.apply_url, job.title, current, links, real_hrefs, used
             )
-    _record_page_evidence(
-        links, unresolved_model_jobs=sum(1 for j in jobs if j.title and not j.apply_url)
+    unresolved = [j.title for j in jobs if j.title and not j.apply_url]
+    logger.info(
+        "Extracted %d job(s) on %s: %d with a usable apply URL, %d dropped",
+        len(jobs), current, len(jobs) - len(unresolved), len(unresolved),
     )
+    if unresolved:
+        logger.warning(
+            "Dropping %d job(s) with no resolvable apply URL (page has %d real links), "
+            "e.g. %s",
+            len(unresolved), len(links), unresolved[:5],
+        )
+    _record_page_evidence(links, unresolved_model_jobs=len(unresolved))
 
 
 async def _resolve_section_urls_from_dom(page, sections: list["ListingSection"]) -> None:
@@ -885,6 +1163,65 @@ async def _navigate_to_section(sh, page, section: "ListingSection") -> bool:
     return True
 
 
+# Live-caught on accenture.com/in-en/careers/jobsearch (10,000 results): the
+# model-chosen pagination click died with `-32602 Invalid mouse button` and
+# the harvest stopped after 3 pages (36 jobs). A DOM-level click on a
+# recognisable "next" control routes around Chrome's rejected CDP input.
+_NEXT_PAGE_JS = """
+(() => {
+  const label = el => ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') +
+                       ' ' + (el.innerText || el.textContent || '')).trim().toLowerCase();
+  const usable = el => el.offsetParent !== null && !el.disabled &&
+                       el.getAttribute('aria-disabled') !== 'true' && !el.hasAttribute('disabled');
+  const skip = /slide|carousel|image|photo|story|testimonial|video/;
+  const isNext = el => el.matches('a[rel~="next"]') ||
+    /^(next|next page|load more|show more|see more|view more)\\b/.test(label(el)) ||
+    /^[>\\u203a\\u00bb]+$/.test(label(el));
+  const el = Array.from(document.querySelectorAll('a[rel~="next"], button, a, [role="button"]'))
+    .find(e => isNext(e) && usable(e) && !skip.test(label(e)));
+  if (!el) return false;
+  el.scrollIntoView({block: 'center'});
+  el.click();
+  return true;
+})()
+"""
+
+
+async def _click_next_by_dom(page) -> bool:
+    try:
+        return bool(await with_timeout(page.evaluate(_NEXT_PAGE_JS), what="evaluate(next page)"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _advance_pagination(sh, page, candidates) -> bool:
+    """Move to the next page of results. Tries the model's candidate controls
+    in order through the hardened click helper (CDP click, then a DOM click
+    event, then one retry), then a DOM click on a recognisable "next" control."""
+    for action in list(candidates)[:3]:
+        try:
+            result = await with_timeout(
+                sh.act(action, page=page), LLM_CALL_TIMEOUT_SECONDS, what="act() (pagination)"
+            )
+            data = getattr(result, "data", None)
+            if getattr(data, "success", True):  # no outcome reported: assume it worked
+                return True
+            message = getattr(data, "message", "") or ""
+            if _TRANSIENT_ACT_ERROR.search(message):
+                result = await _act_with_retry(sh, page, action)
+                if result.data.success:
+                    return True
+                message = result.data.message or message
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Pagination click raised: %s", describe(exc))
+            continue
+        logger.info("Pagination click failed: %s", message[:120])
+    if await _click_next_by_dom(page):
+        logger.info("Pagination: advanced with a DOM click on a next/load-more control")
+        return True
+    return False
+
+
 async def _harvest_listing(
     sh,
     page,
@@ -917,6 +1254,7 @@ async def _harvest_listing(
             pending = None
         else:
             await _dismiss_overlays(page)
+            await _enter_listing_iframe(page)
             try:
                 result = await with_timeout(
                     sh.extract(_EXTRACT_INSTRUCTION, ScrapedJobs, page=page),
@@ -948,6 +1286,7 @@ async def _harvest_listing(
         for job in jobs:
             if job.apply_url and not _looks_like_real_apply_url(job.apply_url):
                 job.apply_url = ""
+        jobs = [j for j in jobs if not _looks_like_nav_label(j.title)]
         await _resolve_apply_urls_from_dom(page, jobs)
 
         # Only a job with a real, not-yet-seen link counts as progress. An
@@ -996,18 +1335,96 @@ async def _harvest_listing(
         if not obs.data:
             break
 
-        try:
-            await with_timeout(
-                sh.act(obs.data[0], page=page),
-                LLM_CALL_TIMEOUT_SECONDS,
-                what="act() (pagination)",
-            )
-        except Exception:  # noqa: BLE001
+        if not await _advance_pagination(sh, page, obs.data):
             break  # couldn't advance — stop rather than retry indefinitely
         await page.wait_for_timeout(1500)  # let the next page/appended jobs render
         page_number += 1
 
     return inserted, updated
+
+
+async def _explore_job_entry_links(
+    sh,
+    page,
+    db: AsyncSession,
+    company_name: str,
+    start_url: str,
+    seen_apply_urls: set[str],
+) -> tuple[int, int]:
+    """
+    Deterministic last resort when the model-guided flow saved nothing: from
+    the landing page, follow links that look job-related (Careers -> View All
+    Job Openings -> ...) breadth-first, harvesting each page we reach, and
+    stop at the first page that yields jobs. Does not depend on the model
+    spotting the right link, which it does inconsistently run to run.
+
+    Bounded: depth `scraper_max_explore_depth` pages expanded from the
+    landing page, `scraper_max_explore_pages` pages harvested (one extract
+    call each), every URL visited at most once.
+    """
+    settings = get_settings()
+    visited = {start_url.split("#")[0].rstrip("/")}
+    frontier: list[tuple[str, int]] = [(start_url, 0)]
+    harvested = 0
+    unexplored = 0
+
+    while frontier:
+        url, depth = frontier.pop(0)
+        if depth >= settings.scraper_max_explore_depth:
+            continue
+        try:
+            await with_timeout(page.goto(url), what="goto(explore)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Explore: could not open %s: %s", url, describe(exc))
+            continue
+        await _wait_for_load(page)
+        await page.wait_for_timeout(1500)
+
+        current, links, _ = await _page_links(page)
+        entries = _job_entry_links(links, current or url, visited, limit=3)
+        for href in entries:
+            if harvested >= settings.scraper_max_explore_pages:
+                unexplored += 1
+                continue
+            visited.add(href.split("#")[0].rstrip("/"))
+            harvested += 1
+            logger.info(
+                "Explore: following job link (depth %d, page %d/%d): %s",
+                depth + 1, harvested, settings.scraper_max_explore_pages, href,
+            )
+            try:
+                await with_timeout(page.goto(href), what="goto(explore link)")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Explore: could not open %s: %s", href, describe(exc))
+                continue
+            await _wait_for_load(page)
+            await page.wait_for_timeout(1500)
+            await _dismiss_overlays(page)
+
+            inserted, updated = await _harvest_listing(
+                sh, page, db, company_name, seen_apply_urls, settings.scraper_max_pages
+            )
+            if inserted + updated:
+                logger.info("Explore: found %d job(s) at %s", inserted + updated, href)
+                return inserted, updated
+            frontier.append((href, depth + 1))
+
+    if unexplored:
+        logger.warning(
+            "Explore: page budget (%d) reached with %d job-related link(s) unexplored",
+            settings.scraper_max_explore_pages, unexplored,
+        )
+    else:
+        logger.info(
+            "Explore: followed every job-related link (%d page(s)), none had listings",
+            harvested,
+        )
+    # Retrying repeats this deterministic walk, so the "found nothing despite
+    # job links" evidence no longer justifies another model attempt.
+    ev = _evidence.get()
+    if ev is not None:
+        ev.blank_assessment_with_job_entry = False
+    return 0, 0
 
 
 async def _sync_via_extract(
@@ -1154,6 +1571,24 @@ async def _sync_via_extract(
             )
             inserted += page_inserted
             updated += page_updated
+        elif not sections and await _find_listing_iframe_src(page):
+            page_inserted, page_updated = await _harvest_listing(
+                sh,
+                page,
+                db,
+                company_name,
+                seen_apply_urls,
+                settings.scraper_max_pages,
+            )
+            inserted += page_inserted
+            updated += page_updated
+
+        if inserted + updated == 0:
+            explored_inserted, explored_updated = await _explore_job_entry_links(
+                sh, page, db, company_name, company_url, seen_apply_urls
+            )
+            inserted += explored_inserted
+            updated += explored_updated
     finally:
         # sh.close() only detaches the Stagehand wrapper — it does NOT close
         # the underlying Chrome browser (see chrome_launcher.py's own

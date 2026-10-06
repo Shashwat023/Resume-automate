@@ -24,9 +24,11 @@ guessed — see PLAN.md Part C for the full writeup). The load-bearing facts:
   Stagehand, not a hang — failures are loud and safe.
 """
 
+import asyncio
 import json
 import logging
 import re
+import time
 
 import httpx
 from stagehand import LLMImageContent, LLMRole, LLMTextContent, LLMUsage
@@ -39,6 +41,7 @@ from stagehand._generated.models import (
 )
 
 from app.core.config import get_settings
+from app.services.engine.timeouts import describe
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -145,15 +148,24 @@ def clear_credits_exhausted() -> None:
     _credits_exhausted = None
 
 
+# Models that answered 400 "Reasoning is mandatory" to reasoning={enabled:false}
+# (e.g. Gemini): sent without the flag from then on.
+_reasoning_mandatory: set[str] = set()
+
+
 async def _call_openrouter(body: dict) -> dict:
     if not settings.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
+    if body.get("model") in _reasoning_mandatory:
+        body = {k: v for k, v in body.items() if k != "reasoning"}
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{settings.openrouter_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-            json=body,
-        )
+        url = f"{settings.openrouter_base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {settings.openrouter_api_key}"}
+        resp = await client.post(url, headers=headers, json=body)
+        if resp.status_code == 400 and "reasoning" in body and "easoning" in resp.text:
+            _reasoning_mandatory.add(body["model"])
+            body = {k: v for k, v in body.items() if k != "reasoning"}
+            resp = await client.post(url, headers=headers, json=body)
         global _credits_exhausted
         if resp.status_code == 402:
             _credits_exhausted = resp.text[:300]
@@ -167,6 +179,28 @@ async def _call_openrouter(body: dict) -> dict:
                 f"{resp.text[:800]}"
             )
         return resp.json()
+
+
+async def preflight_check(model: str | None = None, timeout: float = 30) -> str | None:
+    """One tiny call to prove the configured model answers at all. Returns an
+    error description, or None if healthy."""
+    model = model or settings.openrouter_model_tier2
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word OK."}],
+        "max_tokens": 16,
+    }
+    if settings.openrouter_disable_reasoning:
+        body["reasoning"] = {"enabled": False}
+    started = time.monotonic()
+    try:
+        await asyncio.wait_for(_call_openrouter(body), timeout=timeout)
+    except BaseException as exc:  # noqa: BLE001
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return f"{model}: {describe(exc)} after {time.monotonic() - started:.1f}s"
+    logger.info("LLM preflight OK: %s in %.1fs", model, time.monotonic() - started)
+    return None
 
 
 def _usage_from_openai(data: dict) -> LLMUsage:
@@ -206,6 +240,8 @@ async def openrouter_llm(params, model: str | None = None):
         # real replies here are < ~3k tokens.
         "max_tokens": settings.openrouter_tier2_max_tokens,
     }
+    if settings.openrouter_disable_reasoning:
+        body["reasoning"] = {"enabled": False}
     if params.temperature is not None:
         body["temperature"] = params.temperature
     if params.stop_sequences:
@@ -227,10 +263,23 @@ async def openrouter_llm(params, model: str | None = None):
             },
         }
 
-    data = await _call_openrouter(body)
+    started = time.monotonic()
+    try:
+        data = await _call_openrouter(body)
+    except BaseException as exc:
+        logger.error(
+            "LLM call to %s failed after %.1fs: %s",
+            body["model"], time.monotonic() - started, describe(exc),
+        )
+        raise
     choice = data["choices"][0]
     text = choice["message"]["content"] or ""
     usage = _usage_from_openai(data)
+    logger.info(
+        "LLM call to %s done in %.1fs (finish_reason=%s, out_tokens=%d, structured=%s)",
+        body["model"], time.monotonic() - started, choice.get("finish_reason"),
+        usage.output_tokens, is_structured,
+    )
     content_block = LLMMessageContentBlock(root=LLMTextContent(type="text", text=text))
 
     if is_structured:

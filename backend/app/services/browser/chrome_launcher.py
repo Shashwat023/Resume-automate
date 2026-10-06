@@ -32,9 +32,12 @@ Two launch paths, selected by settings.use_real_chrome:
 """
 
 import asyncio
+import json
+import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +53,41 @@ _sessions: dict[str, "ChromeSession"] = {}
 
 _EXTENSION_READY_TIMEOUT_SECONDS = 30
 _EXTENSION_POLL_INTERVAL_SECONDS = 0.5
+
+# Profiles that only browse public pages (the job scraper; keep in sync with
+# sync_service._SCRAPER_PROFILE_KEY): started from an empty profile every
+# launch, so no stale cookies, session state or crash flags carry over. The
+# per-application profiles are NOT in here — they keep their logins/cookies.
+EPHEMERAL_PROFILE_KEYS = frozenset({"scraper"})
+
+
+def _mark_clean_exit(user_data_dir: Path) -> None:
+    """Chrome is force-killed between runs, so its profile says it crashed and
+    the next launch shows "Chromium didn't shut down correctly — Restore
+    pages?". Flip the flags Chrome checks, keeping cookies and logins."""
+    prefs = user_data_dir / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+        profile = data.setdefault("profile", {})
+        if profile.get("exit_type") == "Normal" and profile.get("exited_cleanly") is True:
+            return
+        profile["exit_type"] = "Normal"
+        profile["exited_cleanly"] = True
+        prefs.write_text(json.dumps(data), encoding="utf-8")
+    except (OSError, ValueError):
+        pass  # no profile yet, or unreadable — Chrome rebuilds it
+
+
+def _prepare_profile_dir(user_data_dir: Path, ephemeral: bool) -> None:
+    if ephemeral:
+        for _ in range(5):  # a just-killed Chrome can hold file handles briefly
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+            if not user_data_dir.exists():
+                break
+            time.sleep(0.3)
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    if not ephemeral:
+        _mark_clean_exit(user_data_dir)
 
 
 @dataclass
@@ -284,10 +322,12 @@ async def get_or_launch(profile_key: str) -> ChromeSession:
         session = await _launch_real_chrome_and_connect(profile_key, port)
     else:
         user_data_dir = settings.chrome_profiles_dir / profile_key
-        user_data_dir.mkdir(parents=True, exist_ok=True)
         # A leftover Chrome from an earlier run/failed launch would swallow
         # this launch (see _kill_profile_chrome) and cause a 60s timeout.
         await asyncio.to_thread(_kill_profile_chrome, user_data_dir)
+        await asyncio.to_thread(
+            _prepare_profile_dir, user_data_dir, profile_key in EPHEMERAL_PROFILE_KEYS
+        )
 
         proxy_kwargs: dict = {}
         if settings.captcha_proxy_url:
@@ -324,7 +364,11 @@ async def get_or_launch(profile_key: str) -> ChromeSession:
             # cheap, low-maintenance supplement to that, not a
             # replacement. The persistent per-profile user_data_dir above
             # already accumulates real cookies/history across runs.
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--hide-crash-restore-bubble",
+                "--disable-session-crashed-bubble",
+            ],
             **proxy_kwargs,
         )
         # Discovered the same way as the real-Chrome `--load-extension`

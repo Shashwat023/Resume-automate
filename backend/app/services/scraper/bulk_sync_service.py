@@ -31,7 +31,7 @@ from app.core.db import async_session_factory
 from app.models.db_models import TrackedCompanySyncState
 from app.repositories.tracked_company_repository import TrackedCompanyRepository
 from app.scripts.seed_portals import seed as seed_tracked_companies
-from app.services.engine.llm_client import clear_credits_exhausted
+from app.services.engine.llm_client import clear_credits_exhausted, preflight_check
 from app.services.scraper.sync_service import sync_company
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,17 @@ async def recover_stale_running_state_on_startup() -> None:
 
 async def _run_loop() -> None:
     try:
+        problem = await preflight_check()
+        if problem:
+            async with async_session_factory() as db:
+                state = await _get_or_create_state(db)
+                state.status = "paused"
+                state.current_company_name = None
+                state.last_company_error = f"LLM preflight failed, bulk sync not started — {problem}"
+                await _commit_state(db, state)
+            logger.error("Bulk sync not started: LLM preflight failed — %s", problem)
+            return
+
         while True:
             if _pause_requested.is_set():
                 async with async_session_factory() as db:
