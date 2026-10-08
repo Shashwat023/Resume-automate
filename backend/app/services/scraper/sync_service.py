@@ -11,9 +11,10 @@ time pressure per PLAN.md's cut list.
 
 import logging
 import re
+from datetime import datetime
 from contextvars import ContextVar
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from pydantic import BaseModel
@@ -27,7 +28,6 @@ from app.services.browser.chrome_launcher import close_session, get_or_launch
 from app.services.engine.llm_client import (
     credits_exhausted,
     openrouter_llm,
-    openrouter_llm_for,
 )
 from app.services.engine.tier2_resolve import _TRANSIENT_ACT_ERROR, _act_with_retry
 from app.services.engine.timeouts import (
@@ -153,9 +153,8 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
     #   - a run that stores >= scraper_fallback_min_jobs jobs ends it;
     #   - a run that crashed, or left evidence it missed postings (posting-
     #     like links on the page, or jobs the model listed that had no real
-    #     link — see _ExtractEvidence), is retried with the primary model up
-    #     to `scraper_primary_attempts` runs total, then ONCE with the
-    #     fallback model;
+    #     link — see _ExtractEvidence), is retried up to
+    #     `scraper_primary_attempts` runs total;
     #   - a clean run that found nothing and saw no posting links is a site
     #     with no listings: stop after that single run, zero extra spend.
     settings = get_settings()
@@ -196,8 +195,7 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             return _out_of_credits(company_url, inserted, updated)
         if timed_out:
             logger.info(
-                "%s: primary model timed out — skipping its remaining attempts, "
-                "going straight to the fallback model",
+                "%s: the model timed out — not retrying, a retry would time out the same way",
                 company_url,
             )
             break
@@ -223,34 +221,6 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             evidence.blank_assessment_with_job_entry,
         )
 
-    fallback = (settings.openrouter_model_tier2_fallback or "").strip()
-    if fallback and fallback != settings.openrouter_model_tier2:
-        logger.info(
-            "%s: still %d job(s) after %d attempt(s) with %s, falling back to %s",
-            company_url, inserted + updated, attempt,
-            settings.openrouter_model_tier2, fallback,
-        )
-        fallback_evidence = _ExtractEvidence()
-        token = _evidence.set(fallback_evidence)
-        try:
-            got_inserted, got_updated = await _sync_via_extract(
-                company_url, db, model=fallback
-            )
-            return _finish(
-                company_url,
-                inserted + got_inserted,
-                updated + got_updated,
-                0,
-                max(dropped, fallback_evidence.unresolved_model_jobs),
-            )
-        except Exception:
-            logger.exception("Fallback extract sync failed for %s", company_url)
-            failed = 1
-            if credits_exhausted():
-                return _out_of_credits(company_url, inserted, updated)
-        finally:
-            _evidence.reset(token)
-
     return _finish(company_url, inserted, updated, failed, dropped)
 
 
@@ -271,7 +241,7 @@ def _finish(
 
 
 def _out_of_credits(company_url: str, inserted: int, updated: int) -> dict:
-    """Retrying or falling back can't help when the key has no budget left —
+    """Retrying can't help when the key has no budget left —
     every call would 402 the same way. Flag it so the bulk sync pauses
     instead of marking the rest of the list as synced with 0 jobs."""
     logger.error(
@@ -528,6 +498,50 @@ async def _wait_for_load(page) -> None:
         logger.info("Page load event slow, continuing anyway: %s", str(exc)[:120])
 
 
+_GOTO_ATTEMPTS = 3
+
+
+async def _goto_with_retry(page, url: str) -> None:
+    """page.goto() that survives a slow load. Stagehand's own 15s limit on the
+    DOM-content event is routinely missed by heavy ad/tracker pages and slow
+    connections (live: gevernova.com timed out on the first attempt). A page
+    that has nonetheless reached 'interactive' or 'complete' is usable, so it
+    is accepted; otherwise the load is retried after a growing pause."""
+    for attempt in range(1, _GOTO_ATTEMPTS + 1):
+        error: Exception | None = None
+        try:
+            await with_timeout(page.goto(url), what="goto")
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        # A failed load can still "succeed": Chrome swaps in its own error page
+        # (chrome-error://chromewebdata/), which is fully loaded and empty.
+        # Live: gevernova.com page 6 read as blank 5 times and ended the run.
+        if (await _current_url(page)).startswith("chrome-error://"):
+            error = error or RuntimeError("the browser showed its own error page")
+        elif error is None:
+            return
+        else:
+            try:
+                state = await with_timeout(
+                    page.evaluate("document.readyState"), what="evaluate(readyState)"
+                )
+            except Exception:  # noqa: BLE001
+                state = ""
+            if state in ("interactive", "complete"):
+                logger.warning(
+                    "Page load %s was slow (%s) but the page is %s, continuing",
+                    url, describe(error), state,
+                )
+                return
+        logger.warning(
+            "Page load %s failed (attempt %d/%d): %s",
+            url, attempt, _GOTO_ATTEMPTS, describe(error),
+        )
+        if attempt == _GOTO_ATTEMPTS:
+            raise error
+        await page.wait_for_timeout(3000 * attempt)
+
+
 # Cookie/consent banners and marketing popups overlay the page (often
 # aria-modal), so the accessibility tree extract()/observe() read shows only
 # the overlay and the model finds no jobs. Policy, deterministic and LLM-free:
@@ -570,30 +584,43 @@ _DISMISS_OVERLAYS_JS = r"""
     '#didomi-notice-disagree-button', '.cky-btn-reject', '.cmplz-deny',
     '.osano-cm-denyAll', '.iubenda-cs-reject-btn', '#truste-consent-required',
     '.fc-cta-do-not-consent', '[data-testid="uc-deny-all-button"]',
-    '[data-cookiefirst-action="reject"]', '.js-cookie-reject'
+    '[data-cookiefirst-action="reject"]', '.js-cookie-reject',
+    '#_evidon-decline-button', '.evidon-banner-declinebutton', '#hs-eu-decline-button',
+    '.cc-deny', '.ot-pc-refuse-all-handler', '[data-tid="banner-decline"]',
+    '.cn-decline', '#cookiescript_reject', 'a[data-cookie-refuse]'
   ];
   let consentDone = false;
   for (const sel of KNOWN_REJECT) {
     const b = deepAll(sel).find(vis);
     if (b) { b.click(); actions.push('rejected:' + sel); consentDone = true; break; }
   }
-  const CONSENT_BOX = /cookie|consent|privacy|gdpr|cmp|onetrust|didomi|cky|usercentrics/i;
+  const CONSENT_BOX = /cookie|consent|privacy|gdpr|cmp|onetrust|didomi|cky|usercentrics|evidon|trustarc|truste|osano|iubenda|termly|quantcast|klaro|borlabs|complianz/i;
+  // A banner from a platform we have never seen has no recognisable id or
+  // class (GE Vernova's Evidon one was `_evidon_banner`, and was missed), so a
+  // small container whose own text talks about cookies counts as a consent
+  // box too. Page-level containers are excluded by the size cap.
   const inConsentBox = el => {
     for (const p of ancestors(el)) {
       const tag = (p.id || '') + ' ' + (typeof p.className === 'string' ? p.className : '');
       if (CONSENT_BOX.test(tag)) return true;
+      if (p !== document.body && p !== document.documentElement && p.tagName !== 'MAIN') {
+        const t = p.textContent || '';
+        if (t.length < 1500 && /cookie/i.test(t)) return true;
+      }
     }
     return false;
   };
   if (!consentDone) {
-    const REJECT_TEXT = /^(reject|decline|deny|refuse|disagree)( all)?( cookies)?$|^(use |accept )?(only )?(strictly )?(necessary|essential|required)( cookies)?( only)?$|^continue without accepting$|^(rechazar|refuser|ablehnen)( todo| todas| tout| alle)?( las cookies)?$|^(tout refuser|alle ablehnen|nur notwendige)$/i;
+    const REJECT_TEXT = /^(reject|decline|deny|refuse|disagree)( all)?( non-?essential| optional| non-?necessary)?( cookies)?$|^(use |accept )?(only )?(strictly )?(necessary|essential|required)( cookies)?( only)?$|^continue without accepting$|^(rechazar|refuser|ablehnen)( todo| todas| tout| alle)?( las cookies)?$|^(tout refuser|alle ablehnen|nur notwendige)$/i;
     const b = deepAll('button, a, [role="button"], input[type="button"], input[type="submit"]')
       .find(e => { const t = label(e); return t && t.length <= 60 && REJECT_TEXT.test(t) && vis(e) && inConsentBox(e); });
     if (b) { b.click(); actions.push('rejected:' + label(b)); consentDone = true; }
   }
   if (!consentDone) {
-    const banners = deepAll('#cmpwrapper,[id*="cookie" i],[class*="cookie" i],[id*="consent" i],[class*="consent" i],' +
-      '[id*="onetrust" i],[id*="cmpbox" i],[id*="didomi" i],[class*="cky-" i],[id*="usercentrics" i]')
+    // Any small block of the page, not just ones with a cookie-ish id or
+    // class: the text and fixed position are what identify a banner.
+    const banners = deepAll('div, section, aside, dialog, form')
+      .filter(e => (e.textContent || '').length < 1500 && /cookie/i.test(e.textContent || ''))
       .filter(e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
         // Only a real banner: fixed on screen, says it's about cookies, and
         // isn't page content (job lists and nav bars carry many links).
@@ -797,48 +824,67 @@ def _registrable(host: str) -> str:
     return ".".join(host.lower().split(".")[-2:])
 
 
-async def _find_listing_iframe_src(page) -> str | None:
-    """URL of a large, visible, cross-origin iframe that looks like a job
-    board (e.g. an embedded ATS search), else None. Free: one JS evaluation."""
+async def _find_listing_iframe_srcs(page) -> list[str]:
+    """URLs of the cross-origin iframes that look like job boards (e.g. an
+    embedded ATS search), in page order. Free: one JS evaluation.
+
+    A page can carry several (live: zeroimpactenergy.com/careers has three
+    tabs — Solutions, Energy, Builders — each an embedded CareerPlug board,
+    and only the first was ever scraped). Inactive tabs hide their iframe, so
+    it measures 0x0: a known ATS host counts even then, anything else must be
+    large and visible."""
     try:
         current = await page.url()
         frames = await with_timeout(page.evaluate(_IFRAMES_JS), what="evaluate(iframes)")
     except Exception:  # noqa: BLE001
-        return None
+        return []
     page_host = _registrable(urlparse(current).netloc)
+    found: list[str] = []
     for frame in frames or []:
         if not isinstance(frame, dict):
             continue
         src = (frame.get("src") or "").split("#")[0]
         host = urlparse(src).netloc.lower()
-        if not _looks_like_real_apply_url(src) or not host:
+        if not _looks_like_real_apply_url(src) or not host or src in found:
             continue
         if _registrable(host) == page_host or any(h in host for h in _IFRAME_IGNORED_HOSTS):
             continue
+        known_ats = any(ats in host for ats in _ATS_HOSTS)
         # Either dimension: 4liberty's iframe has no width attribute and
         # reports w=0 (h=1250) until its container lays out.
-        if frame.get("w", 0) < 300 and frame.get("h", 0) < 300:
+        if frame.get("w", 0) < 300 and frame.get("h", 0) < 300 and not known_ats:
             continue
         hint = " ".join(
             [src, str(frame.get("name", "")), str(frame.get("title", ""))]
         )
-        if _IFRAME_JOB_HINT.search(hint) or any(ats in host for ats in _ATS_HOSTS):
-            return src
-    return None
+        if _IFRAME_JOB_HINT.search(hint) or known_ats:
+            found.append(src)
+    return found
 
 
-async def _enter_listing_iframe(page) -> bool:
+async def _find_listing_iframe_src(page) -> str | None:
+    """The first job-board iframe's URL, else None."""
+    srcs = await _find_listing_iframe_srcs(page)
+    return srcs[0] if srcs else None
+
+
+async def _enter_listing_iframe(page, visited: set[str] | None = None) -> bool:
     """Navigate the page into an embedded job-board iframe, so the extractor
-    and the link scan see its content as the top-level document."""
-    src = await _find_listing_iframe_src(page)
-    if not src:
+    and the link scan see its content as the top-level document. `visited`
+    collects the boards opened so far, so a page with several is walked once
+    each and a board is never entered twice."""
+    srcs = [s for s in await _find_listing_iframe_srcs(page) if s not in (visited or ())]
+    if not srcs:
         return False
+    src = srcs[0]
     logger.info("Listing is inside an embedded iframe — opening it directly: %s", src)
     try:
         await with_timeout(page.goto(src), what="goto(iframe)")
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not open listing iframe %s: %s", src, describe(exc))
         return False
+    if visited is not None:
+        visited.add(src)
     await _wait_for_load(page)
     await page.wait_for_timeout(1500)
     return True
@@ -917,7 +963,7 @@ _ATS_HOSTS = (
     "myworkdayjobs.com", "icims.com", "taleo.net", "successfactors", "greenhouse.io",
     "lever.co", "smartrecruiters.com", "ashbyhq.com", "workable.com", "jobvite.com",
     "bamboohr.com", "recruitee.com", "breezy.hr", "paylocity.com", "ultipro.com",
-    "ukg.net", "oraclecloud.com", "dayforcehcm.com",
+    "ukg.net", "oraclecloud.com", "dayforcehcm.com", "careerplug.com",
 )
 
 
@@ -934,6 +980,15 @@ def _looks_like_job_posting_link(href: str) -> bool:
             any(ch.isdigit() for ch in tail) or (len(tail) >= 12 and "-" in tail)
         ):
             return True
+    # .../JobDetail/Plumber/299441 (careers.cbre.com): a one-word title is too
+    # short for the rule above, but the numeric id ending the address is not.
+    if (
+        len(segments) >= 2
+        and segments[-1].isdigit()
+        and len(segments[-1]) >= 4
+        and any(seg in _JOB_PATH_SEGMENTS for seg in segments[:-1])
+    ):
+        return True
     query_keys = {kv.split("=", 1)[0].lower() for kv in parsed.query.split("&") if "=" in kv}
     if query_keys & _JOB_QUERY_KEYS:
         return True
@@ -1124,7 +1179,7 @@ async def _navigate_to_section(sh, page, section: "ListingSection") -> bool:
     """
     if section.url:
         try:
-            await page.goto(section.url)
+            await _goto_with_retry(page, section.url)
             await _wait_for_load(page)
         except Exception:  # noqa: BLE001
             return False
@@ -1187,6 +1242,292 @@ _NEXT_PAGE_JS = """
 """
 
 
+_MAX_EMPTY_TRIALS = 5
+_MAX_STALE_PAGES = 3
+_LISTING_CHANGE_TIMEOUT_S = 12.0
+
+
+async def _listing_signature(page) -> frozenset[str]:
+    """The page's job-posting links (every link when none look like postings).
+    Only job links count: an ad or footer link changing must not pass for the
+    next page having loaded (live: careers.gevernova.com, where pagination
+    gave up at 239 of 2,063 jobs on a page that had never actually turned)."""
+    _, _, hrefs = await _page_links(page)
+    jobs = frozenset(h for h in hrefs if _looks_like_job_posting_link(h))
+    return jobs or frozenset(hrefs)
+
+
+async def _wait_for_listing_change(page, before: frozenset[str]) -> bool:
+    """Wait until the page's links differ from `before` (the next page of an
+    SPA listing rendered). True when it changed, or when there were no links
+    to compare so a fixed settle is all we can do; False on timeout."""
+    if not before:
+        await page.wait_for_timeout(1500)
+        return True
+    waited = 0.0
+    while waited < _LISTING_CHANGE_TIMEOUT_S:
+        await page.wait_for_timeout(500)
+        waited += 0.5
+        if await _listing_signature(page) != before:
+            return True
+    return False
+
+
+async def _empty_read_detail(
+    page, jobs: list[ScrapedJob], raw_count: int, seen_apply_urls: set[str]
+) -> tuple[str, str]:
+    """Why a read found nothing new: what the model returned versus what the
+    page actually shows. Job links on the page that were never seen mean the
+    model missed them; none means the page itself had no new listing.
+
+    Also returns the page's state: "new" (it shows job links not collected
+    yet — the read missed them, so read it again; never move on), "stale" (it
+    shows only collected job links — it never moved on), or "unknown" (no
+    recognisable job links to judge by)."""
+    _, links, _ = await _page_links(page)
+    seen = {u.rstrip("/") for u in seen_apply_urls}
+    # Apply-button links carry the job id too (careers.cbre.com), but they are
+    # not postings: counting them made a page of old jobs look like it held
+    # 26 new ones, so it was re-read instead of moved on from.
+    dom_jobs = {
+        h.rstrip("/") for h, _ in links
+        if _looks_like_job_posting_link(h) and not _APPLY_FLOW_PATH.search(urlparse(h).path)
+    }
+    unseen = len(dom_jobs - seen)
+    with_link = sum(1 for j in jobs if j.apply_url)
+    detail = (
+        f"model returned {raw_count} job(s), {len(jobs)} after filtering, "
+        f"{with_link} with a usable link; page shows {len(dom_jobs)} job link(s), "
+        f"{unseen} not seen before"
+    )
+    state = "new" if unseen else ("stale" if dom_jobs else "unknown")
+    return detail, state
+
+
+async def _save_debug_screenshot(
+    page, company_name: str, page_number: int, read_number: int, tag: str
+) -> None:
+    """Save a screenshot under scraper_screenshot_dir for debugging. Never
+    raises: a screenshot problem must not cost a scrape."""
+    try:
+        directory = get_settings().scraper_screenshot_dir / re.sub(
+            r"[^A-Za-z0-9._-]+", "_", company_name
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = directory / f"{stamp}_page{page_number}_read{read_number}_{tag}.png"
+        await with_timeout(page.screenshot(path=path, type="png"), what="screenshot")
+        logger.warning("Pagination page %d: saved debug screenshot %s", page_number, path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not save a debug screenshot: %s", describe(exc))
+
+
+_LLM_RETRIES = 3
+
+
+async def _llm_call_with_retry(page, make_call, *, what: str, page_number: int):
+    """Await `make_call()` under the LLM timeout, retrying a failed call (a
+    dropped connection, a timeout) up to _LLM_RETRIES more times with a
+    growing pause. Live: two runs ended on one dropped provider connection
+    (`ReadError`, `RemoteProtocolError`). Out-of-credits is never retried."""
+    for attempt in range(_LLM_RETRIES + 1):
+        try:
+            return await with_timeout(make_call(), LLM_CALL_TIMEOUT_SECONDS, what=what)
+        except Exception as exc:  # noqa: BLE001
+            if attempt == _LLM_RETRIES or credits_exhausted():
+                raise
+            logger.warning(
+                "Pagination page %d: %s failed (%s), retry %d/%d",
+                page_number, what, describe(exc), attempt + 1, _LLM_RETRIES,
+            )
+            await page.wait_for_timeout(2000 * (attempt + 1))
+
+
+def _log_pagination_end(page_number: int, reason: str, inserted: int, updated: int) -> None:
+    logger.warning(
+        "Pagination ended on page %d (%d job(s) stored): %s",
+        page_number, inserted + updated, reason,
+    )
+
+
+# The address of a plain "Next" link (careers.gevernova.com: <a href=
+# "/jobs/page/2">Next Page</a>), so the next page can simply be opened —
+# deterministic, no model call, no click that may silently not register.
+# Stricter than _NEXT_PAGE_JS on purpose: only an exact "next"-style label or
+# rel=next on the same site counts, since this runs before anything else.
+_NEXT_LINK_JS = """
+(() => {
+  const texts = el => [el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText || el.textContent]
+    .filter(Boolean).map(t => t.trim().toLowerCase().replace(/\\s+/g, ' '));
+  // Single-arrow › and > mean "next page".  Double-angle » almost universally
+  // means "last page"; exclude it from the pure-arrow branch.  "Next »" / "Next >>"
+  // still match via the word-first branch, and a lone » falls through to the
+  // LLM-based sh.observe() fallback that can find the real <button> next control.
+  const NEXT = /^(next( page)?\\s*[›»>]*|[›>]+)$/;
+  const usable = el => el.offsetParent !== null && el.getAttribute('aria-disabled') !== 'true'
+    && !el.classList.contains('disabled');
+  const valid = (raw) => {
+    if (!raw || raw.startsWith('#') || /^javascript:/i.test(raw)) return null;
+    const u = new URL(raw, document.baseURI);
+    if (u.origin !== location.origin) return null;
+    if (u.href.split('#')[0] === location.href.split('#')[0]) return null;
+    return u.href;
+  };
+
+  // 1. Label-based: rel=next or "next"-style text
+  const a = Array.from(document.querySelectorAll('a[href]'))
+    .find(e => (e.matches('a[rel~="next"]') || texts(e).some(t => NEXT.test(t))) && usable(e));
+  if (a) { const v = valid(a.getAttribute('href')); if (v) return v; }
+
+  // 2. Param-increment: find the <a> whose URL increments ONE pagination param
+  //    (page, p, pagenum, startrow, offset, from, start) by any positive amount
+  //    above the current URL's value, preferring the SMALLEST increment.
+  //    This covers numbered pagination bars (kiewitcareers startrow=, etc.)
+  //    where the "next page" link has a numeric label like "3" that _NEXT text
+  //    matching would never pick up.
+  const PARAM_KEYS = ['startrow', 'start', 'offset', 'from', 'page', 'p', 'pagenum', 'pg'];
+  const here = new URL(location.href);
+  let paramKey = null, currentVal = -1;
+  for (const k of PARAM_KEYS) {
+    const v = parseInt(here.searchParams.get(k) || '');
+    if (!isNaN(v) && v >= 0) { paramKey = k; currentVal = v; break; }
+  }
+  if (paramKey !== null) {
+    let best = null, bestVal = Infinity;
+    for (const e of document.querySelectorAll('a[href]')) {
+      if (!usable(e)) continue;
+      const href = e.getAttribute('href') || '';
+      if (!href || href.startsWith('#') || /^javascript:/i.test(href)) continue;
+      let u;
+      try { u = new URL(href, document.baseURI); } catch { continue; }
+      if (u.origin !== location.origin) continue;
+      if (u.href.split('#')[0] === location.href.split('#')[0]) continue;
+      const v = parseInt(u.searchParams.get(paramKey) || '');
+      if (!isNaN(v) && v > currentVal && v < bestVal) { best = u.href; bestVal = v; }
+    }
+    if (best) return best;
+  }
+
+  return null;
+})()
+"""
+
+
+async def _current_url(page) -> str:
+    try:
+        return await page.url()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _next_link_url(page) -> str | None:
+    try:
+        url = await with_timeout(page.evaluate(_NEXT_LINK_JS), what="evaluate(next link)")
+    except Exception:  # noqa: BLE001
+        return None
+    return url if isinstance(url, str) and url else None
+
+
+async def _open_next_page_directly(sh, page) -> bool:
+    """Move on without the model: open the Next link's address when there is
+    one, otherwise click a recognisable next control."""
+    url = await _next_link_url(page)
+    if url:
+        try:
+            await _goto_with_retry(page, url)
+            await _wait_for_load(page)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    return await _advance_pagination(sh, page, [])
+
+
+_GENERIC_LINK_TEXT = re.compile(
+    r"^(apply( now)?|view( job| details| more)?|read( full)?( job)?( description| more)?|"
+    r"learn more|more( info| details)?|details|see (job|details)|share|save( job)?)\b",
+    re.I,
+)
+
+
+def _title_from_job_url(href: str) -> str:
+    """A readable title from the address, for sites that put it there
+    (.../JobDetail/Mobile-HVAC-Technician/299955 -> "Mobile HVAC Technician")."""
+    parsed = urlparse(href)
+    segments = [unquote(seg) for seg in parsed.path.split("/") if seg]
+    for seg in reversed(segments):
+        words = seg.replace("-", " ").replace("_", " ").strip()
+        if len(words) >= 4 and not words.replace(" ", "").isdigit():
+            if not (len(segments) > 1 and seg.lower() in _JOB_PATH_SEGMENTS):
+                return words
+    return ""
+
+
+_NOT_A_JOB_TITLE = re.compile(
+    r"talent (community|network)|join (our|the|us)|sign ?up|subscribe|job alerts?|"
+    r"log ?in|register|create (an )?account|privacy|cookie|saved jobs?|"
+    r"my (account|profile|applications?)|get notified|stay connected",
+    re.I,
+)
+# Addresses of the apply / account flow, not of a posting's own page: the
+# listing's "Apply" buttons carry the job id too (live: careers.cbre.com
+# .../ApplicationMethods?jobId=296813 became 20 fake jobs titled
+# "ApplicationMethods").
+_APPLY_FLOW_PATH = re.compile(
+    r"/(apply|applications?|applicationmethods?|login|log-in|signin|sign-in|register|"
+    r"talent-?community|job-?alerts?|saved-?jobs?)(/|$)",
+    re.I,
+)
+# A real listing page carries several postings. One stray "job link" is a
+# footer or sign-up link (live: cbre.com/services -> "Join our Talent
+# Community", whose address carries jobId=129), and one such fake job also
+# ended the explore step's search for the real job pages.
+_MIN_LINKS_FOR_A_LISTING = 3
+
+
+async def _jobs_from_page_links(page, seen_apply_urls: set[str]) -> list[ScrapedJob]:
+    """Jobs read straight off the page's own job-posting links, for when the
+    model keeps returning nothing new from a page that visibly has unseen ones
+    (live: careers.cbre.com — 26 unseen job links on page 8, five reads that
+    returned only jobs already collected, and the scrape ended with that whole
+    page and every page after it missing). The title comes from the link text,
+    else the address; the location is unknown. The caller decides when to use
+    it, since a model read is richer."""
+    try:
+        current = await page.url()
+        anchors = await with_timeout(page.evaluate(_ANCHORS_JS), what="evaluate(anchors)")
+    except Exception:  # noqa: BLE001
+        return []
+    seen = {u.rstrip("/") for u in seen_apply_urls}
+    found: dict[str, ScrapedJob] = {}
+    for a in anchors or []:
+        if not isinstance(a, dict):
+            continue
+        href = (a.get("href") or "").split("#")[0]
+        key = href.rstrip("/")
+        if not _looks_like_real_apply_url(href) or key in seen or key in found:
+            continue
+        if not _looks_like_job_posting_link(href) or _APPLY_FLOW_PATH.search(
+            urlparse(href).path
+        ):
+            continue
+        lines = [ln.strip() for ln in (a.get("text") or "").splitlines() if ln.strip()]
+        title = next(
+            (
+                ln for ln in lines
+                if 3 <= len(ln) <= 150
+                and not _GENERIC_LINK_TEXT.match(ln)
+                and not _looks_like_nav_label(ln)
+            ),
+            "",
+        )
+        title = title or (a.get("alt") or "").strip() or _title_from_job_url(href)
+        if title and not _looks_like_nav_label(title) and not _NOT_A_JOB_TITLE.search(
+            f"{title} {href}"
+        ):
+            found[key] = ScrapedJob(title=title, location="", apply_url=href)
+    return list(found.values()) if len(found) >= _MIN_LINKS_FOR_A_LISTING else []
+
+
 async def _click_next_by_dom(page) -> bool:
     try:
         return bool(await with_timeout(page.evaluate(_NEXT_PAGE_JS), what="evaluate(next page)"))
@@ -1230,6 +1571,7 @@ async def _harvest_listing(
     seen_apply_urls: set[str],
     max_pages: int,
     first_page_jobs: list[ScrapedJob] | None = None,
+    visited_iframes: set[str] | None = None,
 ) -> tuple[int, int]:
     """
     Extract every posting from ONE listing page, following its pagination.
@@ -1247,6 +1589,10 @@ async def _harvest_listing(
     updated = 0
     pending = first_page_jobs
     page_number = 1
+    empty_trials = 0
+    stale_pages = 0
+    listing_changed = True
+    last_link_url: str | None = None  # set when the current page was opened by its address
 
     while page_number <= max_pages:
         if pending is not None:
@@ -1254,18 +1600,52 @@ async def _harvest_listing(
             pending = None
         else:
             await _dismiss_overlays(page)
-            await _enter_listing_iframe(page)
-            try:
-                result = await with_timeout(
-                    sh.extract(_EXTRACT_INSTRUCTION, ScrapedJobs, page=page),
-                    LLM_CALL_TIMEOUT_SECONDS,
-                    what="extract()",
+            await _enter_listing_iframe(page, visited_iframes)
+
+            # Screenshots on the last empty reads of this page. The 4th read
+            # gets one for our reference only (saved when debugging is on, never
+            # sent to the model); the 5th and last also sends it to the model
+            # (saved too when debugging is on).
+            shots = get_settings()
+            read_number = empty_trials + 1
+            if shots.scraper_debug_screenshots and shots.scraper_retry4_screenshot \
+                    and read_number == _MAX_EMPTY_TRIALS - 1:
+                await _save_debug_screenshot(
+                    page, company_name, page_number, read_number, "reference"
                 )
-            except Exception:  # noqa: BLE001
+            send_screenshot = (
+                shots.scraper_retry5_screenshot_to_model and read_number == _MAX_EMPTY_TRIALS
+            )
+            if send_screenshot:
+                logger.warning(
+                    "Pagination page %d: read %d/%d, sending a screenshot to the model",
+                    page_number, read_number, _MAX_EMPTY_TRIALS,
+                )
+                if shots.scraper_debug_screenshots:
+                    await _save_debug_screenshot(
+                        page, company_name, page_number, read_number, "sent-to-model"
+                    )
+            try:
+                result = await _llm_call_with_retry(
+                    page,
+                    lambda: sh.extract(
+                        _EXTRACT_INSTRUCTION, ScrapedJobs, page=page,
+                        **({"screenshot": True} if send_screenshot else {}),
+                    ),
+                    what="extract()",
+                    page_number=page_number,
+                )
+            except Exception as exc:  # noqa: BLE001
                 # One unreadable section must not discard the sections
                 # already harvested — the caller keeps going.
+                _log_pagination_end(
+                    page_number, f"extract() failed after retries: {describe(exc)}",
+                    inserted, updated,
+                )
                 break
             jobs = result.data.jobs
+
+        raw_count = len(jobs)
 
         # Same defense as _usable_sections, and the same live-caught cause:
         # with no real href visible in the tree, the model invents SOME
@@ -1307,37 +1687,185 @@ async def _harvest_listing(
         inserted += page_inserted
         updated += page_updated
 
-        # Stop condition 1: this page added nothing new — either we've
-        # reached the real end (a "Next" control that loops back, or a
-        # duplicate render) or we're stuck; either way, continuing would
-        # just keep spending on no signal.
+        # The model has now come back empty at least once on this page. If the
+        # page itself shows job links not collected yet, take them from the
+        # page directly instead of reading it again and again.
+        if not new_this_page and empty_trials >= 1:
+            rescued = await _jobs_from_page_links(page, seen_apply_urls)
+            if rescued:
+                rescued_inserted, rescued_updated = await _upsert_scraped_jobs(
+                    rescued, company_name, db
+                )
+                inserted += rescued_inserted
+                updated += rescued_updated
+                for job in rescued:
+                    seen_apply_urls.add(job.apply_url)
+                new_this_page = rescued
+                logger.warning(
+                    "Pagination page %d: the model returned nothing new, so %d job(s) "
+                    "were taken straight from the page's own links",
+                    page_number, len(rescued),
+                )
+
+        # Stop condition 1: _MAX_EMPTY_TRIALS reads of the same page in a row
+        # added nothing new — the real end, or stuck. A single empty read is
+        # not enough: live on accenture.com/in-en/careers/jobsearch (834
+        # pages) the scrape ended on page 12, then 15, because the next
+        # page had not rendered when it was read. Each retry waits and
+        # re-reads the SAME page (re-clicking next first if the listing never
+        # changed after the last click); jobs found on a retry resume
+        # pagination from there.
         if not new_this_page:
-            break
+            empty_trials += 1
+            detail, page_state = await _empty_read_detail(
+                page, jobs, raw_count, seen_apply_urls
+            )
+            detail = f"{detail}; at {await _current_url(page)}"
+            if empty_trials >= _MAX_EMPTY_TRIALS:
+                _log_pagination_end(
+                    page_number, f"nothing new in {empty_trials} reads in a row ({detail})",
+                    inserted, updated,
+                )
+                break
+            # A page that never turned gets moved on again — re-reading it can
+            # never help. "Never turned" is judged by what the page shows: only
+            # collected jobs ("stale"), or, when no job links are recognisable,
+            # the listing not changing after the last move. A page showing jobs
+            # not collected yet is NEVER skipped, even if it was slow to render
+            # (live: gevernova.com page 2 loaded after the 12s change-wait gave
+            # up, and moving on would have dropped its 10 jobs).
+            if page_state == "stale" or (page_state == "unknown" and not listing_changed):
+                logger.warning(
+                    "Pagination page %d: nothing new (read %d/%d; %s), the page did not "
+                    "move on, going to the next page again",
+                    page_number, empty_trials, _MAX_EMPTY_TRIALS, detail,
+                )
+                before = await _listing_signature(page)
+                if await _open_next_page_directly(sh, page):
+                    listing_changed = await _wait_for_listing_change(page, before)
+                    if page_state == "stale":
+                        # A different page is read next, so its reads start
+                        # afresh. Result pages can overlap (live: careers.cbre.com
+                        # offset 200 repeated 24 jobs already seen, while offsets
+                        # 225 and beyond were full of new ones, and re-reading
+                        # that one page 5 times ended the scrape with 170 of 378+
+                        # jobs). Only several different pages in a row with
+                        # nothing new mean the end.
+                        stale_pages += 1
+                        if stale_pages >= _MAX_STALE_PAGES:
+                            _log_pagination_end(
+                                page_number,
+                                f"{stale_pages} different pages in a row showed nothing new",
+                                inserted, updated,
+                            )
+                            break
+                        empty_trials = 0
+                        page_number += 1
+                else:
+                    # Only collected jobs on screen and nothing to click: this
+                    # is the end of the list. Re-reading it more would only
+                    # spend model calls (live: a 25-job CareerPlug board was
+                    # re-read 5 times, ~2 minutes, to learn that).
+                    _log_pagination_end(
+                        page_number,
+                        f"nothing new on the page and no next control ({detail})",
+                        inserted, updated,
+                    )
+                    break
+            elif page_state == "unknown" and last_link_url and empty_trials >= 2:
+                # A page opened by its address that shows no job links at all,
+                # twice: it rendered blank (live: gevernova.com page 6, while
+                # the site itself served that page normally). Load it again.
+                # Only for address-based paging — reloading a click-paged
+                # listing would send it back to page 1.
+                logger.warning(
+                    "Pagination page %d: nothing new (read %d/%d; %s), the page shows no "
+                    "job links at all, reloading it",
+                    page_number, empty_trials, _MAX_EMPTY_TRIALS, detail,
+                )
+                try:
+                    await _goto_with_retry(page, last_link_url)
+                    await _wait_for_load(page)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                logger.warning(
+                    "Pagination page %d: nothing new (read %d/%d; %s), re-reading the same page",
+                    page_number, empty_trials, _MAX_EMPTY_TRIALS, detail,
+                )
+            await page.wait_for_timeout(3000)
+            continue
+        empty_trials = 0
+        stale_pages = 0
 
         # Stop condition 2 (checked implicitly by the while-loop bound):
         # max_pages caps worst-case spend even if a page keeps legitimately
         # yielding new jobs forever.
         if page_number == max_pages:
-            break
-
-        await _dismiss_overlays(page)
-        try:
-            obs = await with_timeout(
-                sh.observe(_PAGINATION_INSTRUCTION, page=page),
-                LLM_CALL_TIMEOUT_SECONDS,
-                what="observe() (pagination)",
+            _log_pagination_end(
+                page_number, f"reached the page cap ({max_pages})", inserted, updated
             )
-        except Exception:  # noqa: BLE001
-            break  # best-effort — treat a failed pagination check as "no more pages"
-
-        # Stop condition 3: no pagination/load-more control found — this
-        # genuinely is the last page.
-        if not obs.data:
             break
 
-        if not await _advance_pagination(sh, page, obs.data):
-            break  # couldn't advance — stop rather than retry indefinitely
-        await page.wait_for_timeout(1500)  # let the next page/appended jobs render
+        before = await _listing_signature(page)
+        next_url = await _next_link_url(page)
+        if next_url:
+            # A plain link to the next page: open its address directly.
+            try:
+                await _goto_with_retry(page, next_url)
+                await _wait_for_load(page)
+            except Exception as exc:  # noqa: BLE001
+                _log_pagination_end(
+                    page_number, f"could not open the next page {next_url}: {describe(exc)}",
+                    inserted, updated,
+                )
+                break
+            last_link_url = next_url
+        else:
+            last_link_url = None
+            await _dismiss_overlays(page)
+            try:
+                obs = await _llm_call_with_retry(
+                    page,
+                    lambda: sh.observe(_PAGINATION_INSTRUCTION, page=page),
+                    what="observe() (pagination)",
+                    page_number=page_number,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # best-effort — treat a failed pagination check as "no more pages"
+                _log_pagination_end(
+                    page_number, f"pagination check failed after retries: {describe(exc)}",
+                    inserted, updated,
+                )
+                break
+
+            # Stop condition 3: neither the model nor a direct click on a Next
+            # control can advance — the last page. An empty observe() is not
+            # proof of that on its own: live on accenture.com (834 pages) it
+            # returned nothing on page 9 ("Observed element could not be
+            # resolved to an XPath") while a real Next button was on screen,
+            # ending the run at 107 jobs. So a direct DOM click gets the final say.
+            if not await _advance_pagination(sh, page, obs.data or []):
+                _log_pagination_end(
+                    page_number,
+                    "no next control found" if not obs.data
+                    else "could not click a next control",
+                    inserted, updated,
+                )
+                break  # couldn't advance — stop rather than retry indefinitely
+            if not obs.data:
+                logger.warning(
+                    "Pagination page %d: the next-page check found no control; advanced "
+                    "with a direct click on a Next button instead",
+                    page_number,
+                )
+        listing_changed = await _wait_for_listing_change(page, before)
+        if not listing_changed:
+            logger.warning(
+                "Pagination page %d: clicked next but the listing did not change in %.0fs",
+                page_number, _LISTING_CHANGE_TIMEOUT_S,
+            )
+        await page.wait_for_timeout(1000)  # let the rest of the page settle
         page_number += 1
 
     return inserted, updated
@@ -1373,7 +1901,7 @@ async def _explore_job_entry_links(
         if depth >= settings.scraper_max_explore_depth:
             continue
         try:
-            await with_timeout(page.goto(url), what="goto(explore)")
+            await _goto_with_retry(page, url)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Explore: could not open %s: %s", url, describe(exc))
             continue
@@ -1393,7 +1921,7 @@ async def _explore_job_entry_links(
                 depth + 1, harvested, settings.scraper_max_explore_pages, href,
             )
             try:
-                await with_timeout(page.goto(href), what="goto(explore link)")
+                await _goto_with_retry(page, href)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Explore: could not open %s: %s", href, describe(exc))
                 continue
@@ -1427,9 +1955,7 @@ async def _explore_job_entry_links(
     return 0, 0
 
 
-async def _sync_via_extract(
-    company_url: str, db: AsyncSession, model: str | None = None
-) -> tuple[int, int]:
+async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, int]:
     """
     Fallback for any careers page that isn't a known ATS. Uses a dedicated
     "scraper" Chrome profile (see _SCRAPER_PROFILE_KEY) so this never
@@ -1456,15 +1982,12 @@ async def _sync_via_extract(
     Spend is bounded on both axes: scraper_max_sections caps how many
     listing pages we'll visit, scraper_max_pages caps pagination within
     each one.
-
-    `model` overrides the configured Tier-2 model for this one run (used
-    by sync_company's fallback retry).
     """
     settings = get_settings()
     session = await get_or_launch(_SCRAPER_PROFILE_KEY)
     sh = await Stagehand.create(
         browser=session.browser,
-        model=openrouter_llm_for(model) if model else openrouter_llm,
+        model=openrouter_llm,
     )
     company_name = _company_name_from_url(company_url)
     seen_apply_urls: set[str] = set()
@@ -1475,7 +1998,7 @@ async def _sync_via_extract(
             await sh.browser.context.active_page()
             or await sh.browser.context.new_page()
         )
-        await page.goto(company_url)
+        await _goto_with_retry(page, company_url)
         await _wait_for_load(page)
         await page.wait_for_timeout(1500)
 
@@ -1511,6 +2034,11 @@ async def _sync_via_extract(
         # jobs pays a few extra, capped LLM calls to re-discover postings
         # the dedupe set then discards — accepted, since the alternative
         # just proved itself capable of a total, silent failure.
+        # Read once, while the page is still the one the assessment saw: a page
+        # with several job-board iframes is walked board by board further down.
+        iframe_srcs = await _find_listing_iframe_srcs(page)
+        visited_iframes: set[str] = set()
+
         await _resolve_section_urls_from_dom(page, assessment.sections)
         if not assessment.jobs and not assessment.sections:
             _, links, _ = await _page_links(page)
@@ -1533,7 +2061,7 @@ async def _sync_via_extract(
         # cheaper than a subtle staleness bug in the one thing this loop
         # exists to get right.
         for section in sections:
-            await page.goto(company_url)
+            await _goto_with_retry(page, company_url)
             await _wait_for_load(page)
             await page.wait_for_timeout(1500)
 
@@ -1547,6 +2075,7 @@ async def _sync_via_extract(
                 company_name,
                 seen_apply_urls,
                 settings.scraper_max_pages,
+                visited_iframes=visited_iframes,
             )
             inserted += section_inserted
             updated += section_updated
@@ -1556,7 +2085,7 @@ async def _sync_via_extract(
                 # Only reload if we actually navigated away above — saves
                 # one pointless goto() on the common case (a genuine
                 # single-listing page with no sections at all).
-                await page.goto(company_url)
+                await _goto_with_retry(page, company_url)
                 await _wait_for_load(page)
                 await page.wait_for_timeout(1500)
 
@@ -1568,10 +2097,11 @@ async def _sync_via_extract(
                 seen_apply_urls,
                 settings.scraper_max_pages,
                 first_page_jobs=assessment.jobs,
+                visited_iframes=visited_iframes,
             )
             inserted += page_inserted
             updated += page_updated
-        elif not sections and await _find_listing_iframe_src(page):
+        elif not sections and iframe_srcs:
             page_inserted, page_updated = await _harvest_listing(
                 sh,
                 page,
@@ -1579,9 +2109,74 @@ async def _sync_via_extract(
                 company_name,
                 seen_apply_urls,
                 settings.scraper_max_pages,
+                visited_iframes=visited_iframes,
             )
             inserted += page_inserted
             updated += page_updated
+
+        # A page with several job-board iframes (live: zeroimpactenergy.com/
+        # careers — three tabs, each its own CareerPlug board) needs every one
+        # walked. This is independent of the path above: there the model saw the
+        # visible tab's jobs through the page, took the "jobs on this page"
+        # route, and the other two boards were never opened. Boards already
+        # entered inside the harvest loop are skipped.
+        if len(iframe_srcs) >= 2:
+            for position, iframe_src in enumerate(iframe_srcs, 1):
+                if iframe_src in visited_iframes:
+                    continue
+                logger.warning(
+                    "Page has %d job-board iframes; opening %d/%d: %s",
+                    len(iframe_srcs), position, len(iframe_srcs), iframe_src,
+                )
+                try:
+                    await _goto_with_retry(page, iframe_src)
+                    await _wait_for_load(page)
+                    await page.wait_for_timeout(1500)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not open %s: %s", iframe_src, describe(exc))
+                    continue  # a dead board must not abandon the others
+                visited_iframes.add(iframe_src)
+                board_inserted, board_updated = await _harvest_listing(
+                    sh,
+                    page,
+                    db,
+                    company_name,
+                    seen_apply_urls,
+                    settings.scraper_max_pages,
+                    visited_iframes=visited_iframes,
+                )
+                inserted += board_inserted
+                updated += board_updated
+
+        if inserted + updated == 0:
+            # Before falling back to the full explore walk, check whether the
+            # company URL itself is a listing page the model's accessibility-
+            # tree read missed (live: kiewitcareers.kiewit.com — ~1,008 jobs,
+            # "Extraction incomplete" on the search URL, explore then follows
+            # a /content/India/ link instead). The DOM-link rescue is cheap
+            # (no LLM): if the page already has job-shaped links, harvest it
+            # directly instead of letting explore pick the wrong destination.
+            await _goto_with_retry(page, company_url)
+            await _wait_for_load(page)
+            await page.wait_for_timeout(1500)
+            rescue_preview = await _jobs_from_page_links(page, set())
+            if rescue_preview:
+                logger.info(
+                    "Assessment returned nothing but %d job link(s) found on the company "
+                    "URL itself — harvesting directly before explore fallback",
+                    len(rescue_preview),
+                )
+                direct_inserted, direct_updated = await _harvest_listing(
+                    sh,
+                    page,
+                    db,
+                    company_name,
+                    seen_apply_urls,
+                    settings.scraper_max_pages,
+                    visited_iframes=visited_iframes,
+                )
+                inserted += direct_inserted
+                updated += direct_updated
 
         if inserted + updated == 0:
             explored_inserted, explored_updated = await _explore_job_entry_links(
@@ -1600,7 +2195,15 @@ async def _sync_via_extract(
         # application-filling flow (FLAGGED.md #26-29), live-caught here too
         # when two syncs ran back-to-back. Must close both, in this order,
         # same as runner.py's fix.
-        await sh.close()
+        try:
+            await sh.close()
+        except Exception:  # noqa: BLE001
+            # CDP may already be gone (e.g. browser crashed mid-run).  Swallow
+            # the error so close_session() still runs and releases the browser
+            # — without this, the next attempt gets "already attached".
+            logger.debug(
+                "sh.close() raised (CDP already closed) — still closing session"
+            )
         await close_session(_SCRAPER_PROFILE_KEY)
 
     return inserted, updated

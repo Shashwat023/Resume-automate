@@ -44,23 +44,31 @@ class Settings(BaseSettings):
     # again without asking first — confirmed standing constraint.
     openrouter_model_tier2: str = "qwen/qwen3.5-122b-a10b"
     # Scraper-only retry policy. A company's extract-based sync is tried up
-    # to `scraper_primary_attempts` times with the primary Tier-2 model,
-    # stopping as soon as one run stores `scraper_fallback_min_jobs` jobs;
-    # if every attempt comes back short (or crashes), it's re-run ONCE with
-    # this fallback model — never more. Picked
-    # from a 7-model benchmark on 2026-10-04 (gpt-5.6-luna primary: 96% of
-    # jobs found at ~1/7 Gemini's cost; Gemini 3.8 Flash found 99.7% and
-    # recovered the one site Luna missed). Empty string disables it.
-    openrouter_model_tier2_fallback: str = "google/gemini-3.8-flash"
-    # Cap on one Tier-2/Stagehand reply. Largest seen in the benchmark was
+    # to `scraper_primary_attempts` times with the Tier-2 model, stopping as
+    # soon as one run stores `scraper_fallback_min_jobs` jobs. There is no
+    # second model: if every attempt comes back short (or crashes), the
+    # company is reported as it stands.
+    # Cap on one Tier-2/Stagehand reply. Largest seen in a benchmark was
     # ~3k tokens (a 30-job page); 16k leaves room for ~200 postings.
     openrouter_tier2_max_tokens: int = 16000
     # Live-caught 2026-10-05: with hidden "thinking" on, glm-4.6 and Qwen3.5
-    # spent 100+s (one Qwen reply: 6.9k tokens vs Gemini's ~1k) on a page
+    # spent 100+s (one Qwen reply: 6.9k tokens vs ~1k without thinking) on a page
     # assessment, tripping the 120s extract() cap. Scraping needs no reasoning.
     openrouter_disable_reasoning: bool = True
     scraper_primary_attempts: int = 3
     scraper_fallback_min_jobs: int = 1
+    # Screenshots on the last empty reads of one page (a page read that finds
+    # nothing new is retried up to 5 times; see _harvest_listing):
+    #  - 4th read: a screenshot for OUR reference only. It is never sent to the
+    #    model, and it is only taken when scraper_debug_screenshots is on.
+    #  - 5th (last) read: the model gets the screenshot alongside the page text.
+    #  - scraper_debug_screenshots: on -> both screenshots are saved under
+    #    scraper_screenshot_dir for debugging; off -> nothing is stored, and the
+    #    5th read still sends its screenshot to the model.
+    scraper_retry4_screenshot: bool = True
+    scraper_retry5_screenshot_to_model: bool = True
+    scraper_debug_screenshots: bool = False
+    scraper_screenshot_dir: Path = BACKEND_DIR / "shots" / "scraper"
     # A 0-job run is only retried if it crashed or the visited pages showed
     # at least this many links to individual postings (evidence the model
     # missed them). Below it the site is treated as having no listings and
@@ -150,7 +158,7 @@ class Settings(BaseSettings):
     # pagination control we can't recognize correctly (or a genuinely
     # infinite feed) can't turn into an unbounded LLM-spend loop — each
     # extra page costs one extract() call (~$0.005-0.015, see FLAGGED.md).
-    scraper_max_pages: int = 15
+    scraper_max_pages: int = 500
 
     # Bound on the "category 3" fan-out (sync_service.py): a careers portal
     # that splits its openings across several parallel tracks — Cargill's
@@ -171,7 +179,7 @@ class Settings(BaseSettings):
     # one-hop flow stopped at /careers. Depth counts pages expanded from the
     # landing page; the page budget caps LLM extract calls (one per page).
     scraper_max_explore_depth: int = 3
-    scraper_max_explore_pages: int = 8
+    scraper_max_explore_pages: int = 200
 
     # How long a tracked company (config/portals.yml, seeded into
     # TrackedCompany) stays "already covered" after a sync attempt before
