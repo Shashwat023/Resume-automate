@@ -62,3 +62,10 @@ cmd.txt
 
 # -- docs --
 docs/
+
+# --- Image files ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
