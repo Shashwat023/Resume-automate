@@ -167,7 +167,11 @@ async def _call_openrouter(body: dict) -> dict:
             body = {k: v for k, v in body.items() if k != "reasoning"}
             resp = await client.post(url, headers=headers, json=body)
         global _credits_exhausted
-        if resp.status_code == 402:
+        # A key's own total limit answers 403 "Key limit exceeded", not 402
+        # (live 2026-10-07): just as final, so it counts as out of credits.
+        if resp.status_code == 402 or (
+            resp.status_code == 403 and "limit exceeded" in resp.text.lower()
+        ):
             _credits_exhausted = resp.text[:300]
         elif not resp.is_error:
             _credits_exhausted = None
@@ -210,16 +214,6 @@ def _usage_from_openai(data: dict) -> LLMUsage:
         output_tokens=int(u.get("completion_tokens", 0)),
         total_tokens=int(u.get("total_tokens", 0)),
     )
-
-
-def openrouter_llm_for(model: str):
-    """A Stagehand model callback pinned to a specific model (the scraper's
-    fallback run uses this instead of the configured Tier-2 default)."""
-
-    async def callback(params):
-        return await openrouter_llm(params, model=model)
-
-    return callback
 
 
 async def openrouter_llm(params, model: str | None = None):
