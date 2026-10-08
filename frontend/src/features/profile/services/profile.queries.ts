@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { profileApi, type BackendProfile } from '../../../api/profile';
+import { isNotFound } from '../../../api/axios';
 import { useProfileStore } from '../../../store/profileStore';
 import { getStoredProfileId, setStoredProfileId } from '@/lib/session';
 import { toast } from 'sonner';
@@ -202,8 +203,19 @@ export const useUpdateProfileMutation = () => {
         return created;
       }
 
-      // Profile exists — update it
-      return profileApi.updateProfile(profileId, backendData);
+      // Profile exists — update it. The stored ID can go stale (e.g. the
+      // backend DB was reset) while localStorage still remembers it, so an
+      // update that 404s falls back to creating a fresh profile instead of
+      // leaving the user permanently unable to save.
+      try {
+        return await profileApi.updateProfile(profileId, backendData);
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+        const created = await profileApi.createProfile(backendData);
+        setStoredProfileId(created.id);
+        toast.success('Profile created!');
+        return created;
+      }
     },
     onSuccess: (data) => {
       setProfile(backendToForm(data) as any);
