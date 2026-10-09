@@ -42,7 +42,38 @@ class Settings(BaseSettings):
     # half Qwen's per-token cost ($0.27/$0.40 vs $0.60/$3.60 per M
     # in/out, OpenRouter pricing as of 2026-09-03). Do not swap this model
     # again without asking first — confirmed standing constraint.
-    openrouter_model_tier2: str = "z-ai/glm-4.6"
+    openrouter_model_tier2: str = "qwen/qwen3.5-122b-a10b"
+    # Scraper-only retry policy. A company's extract-based sync is tried up
+    # to `scraper_primary_attempts` times with the Tier-2 model, stopping as
+    # soon as one run stores `scraper_fallback_min_jobs` jobs. There is no
+    # second model: if every attempt comes back short (or crashes), the
+    # company is reported as it stands.
+    # Cap on one Tier-2/Stagehand reply. Largest seen in a benchmark was
+    # ~3k tokens (a 30-job page); 16k leaves room for ~200 postings.
+    openrouter_tier2_max_tokens: int = 16000
+    # Live-caught 2026-10-05: with hidden "thinking" on, glm-4.6 and Qwen3.5
+    # spent 100+s (one Qwen reply: 6.9k tokens vs ~1k without thinking) on a page
+    # assessment, tripping the 120s extract() cap. Scraping needs no reasoning.
+    openrouter_disable_reasoning: bool = True
+    scraper_primary_attempts: int = 3
+    scraper_fallback_min_jobs: int = 1
+    # Screenshots on the last empty reads of one page (a page read that finds
+    # nothing new is retried up to 5 times; see _harvest_listing):
+    #  - 4th read: a screenshot for OUR reference only. It is never sent to the
+    #    model, and it is only taken when scraper_debug_screenshots is on.
+    #  - 5th (last) read: the model gets the screenshot alongside the page text.
+    #  - scraper_debug_screenshots: on -> both screenshots are saved under
+    #    scraper_screenshot_dir for debugging; off -> nothing is stored, and the
+    #    5th read still sends its screenshot to the model.
+    scraper_retry4_screenshot: bool = True
+    scraper_retry5_screenshot_to_model: bool = True
+    scraper_debug_screenshots: bool = False
+    scraper_screenshot_dir: Path = BACKEND_DIR / "shots" / "scraper"
+    # A 0-job run is only retried if it crashed or the visited pages showed
+    # at least this many links to individual postings (evidence the model
+    # missed them). Below it the site is treated as having no listings and
+    # is not re-run — retrying an empty site only burns tokens.
+    scraper_retry_min_job_links: int = 3
     # Day 4 scope correction: no longer gates whether a field gets filled
     # (Tier 1 always answers) — gates only whether an answer is cached into
     # the answers library. See tier1_map.py::map_fields.
@@ -127,7 +158,7 @@ class Settings(BaseSettings):
     # pagination control we can't recognize correctly (or a genuinely
     # infinite feed) can't turn into an unbounded LLM-spend loop — each
     # extra page costs one extract() call (~$0.005-0.015, see FLAGGED.md).
-    scraper_max_pages: int = 15
+    scraper_max_pages: int = 500
 
     # Bound on the "category 3" fan-out (sync_service.py): a careers portal
     # that splits its openings across several parallel tracks — Cargill's
@@ -140,6 +171,15 @@ class Settings(BaseSettings):
     # can't turn into an unbounded crawl. 6 covers every real multi-track
     # portal seen so far with headroom.
     scraper_max_sections: int = 6
+
+    # Deterministic "follow the job links" exploration (sync_service.py
+    # _explore_job_entry_links), used when the normal flow saved 0 jobs.
+    # Live-caught on 4liberty.com: home -> Careers -> "View All Job Openings"
+    # -> listings (in an iframe) is three hops, and the model-picked
+    # one-hop flow stopped at /careers. Depth counts pages expanded from the
+    # landing page; the page budget caps LLM extract calls (one per page).
+    scraper_max_explore_depth: int = 3
+    scraper_max_explore_pages: int = 200
 
     # How long a tracked company (config/portals.yml, seeded into
     # TrackedCompany) stays "already covered" after a sync attempt before

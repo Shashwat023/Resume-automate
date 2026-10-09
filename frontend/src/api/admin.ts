@@ -55,3 +55,7 @@ export const trackedSyncApi = {
   pause: (): Promise<TrackedSyncStatus> => api.post('/api/admin/sync-tracked/pause'),
   getStatus: (): Promise<TrackedSyncStatus> => api.get('/api/admin/sync-tracked/status'),
 };
+
+// TEMPORARY test helper — see backend api/admin.py reset_test_data.
+export const resetTestData = (): Promise<Record<string, number>> =>
+  api.post('/api/admin/reset-test-data');

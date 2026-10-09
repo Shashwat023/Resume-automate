@@ -1,8 +1,16 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.exceptions import ConflictError
+from app.models.db_models import (
+    Application,
+    Job,
+    RunEvent,
+    TrackedCompany,
+    TrackedCompanySyncState,
+)
 from app.models.schemas import (
     AdminSyncIn,
     AdminSyncOut,
@@ -50,6 +58,30 @@ async def start_tracked_sync() -> TrackedCompanySyncStatusOut:
 async def pause_tracked_sync() -> TrackedCompanySyncStatusOut:
     result = await bulk_sync_service.request_pause()
     return TrackedCompanySyncStatusOut(**result)
+
+
+@router.post("/reset-test-data")
+async def reset_test_data(db: AsyncSession = Depends(get_db)) -> dict:
+    """TEMPORARY test helper: wipes scraped/apply data, keeps profile, resume,
+    answers library and the seeded tracked-company list."""
+    status = await bulk_sync_service.get_status()
+    if status["status"] == "running":
+        raise ConflictError("Pause the bulk sync before resetting test data.")
+    counts = {}
+    for name, model in (
+        ("run_events", RunEvent),
+        ("applications", Application),
+        ("jobs", Job),
+        ("tracked_company_sync_state", TrackedCompanySyncState),
+    ):
+        counts[name] = (await db.execute(delete(model))).rowcount
+    counts["tracked_companies_reset"] = (
+        await db.execute(
+            update(TrackedCompany).values(last_synced_at=None, last_error=None)
+        )
+    ).rowcount
+    await db.commit()
+    return counts
 
 
 @router.get("/sync-tracked/status", response_model=TrackedCompanySyncStatusOut)

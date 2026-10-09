@@ -3,6 +3,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.db_models import Job
+from app.services.engine.timeouts import LLMTimeoutError
 from app.services.scraper import sync_service
 
 
@@ -180,6 +181,587 @@ async def test_sync_company_falls_back_to_extract_for_unknown_ats(
     }
 
 
+def _saw_posting_links(count=10):
+    """What a real run records when its pages had posting links it didn't store."""
+    sync_service._evidence.get().job_links_max = count
+
+
+def _retry_settings(monkeypatch, attempts=3):
+    settings = sync_service.get_settings()
+    monkeypatch.setattr(settings, "openrouter_model_tier2", "qwen/qwen3.5-122b-a10b")
+    monkeypatch.setattr(settings, "scraper_primary_attempts", attempts)
+    monkeypatch.setattr(settings, "scraper_fallback_min_jobs", 1)
+    monkeypatch.setattr(settings, "scraper_retry_min_job_links", 3)
+
+
+async def test_sync_company_stops_retrying_once_an_attempt_finds_jobs(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if len(calls) == 1:
+            _saw_posting_links()
+            return 0, 0
+        return 4, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None]  # stopped as soon as the second attempt found jobs
+    assert result["jobs_inserted"] == 4 and result["success"] is True
+
+
+async def test_sync_company_crashing_attempts_count_toward_the_three(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None, None]
+    assert result["success"] is False and result["failed"] == 1
+
+
+async def test_sync_company_a_model_timeout_is_not_retried(async_session, monkeypatch):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        raise LLMTimeoutError("extract() (page assessment) exceeded 120s")
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None]  # a retry would time out the same way, and there is no second model
+    assert result["success"] is False and result["failed"] == 1
+
+
+async def test_sync_company_jobs_returned_but_none_saved_is_a_failure(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+
+    async def fake_extract(url, db, model=None):
+        sync_service._evidence.get().unresolved_model_jobs = 10
+        return 0, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert result["success"] is False and result["failed"] == 1
+    assert result["jobs_inserted"] == 0
+
+
+class _IframePage:
+    def __init__(self, url, iframes):
+        self._url, self._iframes = url, iframes
+
+    async def url(self):
+        return self._url
+
+    async def evaluate(self, script):
+        return self._iframes
+
+
+def _frame(src, w=800, h=1200, name="", title=""):
+    return {"src": src, "name": name, "title": title, "w": w, "h": h}
+
+
+async def test_listing_iframe_found_for_cross_origin_job_board():
+    page = _IframePage(
+        "https://www.4liberty.com/careers/job-openings",
+        [
+            _frame("https://www.youtube.com/embed/abc"),
+            _frame("https://www2.appone.com/Search/Search.aspx?results=yes", name="4LCareers"),
+        ],
+    )
+    assert await sync_service._find_listing_iframe_src(page) == (
+        "https://www2.appone.com/Search/Search.aspx?results=yes"
+    )
+
+
+async def test_listing_iframe_accepted_when_width_reports_zero():
+    page = _IframePage(
+        "https://www.4liberty.com/careers/job-openings",
+        [_frame("https://www2.appone.com/Search/Search.aspx?results=yes", w=0, h=1250)],
+    )
+    assert await sync_service._find_listing_iframe_src(page) is not None
+
+
+async def test_listing_iframes_include_boards_hidden_in_inactive_tabs():
+    """Live: zeroimpactenergy.com/careers has three tabs, each an embedded
+    CareerPlug board; the inactive tabs' iframes measure 0x0."""
+    page = _IframePage(
+        "https://www.zeroimpactenergy.com/careers",
+        [
+            _frame("https://zero-impact-solutions.careerplug.com/?embed=1"),
+            _frame("https://zero-impact-energy.careerplug.com/?embed=1", w=0, h=0),
+            _frame("https://zero-impact-builders.careerplug.com/?embed=1", w=0, h=0),
+        ],
+    )
+
+    assert await sync_service._find_listing_iframe_srcs(page) == [
+        "https://zero-impact-solutions.careerplug.com/?embed=1",
+        "https://zero-impact-energy.careerplug.com/?embed=1",
+        "https://zero-impact-builders.careerplug.com/?embed=1",
+    ]
+
+
+async def test_listing_iframes_still_skip_hidden_frames_from_unknown_hosts():
+    page = _IframePage(
+        "https://www.example.com/careers",
+        [
+            _frame("https://tracker.other.com/jobs/pixel", w=0, h=0),
+            _frame("https://acme.careerplug.com/?embed=1", w=0, h=0),
+            _frame("https://acme.careerplug.com/?embed=1"),  # the same board twice
+        ],
+    )
+
+    assert await sync_service._find_listing_iframe_srcs(page) == [
+        "https://acme.careerplug.com/?embed=1"
+    ]
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("View All Job Openings", True),
+        ("Search Jobs", True),
+        ("Careers", True),
+        ("Explore open positions", True),
+        ("null", True),
+        ("N/A", True),
+        ("Project Manager, Network Communications", False),
+        ("Data Analyst", False),
+        ("Executive Operations Partner", False),
+    ],
+)
+def test_nav_label_titles_are_not_jobs(title, expected):
+    assert sync_service._looks_like_nav_label(title) is expected
+
+
+async def test_listing_iframe_ignores_same_site_small_and_unrelated_frames():
+    page = _IframePage(
+        "https://www.example.com/careers",
+        [
+            _frame("https://www.example.com/jobs-widget"),
+            _frame("https://jobs.other.com/search", w=100, h=100),
+            _frame("https://widgets.other.com/map"),
+        ],
+    )
+    assert await sync_service._find_listing_iframe_src(page) is None
+
+
+async def test_call_openrouter_retries_without_reasoning_when_model_requires_it(monkeypatch):
+    import httpx
+
+    from app.services.engine import llm_client
+
+    seen = []
+
+    def handler(request):
+        import json
+
+        body = json.loads(request.content)
+        seen.append("reasoning" in body)
+        if "reasoning" in body:
+            return httpx.Response(
+                400, json={"error": {"message": "Reasoning is mandatory for this endpoint"}}
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        llm_client.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler)),
+    )
+    monkeypatch.setattr(llm_client.settings, "openrouter_api_key", "k")
+    monkeypatch.setattr(llm_client, "_reasoning_mandatory", set())
+
+    body = {"model": "m/reasoner", "messages": [], "reasoning": {"enabled": False}}
+    assert (await llm_client._call_openrouter(dict(body)))["choices"][0]["message"]["content"] == "OK"
+    await llm_client._call_openrouter(dict(body))
+
+    assert seen == [True, False, False]  # retried once, then remembered
+
+
+HOME = "https://www.4liberty.com/"
+CAREERS = "https://www.4liberty.com/careers"
+OPENINGS = "https://www.4liberty.com/careers/job-openings"
+
+
+def test_job_entry_links_ranks_and_filters_like_4liberty():
+    links = [
+        ("https://www.4liberty.com/services", "services"),
+        ("https://www.4liberty.com/careers", "careers"),
+        ("https://www.4liberty.com/about", "about"),
+        ("https://www.4liberty.com/careers/job-openings", "view all job openings"),
+        ("https://www.4liberty.com/careers/login", "sign in"),
+        ("https://www.4liberty.com/jobs/12345", "senior engineer"),
+        ("https://twitter.com/4liberty", "careers on twitter"),
+        ("https://www.4liberty.com/brochure.pdf", "careers brochure"),
+        ("https://www.4liberty.com/privacy", "privacy"),
+    ]
+    assert sync_service._job_entry_links(links, HOME, set(), limit=5) == [
+        OPENINGS,
+        CAREERS,
+    ]
+    assert sync_service._job_entry_links(links, HOME, {CAREERS}, limit=5) == [OPENINGS]
+
+
+class _SiteGraphPage:
+    """Fake browser: goto() moves between pages, evaluate() returns that page's anchors."""
+
+    def __init__(self, graph):
+        self.graph, self.current, self.visits = graph, HOME, []
+
+    async def goto(self, url):
+        self.current = url
+        self.visits.append(url)
+
+    async def url(self):
+        return self.current
+
+    async def evaluate(self, script):
+        return [{"href": h, "text": t} for h, t in self.graph.get(self.current, [])]
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+def _patch_explore_io(monkeypatch, harvest):
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sync_service, "_wait_for_load", noop)
+    monkeypatch.setattr(sync_service, "_dismiss_overlays", noop)
+    monkeypatch.setattr(sync_service, "_harvest_listing", harvest)
+
+
+async def test_explore_follows_three_hops_to_the_listing_page(async_session, monkeypatch):
+    page = _SiteGraphPage(
+        {
+            HOME: [(CAREERS, "Careers"), ("https://www.4liberty.com/about", "About")],
+            CAREERS: [(OPENINGS, "View All Job Openings"), (HOME, "Home")],
+            OPENINGS: [],
+        }
+    )
+    harvested = []
+
+    async def fake_harvest(sh, pg, db, name, seen, max_pages, first_page_jobs=None):
+        harvested.append(pg.current)
+        return (10, 0) if pg.current == OPENINGS else (0, 0)
+
+    _patch_explore_io(monkeypatch, fake_harvest)
+
+    result = await sync_service._explore_job_entry_links(None, page, async_session, "4Liberty", HOME, set())
+
+    assert result == (10, 0)
+    assert harvested == [CAREERS, OPENINGS]
+
+
+async def test_explore_never_revisits_a_page_and_reports_no_jobs(async_session, monkeypatch):
+    page = _SiteGraphPage(
+        {
+            HOME: [(CAREERS, "Careers")],
+            CAREERS: [(HOME, "Careers home"), (CAREERS, "Careers")],
+        }
+    )
+    harvested = []
+
+    async def fake_harvest(sh, pg, db, name, seen, max_pages, first_page_jobs=None):
+        harvested.append(pg.current)
+        return 0, 0
+
+    _patch_explore_io(monkeypatch, fake_harvest)
+
+    result = await sync_service._explore_job_entry_links(None, page, async_session, "X", HOME, set())
+
+    assert result == (0, 0)
+    assert harvested == [CAREERS]  # the self/home links were already visited
+
+
+async def test_explore_respects_the_page_budget(async_session, monkeypatch):
+    settings = sync_service.get_settings()
+    monkeypatch.setattr(settings, "scraper_max_explore_pages", 2)
+    graph = {
+        HOME: [
+            (f"https://www.4liberty.com/teams/{name}", f"Jobs in {name}")
+            for name in ("alpha", "beta", "gamma")
+        ]
+    }
+    page = _SiteGraphPage(graph)
+    harvested = []
+
+    async def fake_harvest(sh, pg, db, name, seen, max_pages, first_page_jobs=None):
+        harvested.append(pg.current)
+        return 0, 0
+
+    _patch_explore_io(monkeypatch, fake_harvest)
+
+    await sync_service._explore_job_entry_links(None, page, async_session, "X", HOME, set())
+
+    assert len(harvested) == 2
+
+
+ACC = "https://www.accenture.com/in-en/careers/jobdetails?id=ATCI-{n}_en&title={t}"
+
+
+def test_repeated_titles_match_their_links_in_page_order():
+    links = [
+        (ACC.format(n=1, t="Custom+Software+Engineer"), "read full job description"),
+        (ACC.format(n=1, t="Custom+Software+Engineer"), "custom software engineer"),
+        (ACC.format(n=2, t="Enterprise+Technology+Architect"), "enterprise technology architect"),
+        (ACC.format(n=3, t="Custom+Software+Engineer"), "custom software engineer"),
+    ]
+    real = {h.rstrip("/") for h, _ in links}
+    used = set()
+    picks = [
+        sync_service._snap_to_real_link("", title, "https://www.accenture.com/", links, real, used)
+        for title in ("Custom Software Engineer", "Enterprise Technology Architect", "Custom Software Engineer")
+    ]
+    assert picks == [links[0][0], links[2][0], links[3][0]]
+    assert sync_service._snap_to_real_link(
+        "", "Custom Software Engineer", "https://www.accenture.com/", links, real, used
+    ) == ""  # no fourth link left
+
+
+def test_job_detail_pages_are_postings_not_entry_links():
+    detail = ACC.format(n=5, t="Custom+Software+Engineer")
+    assert sync_service._looks_like_job_posting_link(detail) is True
+    links = [
+        (detail, "custom software engineer"),
+        ("https://www.accenture.com/in-en/blogs/blogs-careers", "careers blog"),
+        ("https://www.accenture.com/in-en/careers/jobsearch", "job search"),
+    ]
+    assert sync_service._job_entry_links(links, "https://www.accenture.com/in-en/careers", set(), 5) == [
+        "https://www.accenture.com/in-en/careers/jobsearch"
+    ]
+
+
+async def test_page_links_add_the_url_title_as_a_second_match_key():
+    class Page:
+        async def url(self):
+            return "https://www.accenture.com/in-en/careers/jobsearch"
+
+        async def evaluate(self, script):
+            return [
+                {
+                    "href": ACC.format(n=1, t="Custom+Software+Engineer"),
+                    "text": "Read full job description",
+                    "alt": "Custom Software Engineer",
+                }
+            ]
+
+    _, links, _ = await sync_service._page_links(Page())
+
+    assert [t for _, t in links] == ["read full job description", "custom software engineer"]
+
+
+class _ActResult:
+    def __init__(self, success, message=""):
+        self.data = type("D", (), {"success": success, "message": message})()
+
+
+class _PagSh:
+    """Fake Stagehand: act() outcome per action, in call order."""
+
+    def __init__(self, outcomes):
+        self.outcomes, self.acted = list(outcomes), []
+
+    async def act(self, action, page=None):
+        self.acted.append(action)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _PagPage:
+    def __init__(self, dom_clicks=True):
+        self.dom_clicks, self.evaluated = dom_clicks, 0
+
+    async def evaluate(self, script):
+        self.evaluated += 1
+        return self.dom_clicks
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+async def test_pagination_first_candidate_success_never_touches_the_dom():
+    sh, page = _PagSh([_ActResult(True)]), _PagPage()
+    assert await sync_service._advance_pagination(sh, page, ["next"]) is True
+    assert sh.acted == ["next"] and page.evaluated == 0
+
+
+async def test_pagination_falls_through_candidates_then_to_a_dom_click():
+    err = "-32602 Invalid mouse button"
+    # candidate "a": act fails, then the hardened retry's two re-acts fail too
+    # (no selector, so no send_click_event); candidate "b": act raises.
+    sh = _PagSh(
+        [_ActResult(False, err), _ActResult(False, err), _ActResult(False, err), RuntimeError("boom")]
+    )
+    page = _PagPage(dom_clicks=True)
+
+    assert await sync_service._advance_pagination(sh, page, ["a", "b"]) is True
+    assert page.evaluated == 1
+
+
+async def test_pagination_reports_failure_when_nothing_can_advance():
+    sh, page = _PagSh([RuntimeError("x")]), _PagPage(dom_clicks=False)
+    assert await sync_service._advance_pagination(sh, page, ["a"]) is False
+
+
+async def test_sync_company_stops_after_the_attempts_when_every_one_comes_back_empty(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        _saw_posting_links()
+        return 0, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None, None]
+    assert result["jobs_inserted"] == 0 and result["success"] is True
+
+
+async def test_sync_company_does_not_retry_a_site_with_no_listings(
+    async_session, monkeypatch
+):
+    """Clean run, 0 jobs, no posting links anywhere: one run, no retry."""
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        sync_service._evidence.get().job_links_max = 1  # below the threshold
+        return 0, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None]
+    assert result == {"success": True, "jobs_inserted": 0, "jobs_updated": 0, "failed": 0}
+
+
+async def test_sync_company_retries_when_model_listed_jobs_without_real_links(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if len(calls) == 1:
+            sync_service._evidence.get().unresolved_model_jobs = 5
+            return 0, 0
+        return 3, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None, None]
+    assert result["jobs_inserted"] == 3
+
+
+async def test_sync_company_retries_when_first_look_missed_obvious_job_links(
+    async_session, monkeypatch
+):
+    """Live case: actalentservices.com returned nothing on the
+    homepage (no jobs, no sections) though it links to careers.* — a miss."""
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        if len(calls) == 1:
+            sync_service._evidence.get().blank_assessment_with_job_entry = True
+            return 0, 0
+        return 15, 0
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/", async_session)
+
+    assert calls == [None, None]
+    assert result["jobs_inserted"] == 15
+
+
+@pytest.mark.parametrize(
+    "links,expected",
+    [
+        ([("https://careers.actalentservices.com/in/en", "")], True),
+        ([("https://example.com/about", "Join our team")], True),
+        ([("https://example.com/careers/", "Learn more")], True),
+        ([("https://example.com/about", "About us"), ("https://example.com/news", "News")], False),
+    ],
+)
+def test_has_job_entry_link(links, expected):
+    assert sync_service._has_job_entry_link(links) is expected
+
+
+@pytest.mark.parametrize(
+    "href,expected",
+    [
+        ("https://www.airswift.com/jobs/senior-system-architect-1281276", True),
+        ("https://www.careers-page.com/dilectus-workforce-solutions/job/7X57X433", True),
+        ("https://example.com/careers/job-details?jobId=12345", True),
+        ("https://acme.wd5.myworkdayjobs.com/External/job/Austin/Engineer_R123", True),
+        ("https://careers.cbre.com/en_US/careers/JobDetail/Plumber/299441", True),
+        ("https://www.airswift.com/jobs", False),
+        ("https://www.airswift.com/jobs?page_num=2", False),
+        ("https://www.airswift.com/candidates/it-jobs", False),
+        ("https://www.airswift.com/blog/job-interview-questions", False),
+        ("https://example.com/careers", False),
+    ],
+)
+def test_looks_like_job_posting_link(href, expected):
+    assert sync_service._looks_like_job_posting_link(href) is expected
+
+
+async def test_sync_company_stops_retrying_when_credits_are_exhausted(
+    async_session, monkeypatch
+):
+    _retry_settings(monkeypatch)
+    calls = []
+
+    async def fake_extract(url, db, model=None):
+        calls.append(model)
+        monkeypatch.setattr(sync_service, "credits_exhausted", lambda: "402 no credits")
+        raise RuntimeError("OpenRouter 402")
+
+    monkeypatch.setattr(sync_service, "_sync_via_extract", fake_extract)
+
+    result = await sync_service.sync_company("https://example.com/careers", async_session)
+
+    assert calls == [None]  # no retries once the key has no budget left
+    assert result["out_of_credits"] is True and result["success"] is False
+
+
 async def test_sync_company_reports_failure_when_extract_raises(
     async_session, monkeypatch
 ):
@@ -270,18 +852,24 @@ class _FakeStagehandInstance:
         self._extract_results = extract_results
         self._observe_results = observe_results
         self.extract_calls = 0
+        self.screenshot_flags: list[bool] = []
         self.observe_calls = 0
         self.act_calls = 0
         self.closed = False
 
-    async def extract(self, instruction, schema, *, page):
+    async def extract(self, instruction, schema, *, page, screenshot=False):
         result = self._extract_results[self.extract_calls]
         self.extract_calls += 1
+        self.screenshot_flags.append(bool(screenshot))
+        if isinstance(result, Exception):
+            raise result
         return result
 
     async def observe(self, instruction, *, page):
         result = self._observe_results[self.observe_calls]
         self.observe_calls += 1
+        if isinstance(result, Exception):
+            raise result
         return result
 
     async def act(self, action, *, page):
@@ -1069,6 +1657,371 @@ async def test_harvest_listing_keeps_a_genuine_absolute_apply_url(async_session)
     assert job.apply_url == "https://careers.example.com/1"
 
 
+def _job(n: int) -> "sync_service.ScrapedJob":
+    return sync_service.ScrapedJob(
+        title=f"Engineer {n}", location="Remote", apply_url=f"https://careers.example.com/{n}"
+    )
+
+
+async def test_harvest_listing_stops_only_after_five_empty_reads_in_a_row(async_session):
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(1)])] * 5,
+        observe_results=[_FakeObserveResult(["next"])],
+    )
+
+    inserted, _ = await sync_service._harvest_listing(
+        fake,
+        fake.browser.context._page,
+        async_session,
+        "example",
+        seen_apply_urls=set(),
+        max_pages=50,
+        first_page_jobs=[_job(1)],
+    )
+
+    assert inserted == 1
+    assert fake.extract_calls == 5
+    assert fake.observe_calls == 1
+
+
+async def test_harvest_listing_resumes_when_a_retry_finds_jobs(async_session):
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(1)]), _FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult(["next"]), _FakeObserveResult([])],
+    )
+
+    inserted, _ = await sync_service._harvest_listing(
+        fake,
+        fake.browser.context._page,
+        async_session,
+        "example",
+        seen_apply_urls=set(),
+        max_pages=50,
+        first_page_jobs=[_job(1)],
+    )
+
+    assert inserted == 2
+    assert fake.extract_calls == 2
+    assert fake.observe_calls == 2
+
+
+async def _harvest_with(fake, async_session, page=None, **kwargs):
+    return await sync_service._harvest_listing(
+        fake,
+        page or fake.browser.context._page,
+        async_session,
+        "example",
+        seen_apply_urls=set(),
+        max_pages=50,
+        first_page_jobs=[_job(1)],
+        **kwargs,
+    )
+
+
+async def test_harvest_listing_retries_a_page_read_after_a_dropped_connection(async_session):
+    fake = _FakeStagehandInstance(
+        extract_results=[ConnectionError("dropped"), _FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult(["next"]), _FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 2
+    assert fake.extract_calls == 2
+
+
+async def test_harvest_listing_retries_the_next_page_check_after_a_dropped_connection(
+    async_session,
+):
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(2)])],
+        observe_results=[
+            ConnectionError("dropped"),
+            _FakeObserveResult(["next"]),
+            _FakeObserveResult([]),
+        ],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 2
+    assert fake.observe_calls == 3
+
+
+async def test_harvest_listing_gives_up_after_the_retries_are_used(async_session):
+    fake = _FakeStagehandInstance(
+        extract_results=[ConnectionError("dropped")] * (sync_service._LLM_RETRIES + 1),
+        observe_results=[_FakeObserveResult(["next"])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 1
+    assert fake.extract_calls == sync_service._LLM_RETRIES + 1
+
+
+async def test_harvest_listing_does_not_retry_when_credits_are_exhausted(
+    async_session, monkeypatch
+):
+    monkeypatch.setattr(sync_service, "credits_exhausted", lambda: True)
+    fake = _FakeStagehandInstance(
+        extract_results=[ConnectionError("402"), _FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult(["next"])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 1
+    assert fake.extract_calls == 1
+
+
+async def test_harvest_listing_clicks_next_directly_when_the_next_page_check_finds_nothing(
+    async_session,
+):
+    clicks = iter([True, False])
+
+    class _Page(_FakePage):
+        async def url(self):
+            return "https://example.com/jobs"
+
+        async def evaluate(self, js):
+            return next(clicks) if js == sync_service._NEXT_PAGE_JS else []
+
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult([]), _FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session, page=_Page())
+
+    assert inserted == 2
+    assert fake.observe_calls == 2
+
+
+async def test_wait_for_listing_change_detects_a_changed_listing(monkeypatch):
+    signatures = iter([frozenset({"a"}), frozenset({"a"}), frozenset({"b"})])
+
+    async def _sig(page):
+        return next(signatures)
+
+    monkeypatch.setattr(sync_service, "_listing_signature", _sig)
+
+    assert await sync_service._wait_for_listing_change(_FakePage(), frozenset({"a"})) is True
+
+
+async def test_wait_for_listing_change_times_out_when_nothing_changes(monkeypatch):
+    async def _sig(page):
+        return frozenset({"a"})
+
+    monkeypatch.setattr(sync_service, "_listing_signature", _sig)
+    monkeypatch.setattr(sync_service, "_LISTING_CHANGE_TIMEOUT_S", 1.0)
+
+    assert await sync_service._wait_for_listing_change(_FakePage(), frozenset({"a"})) is False
+
+
+async def test_empty_read_detail_reports_what_the_page_shows_versus_the_model():
+    base = "https://www.accenture.com/in-en/careers"
+
+    class _Page:
+        async def url(self):
+            return f"{base}/jobsearch"
+
+        async def evaluate(self, js):
+            return [
+                {"href": f"{base}/jobdetails?id=A1&title=X", "text": "x"},
+                {"href": f"{base}/jobdetails?id=B2&title=Y", "text": "y"},
+                {"href": f"{base}/jobsearch", "text": "nav"},
+            ]
+
+    seen_job = sync_service.ScrapedJob(
+        title="X", location="", apply_url=f"{base}/jobdetails?id=A1&title=X"
+    )
+
+    detail, state = await sync_service._empty_read_detail(
+        _Page(), [seen_job], 3, {seen_job.apply_url}
+    )
+
+    assert "model returned 3 job(s), 1 after filtering, 1 with a usable link" in detail
+    assert "page shows 2 job link(s), 1 not seen before" in detail
+    assert state == "new"
+
+
+def _anchor_page(hrefs):
+    class _Page(_FakePage):
+        async def url(self):
+            return "https://www.accenture.com/in-en/careers/jobsearch"
+
+        async def evaluate(self, js):
+            return [{"href": h, "text": "x"} for h in hrefs]
+
+    return _Page()
+
+
+async def test_empty_read_detail_flags_a_page_showing_only_collected_jobs():
+    base = "https://www.accenture.com/in-en/careers"
+    a, b = f"{base}/jobdetails?id=A1&title=X", f"{base}/jobdetails?id=B2&title=Y"
+
+    _, state = await sync_service._empty_read_detail(_anchor_page([a, b]), [], 0, {a, b})
+
+    assert state == "stale"
+
+
+async def test_empty_read_detail_is_unknown_without_job_links():
+    _, state = await sync_service._empty_read_detail(
+        _anchor_page(["https://www.accenture.com/in-en/careers"]), [], 0, set()
+    )
+
+    assert state == "unknown"
+
+
+async def test_listing_signature_ignores_non_job_links():
+    base = "https://www.accenture.com/in-en/careers"
+    job = f"{base}/jobdetails?id=A1&title=X"
+
+    one = await sync_service._listing_signature(_anchor_page([job, f"{base}/ad-1"]))
+    two = await sync_service._listing_signature(_anchor_page([job, f"{base}/ad-2"]))
+
+    assert one == two == frozenset({job})
+
+
+async def test_harvest_listing_opens_a_next_link_directly_without_the_model(async_session):
+    next_urls = iter(["https://careers.example.com/jobs/page/2", None])
+
+    class _Page(_FakePage):
+        async def url(self):
+            return "https://careers.example.com/jobs"
+
+        async def evaluate(self, js):
+            if js == sync_service._NEXT_LINK_JS:
+                return next(next_urls)
+            if js == sync_service._NEXT_PAGE_JS:
+                return False
+            return []
+
+    page = _Page()
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session, page=page)
+
+    assert inserted == 2
+    assert page.goto_calls == ["https://careers.example.com/jobs/page/2"]
+    assert fake.observe_calls == 1  # only on page 2, which had no Next link
+
+
+async def test_harvest_listing_moves_on_from_a_page_showing_only_collected_jobs(
+    async_session, monkeypatch
+):
+    moves = []
+
+    async def _open_next(sh, page):
+        moves.append(1)
+        return True
+
+    async def _stale(page, jobs, raw_count, seen):
+        return "detail", "stale"
+
+    async def _changed(page, before):
+        return True
+
+    monkeypatch.setattr(sync_service, "_open_next_page_directly", _open_next)
+    monkeypatch.setattr(sync_service, "_empty_read_detail", _stale)
+    monkeypatch.setattr(sync_service, "_wait_for_listing_change", _changed)
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(1)]), _FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult(["next"]), _FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 2
+    assert moves == [1]  # the stale page triggered exactly one extra move
+
+
+async def test_harvest_listing_reloads_a_blank_page_opened_by_its_address(
+    async_session, monkeypatch
+):
+    next_urls = iter(["https://careers.example.com/jobs/page/2", None])
+
+    class _Page(_FakePage):
+        async def url(self):
+            return "https://careers.example.com/jobs/page/2"
+
+        async def evaluate(self, js):
+            if js == sync_service._NEXT_LINK_JS:
+                return next(next_urls)
+            if js == sync_service._NEXT_PAGE_JS:
+                return False
+            return []
+
+    async def _blank(page, jobs, raw_count, seen):
+        return "detail", "unknown"
+
+    async def _changed(page, before):
+        return True
+
+    monkeypatch.setattr(sync_service, "_empty_read_detail", _blank)
+    monkeypatch.setattr(sync_service, "_wait_for_listing_change", _changed)
+    page = _Page()
+    fake = _FakeStagehandInstance(
+        extract_results=[
+            _FakeExtractResult([]),
+            _FakeExtractResult([]),
+            _FakeExtractResult([_job(2)]),
+        ],
+        observe_results=[_FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session, page=page)
+
+    assert inserted == 2
+    # opened once by its address, then reloaded after the second blank read
+    assert page.goto_calls == ["https://careers.example.com/jobs/page/2"] * 2
+
+
+@pytest.mark.parametrize(
+    "page_state,listing_changed,should_move",
+    [
+        # Jobs not collected yet are on screen: never skip them, even when the
+        # change-wait gave up (live: gevernova.com page 2 rendered late).
+        ("new", False, False),
+        ("new", True, False),
+        # No recognisable job links: fall back to whether the listing changed.
+        ("unknown", False, True),
+        ("unknown", True, False),
+    ],
+)
+async def test_harvest_listing_only_moves_on_from_a_page_that_never_turned(
+    async_session, monkeypatch, page_state, listing_changed, should_move
+):
+    moves = []
+
+    async def _open_next(sh, page):
+        moves.append(1)
+        return True
+
+    async def _detail(page, jobs, raw_count, seen):
+        return "detail", page_state
+
+    async def _changed(page, before):
+        return listing_changed
+
+    monkeypatch.setattr(sync_service, "_open_next_page_directly", _open_next)
+    monkeypatch.setattr(sync_service, "_empty_read_detail", _detail)
+    monkeypatch.setattr(sync_service, "_wait_for_listing_change", _changed)
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([]), _FakeExtractResult([_job(2)])],
+        observe_results=[_FakeObserveResult(["next"]), _FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 2
+    assert moves == ([1] if should_move else [])
+
+
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -1268,3 +2221,345 @@ async def test_category3_click_fallback_failure_does_not_abandon_other_sections(
     )
 
     assert inserted == 1
+
+
+class _GotoPage(_FakePage):
+    """goto() always returns; url() walks a scripted list of where it landed."""
+
+    def __init__(self, urls, raise_on_goto=None, ready_state="complete"):
+        super().__init__()
+        self._urls = list(urls)
+        self._raise = raise_on_goto
+        self._ready = ready_state
+
+    async def goto(self, url):
+        await super().goto(url)
+        if self._raise:
+            raise self._raise
+
+    async def url(self):
+        return self._urls.pop(0) if len(self._urls) > 1 else self._urls[0]
+
+    async def evaluate(self, js):
+        return self._ready
+
+
+async def test_goto_with_retry_retries_when_the_browser_shows_its_error_page():
+    page = _GotoPage(["chrome-error://chromewebdata/", "https://x.example.com/jobs/page/6"])
+
+    await sync_service._goto_with_retry(page, "https://x.example.com/jobs/page/6")
+
+    assert len(page.goto_calls) == 2
+
+
+async def test_goto_with_retry_gives_up_when_every_load_is_an_error_page():
+    page = _GotoPage(["chrome-error://chromewebdata/"])
+
+    with pytest.raises(Exception):
+        await sync_service._goto_with_retry(page, "https://x.example.com/jobs/page/6")
+
+    assert len(page.goto_calls) == sync_service._GOTO_ATTEMPTS
+
+
+async def test_goto_with_retry_accepts_a_slow_page_that_did_load():
+    page = _GotoPage(
+        ["https://x.example.com/jobs"], raise_on_goto=TimeoutError("domcontentloaded")
+    )
+
+    await sync_service._goto_with_retry(page, "https://x.example.com/jobs")
+
+    assert len(page.goto_calls) == 1
+
+
+async def test_harvest_listing_ends_at_once_when_the_page_has_nothing_new_and_no_next_control(
+    async_session, monkeypatch
+):
+    async def _stale(page, jobs, raw_count, seen):
+        return "detail", "stale"
+
+    async def _no_next(sh, page):
+        return False
+
+    monkeypatch.setattr(sync_service, "_empty_read_detail", _stale)
+    monkeypatch.setattr(sync_service, "_open_next_page_directly", _no_next)
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([_job(1)])] * 5,
+        observe_results=[_FakeObserveResult(["next"])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session)
+
+    assert inserted == 1
+    assert fake.extract_calls == 1  # one read of the end page, not five
+
+
+async def test_enter_listing_iframe_skips_boards_already_visited():
+    class _Page(_FakePage):
+        async def url(self):
+            return "https://www.zeroimpactenergy.com/careers"
+
+        async def evaluate(self, js):
+            return [
+                _frame("https://a.careerplug.com/?embed=1"),
+                _frame("https://b.careerplug.com/?embed=1", w=0, h=0),
+            ]
+
+    page = _Page()
+    visited = {"https://a.careerplug.com/?embed=1"}
+
+    assert await sync_service._enter_listing_iframe(page, visited) is True
+    assert page.goto_calls == ["https://b.careerplug.com/?embed=1"]
+    assert visited == {"https://a.careerplug.com/?embed=1", "https://b.careerplug.com/?embed=1"}
+
+
+def _link(href, text="", alt=""):
+    return {"href": href, "text": text, "alt": alt}
+
+
+class _LinkPage(_FakePage):
+    def __init__(self, anchors, url="https://careers.example.com/SearchJobs/"):
+        super().__init__()
+        self._anchors, self._url = anchors, url
+
+    async def url(self):
+        return self._url
+
+    async def evaluate(self, js):
+        return self._anchors if js == sync_service._ANCHORS_JS else False
+
+
+async def test_jobs_from_page_links_takes_titles_from_the_link_text_or_the_address():
+    base = "https://careers.cbre.com/en_US/careers"
+    page = _LinkPage([
+        _link(f"{base}/JobDetail/Plumber/299441", "Plumber\nChelmsford - England"),
+        _link(f"{base}/JobDetail/Mobile-HVAC-Technician/299955", "Apply now"),
+        _link(f"{base}/JobDetail/Welder/299777", "Welder\nDallas"),
+        _link(f"{base}/JobDetail/Old-Job/111111", "Old Job"),
+        _link(f"{base}/SearchJobs/?jobOffset=25", "Next"),
+        _link(f"{base}/JobDetail/Plumber/299441", "Plumber"),  # same link twice
+    ])
+
+    jobs = await sync_service._jobs_from_page_links(page, {f"{base}/JobDetail/Old-Job/111111"})
+
+    assert [(j.title, j.apply_url.rsplit("/", 1)[-1]) for j in jobs] == [
+        ("Plumber", "299441"),
+        ("Mobile HVAC Technician", "299955"),
+        ("Welder", "299777"),
+    ]
+
+
+async def test_harvest_listing_takes_jobs_from_the_page_when_the_model_keeps_missing_them(
+    async_session,
+):
+    base = "https://careers.example.com/JobDetail"
+    page = _LinkPage([
+        _link("https://careers.example.com/1", "Engineer 1"),  # the first page's own job
+        _link(f"{base}/Plumber/300001", "Plumber"),
+        _link(f"{base}/Electrician/300002", "Electrician"),
+        _link(f"{base}/Welder/300003", "Welder"),
+    ])
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([]), _FakeExtractResult([])],
+        observe_results=[_FakeObserveResult(["next"]), _FakeObserveResult([])],
+    )
+
+    inserted, _ = await _harvest_with(fake, async_session, page=page)
+
+    assert inserted == 1 + 3  # the first page's job, then three taken from the links
+    assert fake.extract_calls == 2  # two empty reads, then the rescue instead of a third
+
+
+async def test_jobs_from_page_links_ignores_a_lone_footer_or_signup_link():
+    """Live: cbre.com/services -> "Join our Talent Community" (jobId=129)."""
+    page = _LinkPage([
+        _link("https://careers.cbre.com/en_US/careers/ApplicationMethods?jobId=129",
+              "Join our Talent Community"),
+    ])
+
+    assert await sync_service._jobs_from_page_links(page, set()) == []
+
+
+async def test_jobs_from_page_links_skips_signup_links_but_keeps_a_real_listing():
+    base = "https://careers.example.com/JobDetail"
+    page = _LinkPage([
+        _link(f"{base}/Plumber/300001", "Plumber"),
+        _link(f"{base}/Electrician/300002", "Electrician"),
+        _link(f"{base}/Welder/300003", "Welder"),
+        _link("https://careers.example.com/ApplicationMethods?jobId=129", "Join our Talent Community"),
+    ])
+
+    jobs = await sync_service._jobs_from_page_links(page, set())
+
+    assert [j.title for j in jobs] == ["Plumber", "Electrician", "Welder"]
+
+
+async def test_jobs_from_page_links_needs_several_links_to_call_it_a_listing():
+    base = "https://careers.example.com/JobDetail"
+    page = _LinkPage([_link(f"{base}/Plumber/300001", "Plumber"), _link(f"{base}/Welder/300003", "Welder")])
+
+    assert await sync_service._jobs_from_page_links(page, set()) == []
+
+
+async def test_jobs_from_page_links_ignores_apply_button_links_that_carry_a_job_id():
+    """Live: careers.cbre.com listing pages carry both /JobDetail/<title>/<id>
+    and /ApplicationMethods?jobId=<id> for every job."""
+    base = "https://careers.cbre.com/en_US/careers"
+    anchors = []
+    for title, job_id in [("Plumber", "300001"), ("Electrician", "300002"), ("Welder", "300003")]:
+        anchors.append(_link(f"{base}/JobDetail/{title}/{job_id}", title))
+        anchors.append(_link(f"{base}/ApplicationMethods?jobId={job_id}&source=External", "Apply now"))
+    page = _LinkPage(anchors)
+
+    jobs = await sync_service._jobs_from_page_links(page, set())
+
+    assert [j.title for j in jobs] == ["Plumber", "Electrician", "Welder"]
+    assert all("JobDetail" in j.apply_url for j in jobs)
+
+
+class _ShotPage(_FakePage):
+    """A page whose screenshot() writes a file, like Stagehand's."""
+
+    def __init__(self):
+        super().__init__()
+        self.screenshots_taken = 0
+
+    async def screenshot(self, *, path=None, type="png"):
+        self.screenshots_taken += 1
+        if path is not None:
+            from pathlib import Path
+            Path(path).write_bytes(b"png")
+        return b"png"
+
+
+def _shot_settings(monkeypatch, tmp_path, *, retry4=True, retry5=True, debug=False):
+    settings = sync_service.get_settings()
+    monkeypatch.setattr(settings, "scraper_retry4_screenshot", retry4)
+    monkeypatch.setattr(settings, "scraper_retry5_screenshot_to_model", retry5)
+    monkeypatch.setattr(settings, "scraper_debug_screenshots", debug)
+    monkeypatch.setattr(settings, "scraper_screenshot_dir", tmp_path)
+
+
+async def _five_empty_reads(async_session, page):
+    # the first page's job is new; every re-read of the next page is empty
+    fake = _FakeStagehandInstance(
+        extract_results=[_FakeExtractResult([])] * 5,
+        observe_results=[_FakeObserveResult(["next"])],
+    )
+    await _harvest_with(fake, async_session, page=page)
+    return fake
+
+
+async def test_only_the_fifth_read_sends_a_screenshot_to_the_model(
+    async_session, monkeypatch, tmp_path
+):
+    _shot_settings(monkeypatch, tmp_path, debug=False)
+    page = _ShotPage()
+
+    fake = await _five_empty_reads(async_session, page)
+
+    assert fake.screenshot_flags == [False, False, False, False, True]
+    assert page.screenshots_taken == 0  # debugging off: nothing is taken or stored
+    assert list(tmp_path.rglob("*.png")) == []
+
+
+async def test_debug_mode_saves_both_the_reference_and_the_model_screenshot(
+    async_session, monkeypatch, tmp_path
+):
+    _shot_settings(monkeypatch, tmp_path, debug=True)
+    page = _ShotPage()
+
+    fake = await _five_empty_reads(async_session, page)
+
+    names = sorted(p.name.split("_", 1)[1] for p in tmp_path.rglob("*.png"))
+    assert names == ["page2_read4_reference.png", "page2_read5_sent-to-model.png"]
+    assert fake.screenshot_flags == [False, False, False, False, True]  # reference is never sent
+
+
+async def test_the_fifth_read_screenshot_can_be_turned_off(async_session, monkeypatch, tmp_path):
+    _shot_settings(monkeypatch, tmp_path, retry5=False, debug=True)
+    page = _ShotPage()
+
+    fake = await _five_empty_reads(async_session, page)
+
+    assert fake.screenshot_flags == [False] * 5
+    assert [p.name.split("_", 1)[1] for p in tmp_path.rglob("*.png")] == ["page2_read4_reference.png"]
+
+
+async def test_the_reference_screenshot_can_be_turned_off_in_debug_mode(
+    async_session, monkeypatch, tmp_path
+):
+    _shot_settings(monkeypatch, tmp_path, retry4=False, debug=True)
+    page = _ShotPage()
+
+    await _five_empty_reads(async_session, page)
+
+    assert [p.name.split("_", 1)[1] for p in tmp_path.rglob("*.png")] == [
+        "page2_read5_sent-to-model.png"
+    ]
+
+
+async def test_a_failing_debug_screenshot_never_stops_the_scrape(
+    async_session, monkeypatch, tmp_path
+):
+    _shot_settings(monkeypatch, tmp_path, debug=True)
+
+    class _Broken(_ShotPage):
+        async def screenshot(self, **kwargs):
+            raise RuntimeError("no screenshot")
+
+    fake = await _five_empty_reads(async_session, _Broken())
+
+    assert fake.extract_calls == 5
+
+
+async def test_empty_read_detail_does_not_count_apply_buttons_as_job_links():
+    base = "https://careers.cbre.com/en_US/careers"
+    job = f"{base}/JobDetail/Plumber/299441"
+    page = _anchor_page([job, f"{base}/ApplicationMethods?jobId=299441&source=External"])
+
+    _, state = await sync_service._empty_read_detail(page, [], 0, {job})
+
+    assert state == "stale"  # the only unseen "job link" was an apply button
+
+
+async def _stale_harvest(async_session, monkeypatch, extract_results):
+    async def _open_next(sh, page):
+        return True
+
+    async def _stale(page, jobs, raw_count, seen):
+        return "detail", "stale"
+
+    async def _changed(page, before):
+        return True
+
+    monkeypatch.setattr(sync_service, "_open_next_page_directly", _open_next)
+    monkeypatch.setattr(sync_service, "_empty_read_detail", _stale)
+    monkeypatch.setattr(sync_service, "_wait_for_listing_change", _changed)
+    fake = _FakeStagehandInstance(
+        extract_results=extract_results,
+        observe_results=[_FakeObserveResult(["next"]), _FakeObserveResult([])],
+    )
+    inserted, _ = await _harvest_with(fake, async_session)
+    return fake, inserted
+
+
+async def test_harvest_listing_ends_after_three_different_pages_with_nothing_new(
+    async_session, monkeypatch
+):
+    seen_job = _FakeExtractResult([_job(1)])
+    fake, inserted = await _stale_harvest(async_session, monkeypatch, [seen_job] * 6)
+
+    assert inserted == 1
+    assert fake.extract_calls == 3  # three different pages, one read each — not five reads of one
+
+
+async def test_harvest_listing_keeps_going_when_a_later_page_has_new_jobs(
+    async_session, monkeypatch
+):
+    seen_job = _FakeExtractResult([_job(1)])
+    fake, inserted = await _stale_harvest(
+        async_session, monkeypatch, [seen_job, seen_job, _FakeExtractResult([_job(2)])]
+    )
+
+    assert inserted == 2  # the overlapping pages did not end the scrape
+    assert fake.extract_calls == 3
