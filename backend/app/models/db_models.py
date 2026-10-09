@@ -49,6 +49,16 @@ class Profile(Base):
     willing_to_relocate: Mapped[bool | None] = mapped_column(default=None)
     skills: Mapped[list[str] | None] = mapped_column(JSON, default=None)
     summary: Mapped[str | None] = mapped_column(Text, default=None)
+    # The profile form's repeatable sections, stored as entered (lists of
+    # {degree, university, fieldOfStudy, startDate, endDate, grade, ...} /
+    # {company, role, location, startDate, endDate, currentlyWorking, ...}).
+    # Before these existed, both were silently dropped on every save.
+    education: Mapped[list[dict] | None] = mapped_column(JSON, default=None)
+    employment: Mapped[list[dict] | None] = mapped_column(JSON, default=None)
+    # Every other form field without a dedicated column (alternate phone,
+    # timezone, extra social links, job preferences, EEO answers, ...), so
+    # the whole form round-trips instead of losing them on reload.
+    extra: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -164,18 +174,6 @@ class RunEvent(Base):
     application: Mapped["Application"] = relationship(back_populates="events")
 
 
-class FieldCache(Base):
-    """(provider, form_signature) -> resolved field->selector map."""
-
-    __tablename__ = "field_cache"
-
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    form_signature: Mapped[str] = mapped_column(Text, primary_key=True)
-    selector_map: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    hits: Mapped[int] = mapped_column(default=0)
-
-
 class AnswerLibrary(Base):
     """
     question_hash -> approved answer, scoped per profile. `source` and
@@ -211,3 +209,53 @@ class TrackedCompany(Base):
     ats: Mapped[str | None] = mapped_column(Text, default=None)
     enabled: Mapped[bool] = mapped_column(default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
+
+
+class TrackedCompanySyncState(Base):
+    """
+    Singleton row (always id=1) tracking the "sync every company in
+    portals.yml" background job's progress — separate from the manual
+    paste-a-URL sync (api/admin.py's plain /sync route, unchanged), which
+    is a one-shot request/response with no state to persist.
+
+    This one is deliberately persisted rather than kept as in-memory
+    asyncio.Event flags (the pattern worker/queue_runner.py uses for a
+    single application's pause/resume): a full pass over 400+ companies is
+    a multi-hour, likely multi-day operation, and per direct user
+    direction it must survive being paused and picked back up later —
+    including after a server restart, which an in-memory-only flag
+    cannot survive.
+
+    `status`: "idle" (never run) | "running" | "paused" | "completed"
+    (a full pass finished — the next Start click begins a fresh one).
+    A `status="running"` row found at server startup is a crash artifact
+    (no process can still be running it) and main.py's lifespan resets it
+    to "paused" so the next Start click resumes cleanly rather than
+    silently doing nothing.
+
+    No stored cursor/pointer: "next company to process" is always a live
+    query (see TrackedCompanyRepository.next_eligible) — enabled AND
+    (never synced OR last_synced_at older than the resync window). Once a
+    company is attempted, `last_synced_at` moves to now regardless of
+    success or failure, which is what makes that query self-resuming
+    after a pause with no separate bookkeeping: everything already
+    attempted this pass is no longer "eligible", so the same query just
+    returns the next untouched company.
+    """
+
+    __tablename__ = "tracked_company_sync_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    status: Mapped[str] = mapped_column(Text, default="idle")
+    total_eligible: Mapped[int] = mapped_column(default=0)
+    processed: Mapped[int] = mapped_column(default=0)
+    jobs_inserted: Mapped[int] = mapped_column(default=0)
+    jobs_updated: Mapped[int] = mapped_column(default=0)
+    companies_failed: Mapped[int] = mapped_column(default=0)
+    current_company_name: Mapped[str | None] = mapped_column(Text, default=None)
+    last_company_error: Mapped[str | None] = mapped_column(Text, default=None)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

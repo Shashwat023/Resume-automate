@@ -1,9 +1,15 @@
 import { useState } from 'react';
-import { adminApi, type SyncResult } from '@/api/admin';
-import { useAdminStatsQuery } from '@/features/admin/services/admin.queries';
+import { useQueryClient } from '@tanstack/react-query';
+import { adminApi, resetTestData, type SyncResult } from '@/api/admin';
 import {
-  Globe, Play, CheckCircle, XCircle, RefreshCw,
-  Database, TrendingUp, Clock, AlertTriangle, Plus, Trash2
+  useAdminStatsQuery,
+  useTrackedSyncStatusQuery,
+  useStartTrackedSyncMutation,
+  usePauseTrackedSyncMutation,
+} from '@/features/admin/services/admin.queries';
+import {
+  Globe, Play, CheckCircle, XCircle, RefreshCw, Pause,
+  Database, TrendingUp, Clock, AlertTriangle, Plus, Trash2, ListChecks
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -13,6 +19,31 @@ export const AdminPage = () => {
   const [isRunning, setIsRunning] = useState(false);
 
   const { data: stats, refetch: refetchStats } = useAdminStatsQuery();
+  const { data: trackedSync } = useTrackedSyncStatusQuery();
+  const startTrackedSync = useStartTrackedSyncMutation();
+  const pauseTrackedSync = usePauseTrackedSyncMutation();
+  const queryClient = useQueryClient();
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleResetTestData = async () => {
+    if (!window.confirm('Delete all jobs, applications, run events and bulk-sync progress? Profile, resume and answers are kept.')) return;
+    setIsResetting(true);
+    try {
+      const counts = await resetTestData();
+      setResults([]);
+      queryClient.invalidateQueries();
+      toast.success(`DB cleaned: ${counts.jobs} jobs, ${counts.applications} applications removed; ${counts.tracked_companies_reset} companies reset`);
+    } catch (err: any) {
+      toast.error(`Reset failed: ${err?.response?.data?.detail ?? err.message}`);
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  const trackedSyncStatus = trackedSync?.status ?? 'idle';
+  const trackedSyncIsRunning = trackedSyncStatus === 'running';
+  const trackedSyncStartLabel =
+    trackedSyncStatus === 'paused' ? 'Resume Syncing' : 'Start Syncing Tracked Companies';
 
   const addUrl = () => setUrls(prev => [...prev, '']);
   const removeUrl = (i: number) => setUrls(prev => prev.filter((_, idx) => idx !== i));
@@ -66,11 +97,22 @@ export const AdminPage = () => {
     <div className="space-y-6 max-w-5xl mx-auto">
 
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Admin Panel</h1>
-        <p className="text-gray-500 dark:text-gray-400 mt-1">
-          Scrape company job portals and sync them into the database.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Admin Panel</h1>
+          <p className="text-gray-500 dark:text-gray-400 mt-1">
+            Scrape company job portals and sync them into the database.
+          </p>
+        </div>
+        {/* TEMPORARY: test-run cleanup */}
+        <button
+          onClick={handleResetTestData}
+          disabled={isResetting || isRunning || trackedSyncIsRunning}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg border border-red-300 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          <Trash2 className="w-4 h-4" />
+          {isResetting ? 'Cleaning…' : 'Clean DB (test)'}
+        </button>
       </div>
 
       {/* Stats row */}
@@ -106,13 +148,104 @@ export const AdminPage = () => {
         </div>
       </div>
 
-      {/* URL Input Panel */}
+      {/* Tracked Companies Bulk Sync */}
       <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-[#18181b] p-6 space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold flex items-center gap-2">
-            <Globe className="w-4 h-4 text-indigo-500" />
-            Company URLs to Scrape
+            <ListChecks className="w-4 h-4 text-indigo-500" />
+            Sync All Tracked Companies
           </h2>
+          {trackedSync && trackedSync.total_eligible > 0 && (
+            <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+              {trackedSync.processed} / {trackedSync.total_eligible} companies
+            </span>
+          )}
+        </div>
+
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          Scrapes every company listed in <code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">config/portals.yml</code>,
+          not just a URL you paste below. A company already synced recently is skipped automatically, so
+          re-running this only picks up newly-posted jobs. This can take hours across hundreds of companies —
+          pause any time and resume later from exactly where it left off, even after restarting the server.
+        </p>
+
+        {trackedSync && trackedSync.total_eligible > 0 && (
+          <div className="space-y-2">
+            <div className="w-full h-2 rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden">
+              <div
+                className="h-full bg-indigo-600 transition-all duration-500"
+                style={{
+                  width: `${Math.round((trackedSync.processed / trackedSync.total_eligible) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+              <span className="text-green-600 dark:text-green-400 font-medium">+{trackedSync.jobs_inserted} inserted</span>
+              <span className="text-amber-600 dark:text-amber-400 font-medium">~{trackedSync.jobs_updated} updated</span>
+              {trackedSync.companies_failed > 0 && (
+                <span className="text-red-500 font-medium">{trackedSync.companies_failed} companies failed</span>
+              )}
+              {trackedSyncIsRunning && trackedSync.current_company_name && (
+                <span className="flex items-center gap-1">
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                  Currently syncing: <strong className="text-gray-700 dark:text-gray-300">{trackedSync.current_company_name}</strong>
+                </span>
+              )}
+              {trackedSyncStatus === 'paused' && (
+                <span className="text-amber-600 dark:text-amber-400 font-medium">Paused</span>
+              )}
+              {trackedSyncStatus === 'completed' && (
+                <span className="text-green-600 dark:text-green-400 font-medium">
+                  <CheckCircle className="w-3 h-3 inline mr-1" /> Pass complete
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-3">
+          <button
+            onClick={() => startTrackedSync.mutate()}
+            disabled={trackedSyncIsRunning || startTrackedSync.isPending}
+            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors text-sm"
+          >
+            {trackedSyncIsRunning ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                Syncing...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 fill-current" />
+                {trackedSyncStartLabel}
+              </>
+            )}
+          </button>
+          {trackedSyncIsRunning && (
+            <button
+              onClick={() => pauseTrackedSync.mutate()}
+              disabled={pauseTrackedSync.isPending}
+              className="flex items-center justify-center gap-2 px-6 py-3 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 text-gray-700 dark:text-gray-300 font-semibold rounded-lg transition-colors text-sm"
+            >
+              <Pause className="w-4 h-4" />
+              Pause
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* URL Input Panel */}
+      <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-[#18181b] p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <Globe className="w-4 h-4 text-indigo-500" />
+              Company URLs to Scrape
+            </h2>
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+              For a one-off company not in portals.yml, or to re-check it right now.
+            </p>
+          </div>
           <button
             onClick={addUrl}
             disabled={isRunning}

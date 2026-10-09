@@ -1,5 +1,8 @@
-import { useState } from 'react';
 import { useThemeStore } from '../store/themeStore';
+import {
+  useSettingsStore,
+  QUEUE_POLLING_OPTIONS,
+} from '../store/settingsStore';
 import { useProfileStore } from '../store/profileStore';
 import { downloadJson } from '@/lib/exportJson';
 import { Settings, Moon, Sun, Monitor, PlayCircle, ShieldAlert, Trash2 } from 'lucide-react';
@@ -10,8 +13,8 @@ import { motion } from 'framer-motion';
 export const SettingsPage = () => {
   const { theme, setTheme } = useThemeStore();
   const exportProfile = useProfileStore((state) => state.exportProfile);
-  const [pollingInterval, setPollingInterval] = useState('2000');
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const pollingIntervalMs = useSettingsStore((s) => s.queuePollingIntervalMs);
+  const setPollingIntervalMs = useSettingsStore((s) => s.setQueuePollingIntervalMs);
 
   const handleClearCache = () => {
     localStorage.clear();
@@ -94,33 +97,16 @@ export const SettingsPage = () => {
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">How often the frontend checks backend status.</p>
               </div>
               <select
-                value={pollingInterval}
-                onChange={(e) => setPollingInterval(e.target.value)}
+                value={pollingIntervalMs}
+                onChange={(e) => setPollingIntervalMs(Number(e.target.value))}
                 className="rounded-md border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
-                <option value="1000">1 Second (Intensive)</option>
-                <option value="2000">2 Seconds (Default)</option>
-                <option value="5000">5 Seconds (Relaxed)</option>
+                {QUEUE_POLLING_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-medium text-gray-900 dark:text-gray-100">Desktop Notifications</h4>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Alert me when a queue run finishes.</p>
-              </div>
-              <button 
-                onClick={() => setNotificationsEnabled(!notificationsEnabled)}
-                className={clsx(
-                  "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-                  notificationsEnabled ? "bg-indigo-600" : "bg-gray-200 dark:bg-gray-700"
-                )}
-              >
-                <span className={clsx(
-                  "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
-                  notificationsEnabled ? "translate-x-5" : "translate-x-0"
-                )} />
-              </button>
             </div>
           </div>
         </section>

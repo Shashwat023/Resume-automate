@@ -30,3 +30,32 @@ export const adminApi = {
     };
   },
 };
+
+/**
+ * "Sync all tracked companies" (config/portals.yml) — a separate button
+ * from the manual paste-a-URL flow above. Unlike syncCompany, these calls
+ * return immediately: the actual multi-hour crawl runs as a background
+ * job on the server (see backend/app/services/scraper/bulk_sync_service.py),
+ * polled via getTrackedSyncStatus rather than awaited directly.
+ */
+export interface TrackedSyncStatus {
+  status: 'idle' | 'running' | 'paused' | 'completed';
+  total_eligible: number;
+  processed: number;
+  jobs_inserted: number;
+  jobs_updated: number;
+  companies_failed: number;
+  current_company_name: string | null;
+  started_at: string | null;
+  updated_at: string;
+}
+
+export const trackedSyncApi = {
+  start: (): Promise<TrackedSyncStatus> => api.post('/api/admin/sync-tracked/start'),
+  pause: (): Promise<TrackedSyncStatus> => api.post('/api/admin/sync-tracked/pause'),
+  getStatus: (): Promise<TrackedSyncStatus> => api.get('/api/admin/sync-tracked/status'),
+};
+
+// TEMPORARY test helper — see backend api/admin.py reset_test_data.
+export const resetTestData = (): Promise<Record<string, number>> =>
+  api.post('/api/admin/reset-test-data');

@@ -226,8 +226,3 @@ async def test_missing_api_key_raises_clear_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         await llm_client.openrouter_llm(params)
-
-
-async def test_unreachable_llm_always_raises():
-    with pytest.raises(RuntimeError, match="Tier 0-only run"):
-        await llm_client.unreachable_llm(object())

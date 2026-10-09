@@ -2,6 +2,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Play, FileText, User } from 'lucide-react';
 import { getStoredProfileId } from '@/lib/session';
 import { useResumeStore } from '../../../store/resumeStore';
+import { resumeFileName } from '../../../lib/resumeFile';
 
 
 interface ConfirmQueueDialogProps {
@@ -76,7 +77,7 @@ export const ConfirmQueueDialog = ({ isOpen, onClose, onConfirm, jobCount, isPen
                       <div>
                         <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Default Resume</p>
                         <p className="text-xs text-gray-500 dark:text-gray-400">
-                          {activeResume?.file_name || activeResume?.resume_url?.split('/').pop() || 'No resume uploaded'}
+                          {resumeFileName(activeResume) || 'No resume uploaded'}
                         </p>
                       </div>
                     </div>

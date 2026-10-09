@@ -1,5 +1,6 @@
 import { RefreshCw, Trash2, Download, ExternalLink } from 'lucide-react';
 import type { Resume } from '../../../types';
+import { resumeFileName } from '../../../lib/resumeFile';
 
 interface ResumeToolbarProps {
   resume: Resume;
@@ -22,7 +23,7 @@ export const ResumeToolbar = ({ resume, onReplace, onDelete }: ResumeToolbarProp
       
       <a
         href={resume.resume_url}
-        download={resume.file_name}
+        download={resumeFileName(resume)}
         className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors shadow-sm"
       >
         <Download className="w-4 h-4" />

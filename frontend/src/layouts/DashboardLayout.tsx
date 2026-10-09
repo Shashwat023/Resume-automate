@@ -5,7 +5,7 @@ import { useUserStore } from '../store/userStore';
 import { ROUTES } from '../config/routes';
 import { 
   LayoutDashboard, Search, Upload, User, Settings, Menu, 
-  Bell, Moon, Sun, Monitor, Play, LogOut, ChevronDown 
+  Bell, Moon, Sun, Monitor, Play, LogOut, ChevronDown, SlidersHorizontal 
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -43,16 +43,21 @@ export const DashboardLayout = () => {
   const navItems = [
     { name: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutDashboard },
     { name: 'Search Jobs', path: ROUTES.SEARCH, icon: Search },
-    { name: 'Queue', path: '/queue', icon: Play },
+    { name: 'Queue', path: ROUTES.QUEUE, icon: Play },
     { name: 'Upload Resume', path: ROUTES.UPLOAD_RESUME, icon: Upload },
     { name: 'Profile', path: ROUTES.PROFILE, icon: User },
     { name: 'Admin', path: ROUTES.ADMIN, icon: Settings },
+    { name: 'Settings', path: ROUTES.SETTINGS, icon: SlidersHorizontal },
   ];
 
   const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
 
-  // Derive breadcrumb from path
-  const currentPathName = navItems.find(item => item.path === location.pathname)?.name || 'Dashboard';
+  // Derive breadcrumb from path. An unmatched path is NOT the dashboard —
+  // saying so made /settings and the 404 page both render "Platform /
+  // Dashboard" (FLAGGED.md #34.7).
+  const currentPathName =
+    navItems.find(item => item.path === location.pathname)?.name ??
+    (location.pathname === ROUTES.DASHBOARD ? 'Dashboard' : 'Not Found');
 
   const handleLogout = () => {
     // Add logic here to clear user session

@@ -150,6 +150,32 @@ async def run_application(application_id: str) -> None:
                 await db.commit()
                 return
 
+            # Real, live-caught bug: a job scraped before the scraper's own
+            # apply_url validation existed (see sync_service.py's
+            # _looks_like_real_apply_url, FLAGGED.md #38) can sit in the
+            # jobs table with a non-URL value — a bare requisition number
+            # like "8-12876" — from the extract() model echoing SOME
+            # plausible-looking text when it had no real href to copy.
+            # Nothing here checked that before calling `page.goto()`, so
+            # Chrome's own CDP layer rejected it outright
+            # (`RPCError: -32000 Cannot navigate to invalid URL`) — the
+            # application still ended up FAILED (the outer try/except two
+            # blocks down already catches this), but with zero indication
+            # to the user that the JOB record itself, not the run, is what's
+            # broken, and only after fully launching a Chrome session for
+            # nothing. Checked here, before any browser work starts, so the
+            # failure is both cheap and says what's actually wrong.
+            if not job.apply_url.startswith(("http://", "https://")):
+                application.status = st.FAILED
+                application.error = (
+                    f"This job's stored link isn't a real URL "
+                    f"({job.apply_url!r}) — it was likely scraped before a "
+                    f"broken source page could be read correctly. Re-sync "
+                    f"this company or remove the job rather than retrying."
+                )
+                await db.commit()
+                return
+
             profile_dict = {
                 c.name: getattr(profile, c.name) for c in profile.__table__.columns
             }
@@ -368,6 +394,29 @@ async def run_application(application_id: str) -> None:
         cleanup(application_id)
 
 
+async def _map_fields(
+    page, fields: list[FormField], profile_dict: dict, profile_id: int
+) -> Tier1Result:
+    """One Tier 1 call with its DB-backed context (cached resume facts +
+    the answers library), in a session scoped to just that call. Both the
+    full cascade and the targeted repair pass need exactly this — they
+    previously each carried their own identical copy of the setup."""
+    async with async_session_factory() as db:
+        resume_facts = await ResumeService(
+            ResumeRepository(db),
+            ProfileRepository(db),
+            LocalFilesystemStorage(get_settings().resume_storage_dir),
+        ).get_facts(profile_id)
+        return await map_fields(
+            page,
+            fields,
+            profile_dict,
+            profile_id,
+            AnswerLibraryRepository(db),
+            resume_facts,
+        )
+
+
 async def _run_fill_cascade(
     application_id: str,
     sh,
@@ -387,7 +436,7 @@ async def _run_fill_cascade(
     fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
     tier0 = await fill_deterministic(page, fields, profile_dict, resume_file_path)
 
-    for label, value in tier0.filled:
+    for label, _value in tier0.filled:
         await _log(application_id, f"Tier 0 filled '{label}'", tier="tier0")
     for label, err in tier0.errored:
         await _log(
@@ -424,27 +473,11 @@ async def _run_fill_cascade(
     await _check_paused_and_wait(application_id)
 
     # ---- Tier 1: batched LLM field mapping ----
-    async with async_session_factory() as db:
-        resume_repo = ResumeRepository(db)
-        profile_repo = ProfileRepository(db)
-        storage = LocalFilesystemStorage(get_settings().resume_storage_dir)
-        resume_facts = await ResumeService(
-            resume_repo, profile_repo, storage
-        ).get_facts(profile_id)
+    tier1 = await _map_fields(page, remaining_fields, profile_dict, profile_id)
 
-        answer_repo = AnswerLibraryRepository(db)
-        tier1 = await map_fields(
-            page,
-            remaining_fields,
-            profile_dict,
-            profile_id,
-            answer_repo,
-            resume_facts,
-        )
-
-    for label, value in tier1.filled:
+    for label, _value in tier1.filled:
         await _log(application_id, f"Tier 1 filled '{label}'", tier="tier1")
-    for label, value in tier1.from_library:
+    for label, _value in tier1.from_library:
         await _log(
             application_id,
             f"Tier 1 used a cached answer for '{label}'",
@@ -592,23 +625,13 @@ async def _repair_unhandled_fields(
         # on) — nothing left to target, cascade stands as-is.
         return cascade
 
-    async with async_session_factory() as db:
-        resume_repo = ResumeRepository(db)
-        profile_repo = ProfileRepository(db)
-        storage = LocalFilesystemStorage(get_settings().resume_storage_dir)
-        resume_facts = await ResumeService(
-            resume_repo, profile_repo, storage
-        ).get_facts(profile_id)
-        answer_repo = AnswerLibraryRepository(db)
-        tier1_extra = await map_fields(
-            page, targets, profile_dict, profile_id, answer_repo, resume_facts
-        )
+    tier1_extra = await _map_fields(page, targets, profile_dict, profile_id)
 
-    for label, value in tier1_extra.filled:
+    for label, _value in tier1_extra.filled:
         await _log(
             application_id, f"Tier 1 filled '{label}' (repair pass)", tier="tier1"
         )
-    for label, value in tier1_extra.from_library:
+    for label, _value in tier1_extra.from_library:
         await _log(
             application_id,
             f"Tier 1 used a cached answer for '{label}' (repair pass)",
@@ -828,7 +851,6 @@ async def _submit_and_verify(
         await _escalate_unhandled_fields_if_any(
             application_id, cascade, also_target=escalate_target
         )
-        continue
 
     # Defensive only — the loop's `is_last_attempt` branch always returns
     # on its final iteration, so this is never actually reached; kept as
@@ -864,11 +886,9 @@ async def _resolve_captcha_if_present(application_id: str, page) -> None:
         level="warn",
         tier="captcha",
     )
-    await _pause_for_input(application_id, "captcha_failed")
-    if await wait_for_resume_or_cancel(application_id) == "cancelled":
-        raise ApplicationCancelled
-    await _resume_from_pause(application_id)
-    await _log(application_id, "Resumed after manual CAPTCHA handling")
+    await _pause_for_human(
+        application_id, "captcha_failed", "Resumed after manual CAPTCHA handling"
+    )
 
 
 TWOFA_POLL_INTERVAL_SECONDS = 5
@@ -1014,11 +1034,25 @@ async def _escalate_unhandled_fields_if_any(
         + ", ".join(escalate_labels),
         level="warn",
     )
-    await _pause_for_input(application_id, "manual_fields_required")
+    await _pause_for_human(
+        application_id, "manual_fields_required", "Resumed after manual field entry"
+    )
+
+
+async def _pause_for_human(
+    application_id: str, pause_reason: str, resumed_message: str
+) -> None:
+    """Park the run in NEEDS_INPUT and block until the user resumes (or
+    cancels) via Live View. Shared by the CAPTCHA-escalation and
+    unresolved-required-field paths, which previously each repeated the
+    same pause -> wait -> cancel-check -> resume -> log sequence. The 2FA
+    path deliberately does NOT use this: it polls the page as well as the
+    events, so it can auto-resume when the challenge clears on its own."""
+    await _pause_for_input(application_id, pause_reason)
     if await wait_for_resume_or_cancel(application_id) == "cancelled":
         raise ApplicationCancelled
     await _resume_from_pause(application_id)
-    await _log(application_id, "Resumed after manual field entry")
+    await _log(application_id, resumed_message)
 
 
 async def _pause_for_input(application_id: str, pause_reason: str) -> None:
