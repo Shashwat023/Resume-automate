@@ -1625,7 +1625,6 @@ async def _jobs_from_page_links(page, seen_apply_urls: set[str]) -> list[Scraped
     else the address; the location is unknown. The caller decides when to use
     it, since a model read is richer."""
     try:
-        current = await page.url()
         anchors = await with_timeout(
             page.evaluate(_ANCHORS_JS), what="evaluate(anchors)"
         )
