@@ -9,7 +9,8 @@ def _respond_with(monkeypatch, status, text):
     real_client = httpx.AsyncClient
 
     monkeypatch.setattr(
-        llm_client.httpx, "AsyncClient",
+        llm_client.httpx,
+        "AsyncClient",
         lambda *a, **kw: real_client(transport=transport, **kw),
     )
     monkeypatch.setattr(llm_client.settings, "openrouter_api_key", "test-key")
@@ -20,7 +21,11 @@ def _respond_with(monkeypatch, status, text):
     "status,text,exhausted",
     [
         (402, '{"error":{"message":"Insufficient credits","code":402}}', True),
-        (403, '{"error":{"message":"Key limit exceeded (total limit).","code":403}}', True),
+        (
+            403,
+            '{"error":{"message":"Key limit exceeded (total limit).","code":403}}',
+            True,
+        ),
         (403, '{"error":{"message":"Forbidden","code":403}}', False),
         (502, '{"error":{"message":"Provider returned error","code":502}}', False),
     ],

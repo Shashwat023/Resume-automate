@@ -344,7 +344,9 @@ async def run_application(application_id: str) -> None:
                     # this ran against a real form (snapshot taken too early -> stale xpath).
                     await page.wait_for_timeout(1500)
 
-                    clicked_apply = await _click_apply_if_present(page, application_id, sh)
+                    clicked_apply = await _click_apply_if_present(
+                        page, application_id, sh
+                    )
                     if clicked_apply:
                         await _log(
                             application_id,
@@ -362,8 +364,12 @@ async def run_application(application_id: str) -> None:
                         await _resolve_captcha_if_present(application_id, page)
                         await _handle_2fa_if_present(application_id, page)
                         await _handle_account_gate_if_present(application_id, page)
-                        snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
-                        fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
+                        snapshot = await with_timeout(
+                            page.snapshot(), what="page.snapshot"
+                        )
+                        fields = collect_fields(
+                            snapshot.formatted_tree, snapshot.xpath_map
+                        )
                         submit_xpath = find_submit_button(
                             snapshot.formatted_tree, snapshot.xpath_map
                         )
@@ -416,7 +422,9 @@ async def run_application(application_id: str) -> None:
                                     profile_id,
                                     cascade,
                                 )
-                            await _escalate_unhandled_fields_if_any(application_id, cascade)
+                            await _escalate_unhandled_fields_if_any(
+                                application_id, cascade
+                            )
                             total_tier0 += len(cascade.tier0.filled)
                             total_tier1 += len(cascade.tier1.filled) + len(
                                 cascade.tier1.from_library
@@ -1533,7 +1541,11 @@ async def _click_apply_if_present(
                         application_id,
                         f"Apply hop {hop + 1}/2 failed on {await _page_location(page)} "
                         f"({type(exc).__name__}); "
-                        + ("retrying with a fresh snapshot" if attempt == 0 else "retry exhausted"),
+                        + (
+                            "retrying with a fresh snapshot"
+                            if attempt == 0
+                            else "retry exhausted"
+                        ),
                         level="warn",
                         tier="navigation",
                     )
@@ -1573,7 +1585,9 @@ async def _handle_account_gate_if_present(application_id: str, page) -> None:
             tier="navigation",
         )
         await _pause_for_human(
-            application_id, "account_required", "Resumed after account sign-in or creation"
+            application_id,
+            "account_required",
+            "Resumed after account sign-in or creation",
         )
 
 

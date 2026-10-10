@@ -174,15 +174,20 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
         except LLMTimeoutError as exc:
             logger.error(
                 "%s: %s with %s (attempt %d/%d)",
-                company_url, describe(exc), settings.openrouter_model_tier2,
-                attempt, attempts,
+                company_url,
+                describe(exc),
+                settings.openrouter_model_tier2,
+                attempt,
+                attempts,
             )
             failed = 1
             timed_out = True
         except Exception:
             logger.exception(
                 "Extract-based sync failed for %s (attempt %d/%d)",
-                company_url, attempt, attempts,
+                company_url,
+                attempt,
+                attempts,
             )
             failed = 1
         finally:
@@ -216,8 +221,13 @@ async def sync_company(company_url: str, db: AsyncSession) -> dict:
             "%s: attempt %d/%d with %s looks like a miss (crashed=%s, posting "
             "links seen=%d, unmatched model jobs=%d, found nothing despite job "
             "links=%s)",
-            company_url, attempt, attempts, settings.openrouter_model_tier2,
-            bool(failed), evidence.job_links_max, evidence.unresolved_model_jobs,
+            company_url,
+            attempt,
+            attempts,
+            settings.openrouter_model_tier2,
+            bool(failed),
+            evidence.job_links_max,
+            evidence.unresolved_model_jobs,
             evidence.blank_assessment_with_job_entry,
         )
 
@@ -234,7 +244,8 @@ def _finish(
         logger.error(
             "%s: model returned %d job(s) but none had a usable apply URL — "
             "nothing saved, marking this company failed",
-            company_url, dropped,
+            company_url,
+            dropped,
         )
         failed = 1
     return _result(inserted, updated, failed)
@@ -246,7 +257,8 @@ def _out_of_credits(company_url: str, inserted: int, updated: int) -> dict:
     instead of marking the rest of the list as synced with 0 jobs."""
     logger.error(
         "%s: OpenRouter credits/key limit exhausted — stopping this company. %s",
-        company_url, credits_exhausted(),
+        company_url,
+        credits_exhausted(),
     )
     return {**_result(inserted, updated, 1), "out_of_credits": True}
 
@@ -426,10 +438,15 @@ async def _assess_page(sh, page) -> PageAssessment:
             )
             return result.data
         except LLMTimeoutError:
-            logger.error("Page assessment timed out (%ds) — not retrying", LLM_CALL_TIMEOUT_SECONDS)
+            logger.error(
+                "Page assessment timed out (%ds) — not retrying",
+                LLM_CALL_TIMEOUT_SECONDS,
+            )
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Page assessment try %d/2 failed: %s", _attempt + 1, describe(exc))
+            logger.warning(
+                "Page assessment try %d/2 failed: %s", _attempt + 1, describe(exc)
+            )
             last_error = exc
     raise last_error
 
@@ -530,12 +547,17 @@ async def _goto_with_retry(page, url: str) -> None:
             if state in ("interactive", "complete"):
                 logger.warning(
                     "Page load %s was slow (%s) but the page is %s, continuing",
-                    url, describe(error), state,
+                    url,
+                    describe(error),
+                    state,
                 )
                 return
         logger.warning(
             "Page load %s failed (attempt %d/%d): %s",
-            url, attempt, _GOTO_ATTEMPTS, describe(error),
+            url,
+            attempt,
+            _GOTO_ATTEMPTS,
+            describe(error),
         )
         if attempt == _GOTO_ATTEMPTS:
             raise error
@@ -664,7 +686,9 @@ _DISMISS_OVERLAYS_JS = r"""
 async def _dismiss_overlays(page) -> None:
     """Run before every LLM read of a page — banners and popups can appear late."""
     try:
-        outcome = await with_timeout(page.evaluate(_DISMISS_OVERLAYS_JS), what="evaluate(overlays)")
+        outcome = await with_timeout(
+            page.evaluate(_DISMISS_OVERLAYS_JS), what="evaluate(overlays)"
+        )
     except Exception:  # noqa: BLE001
         return
     if outcome:
@@ -720,10 +744,31 @@ _IFRAME_JOB_HINT = re.compile(
     re.I,
 )
 _IFRAME_IGNORED_HOSTS = (
-    "youtube", "youtu.be", "vimeo", "google", "doubleclick", "facebook",
-    "twitter", "linkedin", "instagram", "tiktok", "hotjar", "intercom", "drift",
-    "recaptcha", "hcaptcha", "cloudflare", "onetrust", "cookiebot", "trustarc",
-    "consentmanager", "hubspot", "calendly", "typeform", "zendesk", "livechat",
+    "youtube",
+    "youtu.be",
+    "vimeo",
+    "google",
+    "doubleclick",
+    "facebook",
+    "twitter",
+    "linkedin",
+    "instagram",
+    "tiktok",
+    "hotjar",
+    "intercom",
+    "drift",
+    "recaptcha",
+    "hcaptcha",
+    "cloudflare",
+    "onetrust",
+    "cookiebot",
+    "trustarc",
+    "consentmanager",
+    "hubspot",
+    "calendly",
+    "typeform",
+    "zendesk",
+    "livechat",
 )
 
 
@@ -736,7 +781,12 @@ _ENTRY_SCORES = (
         ),
         3,
     ),
-    (re.compile(r"\b(jobs?|openings?|positions?|vacanc(y|ies)|opportunities)\b", re.I), 2),
+    (
+        re.compile(
+            r"\b(jobs?|openings?|positions?|vacanc(y|ies)|opportunities)\b", re.I
+        ),
+        2,
+    ),
     (
         re.compile(
             r"\b(careers?|join us|join our team|work with us|work for us|we'?re hiring)\b",
@@ -787,7 +837,9 @@ def _job_entry_links(
             or parsed.path.lower().endswith(_NON_PAGE_SUFFIXES)
         ):
             continue
-        score: float = max((s for rx, s in _ENTRY_SCORES if rx.search(text or "")), default=0)
+        score: float = max(
+            (s for rx, s in _ENTRY_SCORES if rx.search(text or "")), default=0
+        )
         if not score and _ENTRY_PATH.search(parsed.path):
             score = 0.5
         if not score:
@@ -835,7 +887,9 @@ async def _find_listing_iframe_srcs(page) -> list[str]:
     large and visible."""
     try:
         current = await page.url()
-        frames = await with_timeout(page.evaluate(_IFRAMES_JS), what="evaluate(iframes)")
+        frames = await with_timeout(
+            page.evaluate(_IFRAMES_JS), what="evaluate(iframes)"
+        )
     except Exception:  # noqa: BLE001
         return []
     page_host = _registrable(urlparse(current).netloc)
@@ -847,16 +901,16 @@ async def _find_listing_iframe_srcs(page) -> list[str]:
         host = urlparse(src).netloc.lower()
         if not _looks_like_real_apply_url(src) or not host or src in found:
             continue
-        if _registrable(host) == page_host or any(h in host for h in _IFRAME_IGNORED_HOSTS):
+        if _registrable(host) == page_host or any(
+            h in host for h in _IFRAME_IGNORED_HOSTS
+        ):
             continue
         known_ats = any(ats in host for ats in _ATS_HOSTS)
         # Either dimension: 4liberty's iframe has no width attribute and
         # reports w=0 (h=1250) until its container lays out.
         if frame.get("w", 0) < 300 and frame.get("h", 0) < 300 and not known_ats:
             continue
-        hint = " ".join(
-            [src, str(frame.get("name", "")), str(frame.get("title", ""))]
-        )
+        hint = " ".join([src, str(frame.get("name", "")), str(frame.get("title", ""))])
         if _IFRAME_JOB_HINT.search(hint) or known_ats:
             found.append(src)
     return found
@@ -873,7 +927,9 @@ async def _enter_listing_iframe(page, visited: set[str] | None = None) -> bool:
     and the link scan see its content as the top-level document. `visited`
     collects the boards opened so far, so a page with several is walked once
     each and a board is never entered twice."""
-    srcs = [s for s in await _find_listing_iframe_srcs(page) if s not in (visited or ())]
+    srcs = [
+        s for s in await _find_listing_iframe_srcs(page) if s not in (visited or ())
+    ]
     if not srcs:
         return False
     src = srcs[0]
@@ -898,12 +954,16 @@ async def _page_links(page) -> tuple[str, list[tuple[str, str]], set[str]]:
     """The page's real <a> links as (absolute href, normalized text)."""
     try:
         current = await page.url()
-        anchors = await with_timeout(page.evaluate(_ANCHORS_JS), what="evaluate(anchors)")
+        anchors = await with_timeout(
+            page.evaluate(_ANCHORS_JS), what="evaluate(anchors)"
+        )
     except Exception:  # noqa: BLE001
         return "", [], set()
     links: list[tuple[str, str]] = []
     for a in anchors or []:
-        if not isinstance(a, dict) or not _looks_like_real_apply_url(a.get("href") or ""):
+        if not isinstance(a, dict) or not _looks_like_real_apply_url(
+            a.get("href") or ""
+        ):
             continue
         href = a["href"].split("#")[0]
         text = _norm_text(a.get("text", ""))
@@ -953,17 +1013,56 @@ def _snap_to_real_link(url, label, current, links, real_hrefs, used=None) -> str
 # and accenture.com gave 0 for all 7 models tested).
 
 _JOB_PATH_SEGMENTS = {
-    "job", "jobs", "position", "positions", "vacancy", "vacancies", "opening",
-    "openings", "posting", "postings", "requisition", "requisitions", "req",
-    "job-details", "jobdetails", "job-detail", "jobdetail", "careers-job",
+    "job",
+    "jobs",
+    "position",
+    "positions",
+    "vacancy",
+    "vacancies",
+    "opening",
+    "openings",
+    "posting",
+    "postings",
+    "requisition",
+    "requisitions",
+    "req",
+    "job-details",
+    "jobdetails",
+    "job-detail",
+    "jobdetail",
+    "careers-job",
 }
-_JOB_QUERY_KEYS = {"jobid", "job_id", "jid", "gh_jid", "reqid", "req_id",
-                   "requisitionid", "postingid", "jobreqid"}
+_JOB_QUERY_KEYS = {
+    "jobid",
+    "job_id",
+    "jid",
+    "gh_jid",
+    "reqid",
+    "req_id",
+    "requisitionid",
+    "postingid",
+    "jobreqid",
+}
 _ATS_HOSTS = (
-    "myworkdayjobs.com", "icims.com", "taleo.net", "successfactors", "greenhouse.io",
-    "lever.co", "smartrecruiters.com", "ashbyhq.com", "workable.com", "jobvite.com",
-    "bamboohr.com", "recruitee.com", "breezy.hr", "paylocity.com", "ultipro.com",
-    "ukg.net", "oraclecloud.com", "dayforcehcm.com", "careerplug.com",
+    "myworkdayjobs.com",
+    "icims.com",
+    "taleo.net",
+    "successfactors",
+    "greenhouse.io",
+    "lever.co",
+    "smartrecruiters.com",
+    "ashbyhq.com",
+    "workable.com",
+    "jobvite.com",
+    "bamboohr.com",
+    "recruitee.com",
+    "breezy.hr",
+    "paylocity.com",
+    "ultipro.com",
+    "ukg.net",
+    "oraclecloud.com",
+    "dayforcehcm.com",
+    "careerplug.com",
 )
 
 
@@ -989,18 +1088,23 @@ def _looks_like_job_posting_link(href: str) -> bool:
         and any(seg in _JOB_PATH_SEGMENTS for seg in segments[:-1])
     ):
         return True
-    query_keys = {kv.split("=", 1)[0].lower() for kv in parsed.query.split("&") if "=" in kv}
+    query_keys = {
+        kv.split("=", 1)[0].lower() for kv in parsed.query.split("&") if "=" in kv
+    }
     if query_keys & _JOB_QUERY_KEYS:
         return True
     # .../jobdetails?id=ATCI-123 (accenture): a detail page named by its last segment.
     if (
         segments
-        and segments[-1] in {"jobdetails", "job-details", "jobdetail", "job-detail", "job-posting"}
+        and segments[-1]
+        in {"jobdetails", "job-details", "jobdetail", "job-detail", "job-posting"}
         and ("id" in query_keys or any(ch.isdigit() for ch in parsed.query))
     ):
         return True
-    return any(ats in host for ats in _ATS_HOSTS) and len(segments) >= 2 and any(
-        ch.isdigit() for ch in parsed.path
+    return (
+        any(ats in host for ats in _ATS_HOSTS)
+        and len(segments) >= 2
+        and any(ch.isdigit() for ch in parsed.path)
     )
 
 
@@ -1014,7 +1118,9 @@ class _ExtractEvidence:
     blank_assessment_with_job_entry: bool = False
 
 
-_evidence: ContextVar["_ExtractEvidence | None"] = ContextVar("_extract_evidence", default=None)
+_evidence: ContextVar["_ExtractEvidence | None"] = ContextVar(
+    "_extract_evidence", default=None
+)
 
 
 _JOB_ENTRY_TEXT = re.compile(
@@ -1042,12 +1148,15 @@ def _record_blank_assessment(links: list[tuple[str, str]]) -> None:
         ev.blank_assessment_with_job_entry = True
 
 
-def _record_page_evidence(links: list[tuple[str, str]], unresolved_model_jobs: int = 0) -> None:
+def _record_page_evidence(
+    links: list[tuple[str, str]], unresolved_model_jobs: int = 0
+) -> None:
     ev = _evidence.get()
     if ev is None:
         return
     ev.job_links_max = max(
-        ev.job_links_max, sum(1 for href, _ in links if _looks_like_job_posting_link(href))
+        ev.job_links_max,
+        sum(1 for href, _ in links if _looks_like_job_posting_link(href)),
     )
     ev.unresolved_model_jobs += unresolved_model_jobs
 
@@ -1070,18 +1179,25 @@ async def _resolve_apply_urls_from_dom(page, jobs: list[ScrapedJob]) -> None:
     unresolved = [j.title for j in jobs if j.title and not j.apply_url]
     logger.info(
         "Extracted %d job(s) on %s: %d with a usable apply URL, %d dropped",
-        len(jobs), current, len(jobs) - len(unresolved), len(unresolved),
+        len(jobs),
+        current,
+        len(jobs) - len(unresolved),
+        len(unresolved),
     )
     if unresolved:
         logger.warning(
             "Dropping %d job(s) with no resolvable apply URL (page has %d real links), "
             "e.g. %s",
-            len(unresolved), len(links), unresolved[:5],
+            len(unresolved),
+            len(links),
+            unresolved[:5],
         )
     _record_page_evidence(links, unresolved_model_jobs=len(unresolved))
 
 
-async def _resolve_section_urls_from_dom(page, sections: list["ListingSection"]) -> None:
+async def _resolve_section_urls_from_dom(
+    page, sections: list["ListingSection"]
+) -> None:
     """
     Same problem for section entry points: live-caught on airswift.com, a
     model returned plausible-looking but nonexistent section URLs
@@ -1095,7 +1211,9 @@ async def _resolve_section_urls_from_dom(page, sections: list["ListingSection"])
     if not links:
         return
     for section in sections:
-        section.url = _snap_to_real_link(section.url, section.label, current, links, real_hrefs)
+        section.url = _snap_to_real_link(
+            section.url, section.label, current, links, real_hrefs
+        )
 
 
 def _usable_sections(
@@ -1290,8 +1408,10 @@ async def _empty_read_detail(
     # not postings: counting them made a page of old jobs look like it held
     # 26 new ones, so it was re-read instead of moved on from.
     dom_jobs = {
-        h.rstrip("/") for h, _ in links
-        if _looks_like_job_posting_link(h) and not _APPLY_FLOW_PATH.search(urlparse(h).path)
+        h.rstrip("/")
+        for h, _ in links
+        if _looks_like_job_posting_link(h)
+        and not _APPLY_FLOW_PATH.search(urlparse(h).path)
     }
     unseen = len(dom_jobs - seen)
     with_link = sum(1 for j in jobs if j.apply_url)
@@ -1317,7 +1437,9 @@ async def _save_debug_screenshot(
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = directory / f"{stamp}_page{page_number}_read{read_number}_{tag}.png"
         await with_timeout(page.screenshot(path=path, type="png"), what="screenshot")
-        logger.warning("Pagination page %d: saved debug screenshot %s", page_number, path)
+        logger.warning(
+            "Pagination page %d: saved debug screenshot %s", page_number, path
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not save a debug screenshot: %s", describe(exc))
 
@@ -1338,15 +1460,23 @@ async def _llm_call_with_retry(page, make_call, *, what: str, page_number: int):
                 raise
             logger.warning(
                 "Pagination page %d: %s failed (%s), retry %d/%d",
-                page_number, what, describe(exc), attempt + 1, _LLM_RETRIES,
+                page_number,
+                what,
+                describe(exc),
+                attempt + 1,
+                _LLM_RETRIES,
             )
             await page.wait_for_timeout(2000 * (attempt + 1))
 
 
-def _log_pagination_end(page_number: int, reason: str, inserted: int, updated: int) -> None:
+def _log_pagination_end(
+    page_number: int, reason: str, inserted: int, updated: int
+) -> None:
     logger.warning(
         "Pagination ended on page %d (%d job(s) stored): %s",
-        page_number, inserted + updated, reason,
+        page_number,
+        inserted + updated,
+        reason,
     )
 
 
@@ -1422,7 +1552,9 @@ async def _current_url(page) -> str:
 
 async def _next_link_url(page) -> str | None:
     try:
-        url = await with_timeout(page.evaluate(_NEXT_LINK_JS), what="evaluate(next link)")
+        url = await with_timeout(
+            page.evaluate(_NEXT_LINK_JS), what="evaluate(next link)"
+        )
     except Exception:  # noqa: BLE001
         return None
     return url if isinstance(url, str) and url else None
@@ -1494,7 +1626,9 @@ async def _jobs_from_page_links(page, seen_apply_urls: set[str]) -> list[Scraped
     it, since a model read is richer."""
     try:
         current = await page.url()
-        anchors = await with_timeout(page.evaluate(_ANCHORS_JS), what="evaluate(anchors)")
+        anchors = await with_timeout(
+            page.evaluate(_ANCHORS_JS), what="evaluate(anchors)"
+        )
     except Exception:  # noqa: BLE001
         return []
     seen = {u.rstrip("/") for u in seen_apply_urls}
@@ -1513,7 +1647,8 @@ async def _jobs_from_page_links(page, seen_apply_urls: set[str]) -> list[Scraped
         lines = [ln.strip() for ln in (a.get("text") or "").splitlines() if ln.strip()]
         title = next(
             (
-                ln for ln in lines
+                ln
+                for ln in lines
                 if 3 <= len(ln) <= 150
                 and not _GENERIC_LINK_TEXT.match(ln)
                 and not _looks_like_nav_label(ln)
@@ -1521,8 +1656,10 @@ async def _jobs_from_page_links(page, seen_apply_urls: set[str]) -> list[Scraped
             "",
         )
         title = title or (a.get("alt") or "").strip() or _title_from_job_url(href)
-        if title and not _looks_like_nav_label(title) and not _NOT_A_JOB_TITLE.search(
-            f"{title} {href}"
+        if (
+            title
+            and not _looks_like_nav_label(title)
+            and not _NOT_A_JOB_TITLE.search(f"{title} {href}")
         ):
             found[key] = ScrapedJob(title=title, location="", apply_url=href)
     return list(found.values()) if len(found) >= _MIN_LINKS_FOR_A_LISTING else []
@@ -1530,7 +1667,9 @@ async def _jobs_from_page_links(page, seen_apply_urls: set[str]) -> list[Scraped
 
 async def _click_next_by_dom(page) -> bool:
     try:
-        return bool(await with_timeout(page.evaluate(_NEXT_PAGE_JS), what="evaluate(next page)"))
+        return bool(
+            await with_timeout(page.evaluate(_NEXT_PAGE_JS), what="evaluate(next page)")
+        )
     except Exception:  # noqa: BLE001
         return False
 
@@ -1542,7 +1681,9 @@ async def _advance_pagination(sh, page, candidates) -> bool:
     for action in list(candidates)[:3]:
         try:
             result = await with_timeout(
-                sh.act(action, page=page), LLM_CALL_TIMEOUT_SECONDS, what="act() (pagination)"
+                sh.act(action, page=page),
+                LLM_CALL_TIMEOUT_SECONDS,
+                what="act() (pagination)",
             )
             data = getattr(result, "data", None)
             if getattr(data, "success", True):  # no outcome reported: assume it worked
@@ -1592,7 +1733,9 @@ async def _harvest_listing(
     empty_trials = 0
     stale_pages = 0
     listing_changed = True
-    last_link_url: str | None = None  # set when the current page was opened by its address
+    last_link_url: str | None = (
+        None  # set when the current page was opened by its address
+    )
 
     while page_number <= max_pages:
         if pending is not None:
@@ -1608,18 +1751,24 @@ async def _harvest_listing(
             # (saved too when debugging is on).
             shots = get_settings()
             read_number = empty_trials + 1
-            if shots.scraper_debug_screenshots and shots.scraper_retry4_screenshot \
-                    and read_number == _MAX_EMPTY_TRIALS - 1:
+            if (
+                shots.scraper_debug_screenshots
+                and shots.scraper_retry4_screenshot
+                and read_number == _MAX_EMPTY_TRIALS - 1
+            ):
                 await _save_debug_screenshot(
                     page, company_name, page_number, read_number, "reference"
                 )
             send_screenshot = (
-                shots.scraper_retry5_screenshot_to_model and read_number == _MAX_EMPTY_TRIALS
+                shots.scraper_retry5_screenshot_to_model
+                and read_number == _MAX_EMPTY_TRIALS
             )
             if send_screenshot:
                 logger.warning(
                     "Pagination page %d: read %d/%d, sending a screenshot to the model",
-                    page_number, read_number, _MAX_EMPTY_TRIALS,
+                    page_number,
+                    read_number,
+                    _MAX_EMPTY_TRIALS,
                 )
                 if shots.scraper_debug_screenshots:
                     await _save_debug_screenshot(
@@ -1629,7 +1778,9 @@ async def _harvest_listing(
                 result = await _llm_call_with_retry(
                     page,
                     lambda: sh.extract(
-                        _EXTRACT_INSTRUCTION, ScrapedJobs, page=page,
+                        _EXTRACT_INSTRUCTION,
+                        ScrapedJobs,
+                        page=page,
                         **({"screenshot": True} if send_screenshot else {}),
                     ),
                     what="extract()",
@@ -1639,8 +1790,10 @@ async def _harvest_listing(
                 # One unreadable section must not discard the sections
                 # already harvested — the caller keeps going.
                 _log_pagination_end(
-                    page_number, f"extract() failed after retries: {describe(exc)}",
-                    inserted, updated,
+                    page_number,
+                    f"extract() failed after retries: {describe(exc)}",
+                    inserted,
+                    updated,
                 )
                 break
             jobs = result.data.jobs
@@ -1704,7 +1857,8 @@ async def _harvest_listing(
                 logger.warning(
                     "Pagination page %d: the model returned nothing new, so %d job(s) "
                     "were taken straight from the page's own links",
-                    page_number, len(rescued),
+                    page_number,
+                    len(rescued),
                 )
 
         # Stop condition 1: _MAX_EMPTY_TRIALS reads of the same page in a row
@@ -1723,8 +1877,10 @@ async def _harvest_listing(
             detail = f"{detail}; at {await _current_url(page)}"
             if empty_trials >= _MAX_EMPTY_TRIALS:
                 _log_pagination_end(
-                    page_number, f"nothing new in {empty_trials} reads in a row ({detail})",
-                    inserted, updated,
+                    page_number,
+                    f"nothing new in {empty_trials} reads in a row ({detail})",
+                    inserted,
+                    updated,
                 )
                 break
             # A page that never turned gets moved on again — re-reading it can
@@ -1734,11 +1890,16 @@ async def _harvest_listing(
             # not collected yet is NEVER skipped, even if it was slow to render
             # (live: gevernova.com page 2 loaded after the 12s change-wait gave
             # up, and moving on would have dropped its 10 jobs).
-            if page_state == "stale" or (page_state == "unknown" and not listing_changed):
+            if page_state == "stale" or (
+                page_state == "unknown" and not listing_changed
+            ):
                 logger.warning(
                     "Pagination page %d: nothing new (read %d/%d; %s), the page did not "
                     "move on, going to the next page again",
-                    page_number, empty_trials, _MAX_EMPTY_TRIALS, detail,
+                    page_number,
+                    empty_trials,
+                    _MAX_EMPTY_TRIALS,
+                    detail,
                 )
                 before = await _listing_signature(page)
                 if await _open_next_page_directly(sh, page):
@@ -1756,7 +1917,8 @@ async def _harvest_listing(
                             _log_pagination_end(
                                 page_number,
                                 f"{stale_pages} different pages in a row showed nothing new",
-                                inserted, updated,
+                                inserted,
+                                updated,
                             )
                             break
                         empty_trials = 0
@@ -1769,7 +1931,8 @@ async def _harvest_listing(
                     _log_pagination_end(
                         page_number,
                         f"nothing new on the page and no next control ({detail})",
-                        inserted, updated,
+                        inserted,
+                        updated,
                     )
                     break
             elif page_state == "unknown" and last_link_url and empty_trials >= 2:
@@ -1781,7 +1944,10 @@ async def _harvest_listing(
                 logger.warning(
                     "Pagination page %d: nothing new (read %d/%d; %s), the page shows no "
                     "job links at all, reloading it",
-                    page_number, empty_trials, _MAX_EMPTY_TRIALS, detail,
+                    page_number,
+                    empty_trials,
+                    _MAX_EMPTY_TRIALS,
+                    detail,
                 )
                 try:
                     await _goto_with_retry(page, last_link_url)
@@ -1791,7 +1957,10 @@ async def _harvest_listing(
             else:
                 logger.warning(
                     "Pagination page %d: nothing new (read %d/%d; %s), re-reading the same page",
-                    page_number, empty_trials, _MAX_EMPTY_TRIALS, detail,
+                    page_number,
+                    empty_trials,
+                    _MAX_EMPTY_TRIALS,
+                    detail,
                 )
             await page.wait_for_timeout(3000)
             continue
@@ -1816,8 +1985,10 @@ async def _harvest_listing(
                 await _wait_for_load(page)
             except Exception as exc:  # noqa: BLE001
                 _log_pagination_end(
-                    page_number, f"could not open the next page {next_url}: {describe(exc)}",
-                    inserted, updated,
+                    page_number,
+                    f"could not open the next page {next_url}: {describe(exc)}",
+                    inserted,
+                    updated,
                 )
                 break
             last_link_url = next_url
@@ -1834,8 +2005,10 @@ async def _harvest_listing(
             except Exception as exc:  # noqa: BLE001
                 # best-effort — treat a failed pagination check as "no more pages"
                 _log_pagination_end(
-                    page_number, f"pagination check failed after retries: {describe(exc)}",
-                    inserted, updated,
+                    page_number,
+                    f"pagination check failed after retries: {describe(exc)}",
+                    inserted,
+                    updated,
                 )
                 break
 
@@ -1848,9 +2021,11 @@ async def _harvest_listing(
             if not await _advance_pagination(sh, page, obs.data or []):
                 _log_pagination_end(
                     page_number,
-                    "no next control found" if not obs.data
+                    "no next control found"
+                    if not obs.data
                     else "could not click a next control",
-                    inserted, updated,
+                    inserted,
+                    updated,
                 )
                 break  # couldn't advance — stop rather than retry indefinitely
             if not obs.data:
@@ -1863,7 +2038,8 @@ async def _harvest_listing(
         if not listing_changed:
             logger.warning(
                 "Pagination page %d: clicked next but the listing did not change in %.0fs",
-                page_number, _LISTING_CHANGE_TIMEOUT_S,
+                page_number,
+                _LISTING_CHANGE_TIMEOUT_S,
             )
         await page.wait_for_timeout(1000)  # let the rest of the page settle
         page_number += 1
@@ -1918,7 +2094,10 @@ async def _explore_job_entry_links(
             harvested += 1
             logger.info(
                 "Explore: following job link (depth %d, page %d/%d): %s",
-                depth + 1, harvested, settings.scraper_max_explore_pages, href,
+                depth + 1,
+                harvested,
+                settings.scraper_max_explore_pages,
+                href,
             )
             try:
                 await _goto_with_retry(page, href)
@@ -1940,7 +2119,8 @@ async def _explore_job_entry_links(
     if unexplored:
         logger.warning(
             "Explore: page budget (%d) reached with %d job-related link(s) unexplored",
-            settings.scraper_max_explore_pages, unexplored,
+            settings.scraper_max_explore_pages,
+            unexplored,
         )
     else:
         logger.info(
@@ -2126,7 +2306,10 @@ async def _sync_via_extract(company_url: str, db: AsyncSession) -> tuple[int, in
                     continue
                 logger.warning(
                     "Page has %d job-board iframes; opening %d/%d: %s",
-                    len(iframe_srcs), position, len(iframe_srcs), iframe_src,
+                    len(iframe_srcs),
+                    position,
+                    len(iframe_srcs),
+                    iframe_src,
                 )
                 try:
                     await _goto_with_retry(page, iframe_src)

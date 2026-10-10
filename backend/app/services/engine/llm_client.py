@@ -444,7 +444,9 @@ async def openrouter_llm(params, model: str | None = None):
     except BaseException as exc:
         logger.error(
             "LLM call to %s failed after %.1fs: %s",
-            body["model"], time.monotonic() - started, describe(exc),
+            body["model"],
+            time.monotonic() - started,
+            describe(exc),
         )
         raise
     choice = data["choices"][0]
@@ -452,8 +454,11 @@ async def openrouter_llm(params, model: str | None = None):
     usage = _usage_from_openai(data)
     logger.info(
         "LLM call to %s done in %.1fs (finish_reason=%s, out_tokens=%d, structured=%s)",
-        body["model"], time.monotonic() - started, choice.get("finish_reason"),
-        usage.output_tokens, is_structured,
+        body["model"],
+        time.monotonic() - started,
+        choice.get("finish_reason"),
+        usage.output_tokens,
+        is_structured,
     )
     content_block = LLMMessageContentBlock(root=LLMTextContent(type="text", text=text))
 

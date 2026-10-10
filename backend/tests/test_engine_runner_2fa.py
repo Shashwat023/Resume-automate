@@ -689,7 +689,9 @@ async def test_run_resumes_after_account_creation_and_advances_workday_steps(
     monkeypatch.setattr(runner, "_pause_for_human", pause)
     monkeypatch.setattr(runner, "_run_fill_cascade", fill)
     monkeypatch.setattr(runner, "_submit_and_verify", submit)
-    monkeypatch.setattr(runner, "get_settings", lambda: SimpleNamespace(submit_enabled=True))
+    monkeypatch.setattr(
+        runner, "get_settings", lambda: SimpleNamespace(submit_enabled=True)
+    )
 
     await runner.run_application(application.id)
     await async_session.refresh(application)

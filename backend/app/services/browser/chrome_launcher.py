@@ -69,7 +69,10 @@ def _mark_clean_exit(user_data_dir: Path) -> None:
     try:
         data = json.loads(prefs.read_text(encoding="utf-8"))
         profile = data.setdefault("profile", {})
-        if profile.get("exit_type") == "Normal" and profile.get("exited_cleanly") is True:
+        if (
+            profile.get("exit_type") == "Normal"
+            and profile.get("exited_cleanly") is True
+        ):
             return
         profile["exit_type"] = "Normal"
         profile["exited_cleanly"] = True

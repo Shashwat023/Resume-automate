@@ -47,7 +47,9 @@ def test_control_summary_only_includes_known_action_labels():
 
 
 @pytest.mark.asyncio
-async def test_apply_link_navigates_current_page_instead_of_opening_new_tab(monkeypatch):
+async def test_apply_link_navigates_current_page_instead_of_opening_new_tab(
+    monkeypatch,
+):
     # Concentrix renders two <a target="_blank"> controls named Apply.
     # Clicking one would leave the Stagehand page on the job description.
     workday_url = (
@@ -69,8 +71,7 @@ async def test_apply_link_navigates_current_page_instead_of_opening_new_tab(monk
             if self.step == 2:
                 return SimpleNamespace(
                     formatted_tree=(
-                        "[51] heading: Create Account\n"
-                        "[78] textbox: Password\n"
+                        "[51] heading: Create Account\n[78] textbox: Password\n"
                     ),
                     xpath_map={"78": "//input[@type='password']"},
                 )
@@ -174,9 +175,12 @@ async def test_account_gate_detects_password_input_when_snapshot_omits_its_label
             assert "input[type=password]" in expression
             return True
 
-    assert await runner._account_gate_present(
-        Page(), "[1] heading: Create Account\n[2] textbox: Email\n"
-    ) is True
+    assert (
+        await runner._account_gate_present(
+            Page(), "[1] heading: Create Account\n[2] textbox: Email\n"
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio
@@ -206,11 +210,13 @@ async def test_unfamiliar_apply_entry_uses_stagehand_then_rechecks_form(monkeypa
     class Stagehand:
         async def observe(self, _instruction, *, page):
             return SimpleNamespace(
-                data=[SimpleNamespace(
-                    selector="button.begin",
-                    description="Click to start the application",
-                    method="click",
-                )]
+                data=[
+                    SimpleNamespace(
+                        selector="button.begin",
+                        description="Click to start the application",
+                        method="click",
+                    )
+                ]
             )
 
         async def act(self, _action, *, page):
