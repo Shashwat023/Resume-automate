@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { profileApi, type BackendProfile } from '../../../api/profile';
 import { isNotFound } from '../../../api/axios';
 import { useProfileStore } from '../../../store/profileStore';
-import { getStoredProfileId, setStoredProfileId } from '@/lib/session';
+import { clearStoredProfileId, getStoredProfileId, setStoredProfileId } from '@/lib/session';
 import { toast } from 'sonner';
 import type { ProfileFormValues } from '../schema';
 
@@ -177,7 +177,17 @@ export const useProfileQuery = () => {
     queryKey: ['profile', profileId],
     queryFn: async () => {
       if (!profileId) return null;
-      const data = await profileApi.getProfile(profileId);
+      let data: BackendProfile;
+      try {
+        data = await profileApi.getProfile(profileId);
+      } catch (error) {
+        // The backend database may have been recreated while this browser
+        // still has the old id. Clear the stale session so saving the form
+        // creates a new profile instead of repeatedly requesting a missing
+        // record.
+        if (isNotFound(error)) clearStoredProfileId();
+        throw error;
+      }
       setProfile(backendToForm(data) as any);
       return data;
     },

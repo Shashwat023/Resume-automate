@@ -176,7 +176,9 @@ async def _run_loop() -> None:
                 state = await _get_or_create_state(db)
                 state.status = "paused"
                 state.current_company_name = None
-                state.last_company_error = f"LLM preflight failed, bulk sync not started — {problem}"
+                state.last_company_error = (
+                    f"LLM preflight failed, bulk sync not started — {problem}"
+                )
                 await _commit_state(db, state)
             logger.error("Bulk sync not started: LLM preflight failed — %s", problem)
             return
@@ -246,7 +248,9 @@ async def _run_loop() -> None:
                         f"raise the key limit, then Resume. Stopped at: {company_name}"
                     )
                     await _commit_state(db, state)
-                logger.error("Bulk sync paused: OpenRouter credits exhausted at %s", careers_url)
+                logger.error(
+                    "Bulk sync paused: OpenRouter credits exhausted at %s", careers_url
+                )
                 return
 
             async with async_session_factory() as db:

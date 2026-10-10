@@ -44,6 +44,29 @@ class TrackedCompanyRepository:
         result = await self._db.execute(stmt)
         return len(result.scalars().all())
 
+    async def disable_missing_from(self, current_careers_urls: set[str]) -> int:
+        """
+        Real bug, live-caught: `seed_portals.py`'s `seed()` only ever
+        inserts/updates — a company removed from `portals.yml` stayed
+        `enabled=True` in the DB forever, so deleting it from the file
+        (e.g. because it's structurally unscrapable and would just burn
+        tokens every week) did NOT stop the bulk sync from still picking
+        it up; `next_eligible()`'s query reads this table, never the
+        file directly. Disables (not deletes — keeps history, reversible
+        by re-adding to the file) every currently-enabled row whose
+        `careers_url` is no longer present. Returns the count disabled.
+        """
+        stmt = select(TrackedCompany).where(TrackedCompany.enabled.is_(True))
+        rows = (await self._db.execute(stmt)).scalars().all()
+        disabled = 0
+        for row in rows:
+            if row.careers_url not in current_careers_urls:
+                row.enabled = False
+                disabled += 1
+        if disabled:
+            await self._db.commit()
+        return disabled
+
     def _eligible_stmt(self, cutoff: datetime):
         """enabled AND (never synced OR last synced before `cutoff`) — the
         one query both `count_eligible` and `next_eligible` share, so the

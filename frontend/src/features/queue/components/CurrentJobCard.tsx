@@ -84,7 +84,7 @@ export const CurrentJobCard = () => {
           onClick={() => setLiveViewOpen(true)}
           className="mt-4 flex items-center justify-center gap-2 w-full px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white transition-colors rounded-lg text-sm font-semibold"
         >
-          <MonitorPlay className="w-4 h-4" /> Take Control — Enter Verification Code
+          <MonitorPlay className="w-4 h-4" /> Take Control — Continue Application
         </button>
       )}
 

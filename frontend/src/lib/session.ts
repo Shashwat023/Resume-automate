@@ -17,3 +17,7 @@ export function getStoredProfileId(): number | null {
 export function setStoredProfileId(id: number) {
   localStorage.setItem(PROFILE_ID_KEY, String(id));
 }
+
+export function clearStoredProfileId() {
+  localStorage.removeItem(PROFILE_ID_KEY);
+}

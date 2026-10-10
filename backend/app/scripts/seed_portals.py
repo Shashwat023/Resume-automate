@@ -52,6 +52,7 @@ async def seed() -> dict:
     inserted = 0
     updated = 0
     skipped = 0
+    kept_urls: set[str] = set()
 
     async with async_session_factory() as db:
         repo = TrackedCompanyRepository(db)
@@ -68,6 +69,7 @@ async def seed() -> dict:
                 skipped += 1
                 continue
 
+            kept_urls.add(careers_url)
             _, was_inserted = await repo.upsert(
                 name, careers_url, enabled=entry.get("enabled", True)
             )
@@ -76,11 +78,19 @@ async def seed() -> dict:
             else:
                 updated += 1
 
+        # A company removed from the file (e.g. confirmed too structurally
+        # complex to ever extract from — see FLAGGED.md #44) must stop
+        # being eligible, not just stop being upserted. Disabling (not
+        # deleting) is reversible: re-adding it to the file re-enables it
+        # via the upsert loop above.
+        disabled = await repo.disable_missing_from(kept_urls)
+
     return {
         "total_in_file": len(companies),
         "inserted": inserted,
         "updated": updated,
         "skipped": skipped,
+        "disabled": disabled,
     }
 
 
@@ -89,7 +99,8 @@ async def main() -> None:
     print(
         f"\nSeeded tracked_companies from {settings.portals_config_path}:\n"
         f"  {result['total_in_file']} entries in file\n"
-        f"  {result['inserted']} inserted, {result['updated']} updated, {result['skipped']} skipped"
+        f"  {result['inserted']} inserted, {result['updated']} updated, "
+        f"{result['skipped']} skipped, {result['disabled']} disabled (no longer in file)"
     )
 
 

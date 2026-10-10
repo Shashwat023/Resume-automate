@@ -122,8 +122,13 @@ async def test_run_loop_pauses_without_marking_when_credits_run_out(
 
     async def fake_sync_company(url, db):
         calls.append(url)
-        return {"success": False, "jobs_inserted": 0, "jobs_updated": 0,
-                "failed": 1, "out_of_credits": True}
+        return {
+            "success": False,
+            "jobs_inserted": 0,
+            "jobs_updated": 0,
+            "failed": 1,
+            "out_of_credits": True,
+        }
 
     monkeypatch.setattr(bulk_sync_service, "sync_company", fake_sync_company)
     async_session.add(TrackedCompanySyncState(id=1, status="running", total_eligible=2))
