@@ -33,6 +33,10 @@ export interface BackendProfile {
   willing_to_relocate?: boolean;
   skills?: string[];
   summary?: string;
+  education?: Record<string, unknown>[];
+  employment?: Record<string, unknown>[];
+  /** Form fields without a dedicated column, stored so they survive reload. */
+  extra?: Record<string, any>;
   created_at?: string;
   updated_at?: string;
 }

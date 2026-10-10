@@ -24,9 +24,11 @@ guessed — see PLAN.md Part C for the full writeup). The load-bearing facts:
   Stagehand, not a hang — failures are loud and safe.
 """
 
+import asyncio
 import json
 import logging
 import re
+import time
 
 import httpx
 from stagehand import LLMImageContent, LLMRole, LLMTextContent, LLMUsage
@@ -39,6 +41,7 @@ from stagehand._generated.models import (
 )
 
 from app.core.config import get_settings
+from app.services.engine.timeouts import describe
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +196,61 @@ def _make_strict_compatible(schema):
 
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+_NULLABLE_SCHEMA_KEYS = {"const", "enum"}
+_DROPPED_SCHEMA_KEYS = {"default", "examples"}
+
+
+def _strict_schema(node):
+    """
+    OpenAI (strict json_schema) rejects what Stagehand generates: objects
+    whose `additionalProperties` is an untyped placeholder ("schema must
+    have a 'type' key"), and properties left out of `required`. Normalize
+    to what strict mode demands — every object closed and fully required,
+    null-valued keys (pydantic dump artifacts) dropped. Still valid JSON
+    Schema, so lenient providers (Gemini etc.) are unaffected.
+    """
+    if isinstance(node, list):
+        return [_strict_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {
+        key: _strict_schema(value)
+        for key, value in node.items()
+        if key not in _DROPPED_SCHEMA_KEYS
+        and (value is not None or key in _NULLABLE_SCHEMA_KEYS)
+    }
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+        out["required"] = list((out.get("properties") or {}).keys())
+    return out
+
+
+def _parse_structured_text(text: str):
+    """
+    Models routed through OpenRouter often wrap JSON in ```json fences or
+    prepend reasoning/<think> text even under json_schema mode. Try the
+    plain parse first, then fall back to the outermost {...} block.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+    logger.warning(
+        "LLM structured output was not valid JSON (finish_reason unknown to "
+        "parser); raw reply (first 500 chars): %r",
+        text[:500],
+    )
+    return None
 
 
 def _blocks_to_openai_content(content) -> list[dict]:
@@ -226,17 +284,79 @@ def _messages_to_openai(params) -> list[dict]:
     return openai_messages
 
 
+# Set when OpenRouter answers 402 (credits / key spending limit exhausted).
+# Stagehand wraps callback exceptions into its own RPCError, losing the
+# type, so callers (the scraper) check this instead of parsing messages.
+_credits_exhausted: str | None = None
+
+
+def credits_exhausted() -> str | None:
+    """OpenRouter's 402 message if the last call ran out of credits, else None."""
+    return _credits_exhausted
+
+
+def clear_credits_exhausted() -> None:
+    global _credits_exhausted
+    _credits_exhausted = None
+
+
+# Models that answered 400 "Reasoning is mandatory" to reasoning={enabled:false}
+# (e.g. Gemini): sent without the flag from then on.
+_reasoning_mandatory: set[str] = set()
+
+
 async def _call_openrouter(body: dict) -> dict:
     if not settings.openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
+    if body.get("model") in _reasoning_mandatory:
+        body = {k: v for k, v in body.items() if k != "reasoning"}
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{settings.openrouter_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-            json=body,
-        )
-        resp.raise_for_status()
+        url = f"{settings.openrouter_base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {settings.openrouter_api_key}"}
+        resp = await client.post(url, headers=headers, json=body)
+        if resp.status_code == 400 and "reasoning" in body and "easoning" in resp.text:
+            _reasoning_mandatory.add(body["model"])
+            body = {k: v for k, v in body.items() if k != "reasoning"}
+            resp = await client.post(url, headers=headers, json=body)
+        global _credits_exhausted
+        # A key's own total limit answers 403 "Key limit exceeded", not 402
+        # (live 2026-10-07): just as final, so it counts as out of credits.
+        if resp.status_code == 402 or (
+            resp.status_code == 403 and "limit exceeded" in resp.text.lower()
+        ):
+            _credits_exhausted = resp.text[:300]
+        elif not resp.is_error:
+            _credits_exhausted = None
+        if resp.is_error:
+            # raise_for_status() alone drops OpenRouter's explanation (e.g.
+            # which schema/param the model rejected) — keep it in the error.
+            raise RuntimeError(
+                f"OpenRouter {resp.status_code} for model {body.get('model')}: "
+                f"{resp.text[:800]}"
+            )
         return resp.json()
+
+
+async def preflight_check(model: str | None = None, timeout: float = 30) -> str | None:
+    """One tiny call to prove the configured model answers at all. Returns an
+    error description, or None if healthy."""
+    model = model or settings.openrouter_model_tier2
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word OK."}],
+        "max_tokens": 16,
+    }
+    if settings.openrouter_disable_reasoning:
+        body["reasoning"] = {"enabled": False}
+    started = time.monotonic()
+    try:
+        await asyncio.wait_for(_call_openrouter(body), timeout=timeout)
+    except BaseException as exc:  # noqa: BLE001
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return f"{model}: {describe(exc)} after {time.monotonic() - started:.1f}s"
+    logger.info("LLM preflight OK: %s in %.1fs", model, time.monotonic() - started)
+    return None
 
 
 def _usage_from_openai(data: dict) -> LLMUsage:
@@ -248,7 +368,7 @@ def _usage_from_openai(data: dict) -> LLMUsage:
     )
 
 
-async def openrouter_llm(params):
+async def openrouter_llm(params, model: str | None = None):
     """
     Real OpenRouter-backed callback for Tier 2 (Stagehand observe/act).
     Branches on the exact param type Stagehand hands us, per the contract
@@ -257,7 +377,17 @@ async def openrouter_llm(params):
     discriminates them; see PLAN.md).
     """
     openai_messages = _messages_to_openai(params)
-    body = {"model": settings.openrouter_model_tier2, "messages": openai_messages}
+    body = {
+        "model": model or settings.openrouter_model_tier2,
+        "messages": openai_messages,
+        # Stagehand never sends a limit, and without one OpenRouter reserves
+        # the model's full output window (65,536 for Gemini) against the
+        # key's budget — live-caught as a 402 "can only afford 60166" while
+        # real replies here are < ~3k tokens.
+        "max_tokens": settings.openrouter_tier2_max_tokens,
+    }
+    if settings.openrouter_disable_reasoning:
+        body["reasoning"] = {"enabled": False}
     if params.temperature is not None:
         body["temperature"] = params.temperature
     if params.stop_sequences:
@@ -276,7 +406,7 @@ async def openrouter_llm(params):
             "json_schema": {
                 "name": params.response_format.name,
                 "strict": True,
-                "schema": schema_dict,
+                "schema": _strict_schema(schema_dict),
             },
         }
         # Belt-and-suspenders alongside response_format above: a provider
@@ -308,22 +438,27 @@ async def openrouter_llm(params):
             }
         )
 
-    data = await _call_openrouter(body)
+    started = time.monotonic()
+    try:
+        data = await _call_openrouter(body)
+    except BaseException as exc:
+        logger.error(
+            "LLM call to %s failed after %.1fs: %s",
+            body["model"], time.monotonic() - started, describe(exc),
+        )
+        raise
     choice = data["choices"][0]
     text = choice["message"]["content"] or ""
     usage = _usage_from_openai(data)
+    logger.info(
+        "LLM call to %s done in %.1fs (finish_reason=%s, out_tokens=%d, structured=%s)",
+        body["model"], time.monotonic() - started, choice.get("finish_reason"),
+        usage.output_tokens, is_structured,
+    )
     content_block = LLMMessageContentBlock(root=LLMTextContent(type="text", text=text))
 
     if is_structured:
-        structured = _extract_json(text)
-        if structured is None:
-            logger.warning(
-                "Tier 2 model returned non-JSON despite json_schema request; "
-                "attempting one repair call"
-            )
-            structured = await _repair_to_json(body, text)
-        if structured is not None:
-            structured = _coerce_nulls_to_schema_type(structured, schema_dict)
+        structured = _parse_structured_text(text)
         return LLMStructuredGenerateResult(
             role=LLMRole.assistant,
             content=[content_block],

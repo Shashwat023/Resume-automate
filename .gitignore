@@ -58,3 +58,14 @@ cmd.txt
 
 # --- Claude Code / Personal IDE config ---
 .claude/
+
+
+# -- docs --
+docs/
+
+# --- Image files ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf

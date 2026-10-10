@@ -604,8 +604,8 @@ tracked_companies:
     scan_query: 'site:https://www.bekbg.com careers OR jobs'
 
   - name: Bechtel
-    careers_url: https://www.bechtel.com/
-    notes: 'Confidence: High, Status: Verified or clear official match'
+    careers_url: https://jobs.bechtel.com/us/en/search-results
+    notes: 'Confidence: High, Status: Verified or clear official match. careers_url points at the global search-results page (1,123 jobs, from=N&s=1 pagination) rather than bechtel.com/careers/ (unreliable assessment, followed unrelated links) or jobs.bechtel.com/us/en (only a 5-job featured widget, no real pagination).'
     enabled: true
     scan_method: websearch
     scan_query: 'site:https://www.bechtel.com careers OR jobs'
@@ -1549,7 +1549,7 @@ tracked_companies:
     scan_query: 'site:https://kenpat.net careers OR jobs'
 
   - name: Kiewit
-    careers_url: https://www.kiewit.com/
+    careers_url: https://kiewitcareers.kiewit.com/search/?q=&sortColumn=referencedate&sortDirection=desc
     notes: 'Confidence: High, Status: Verified or clear official match'
     enabled: true
     scan_method: websearch
@@ -2851,7 +2851,7 @@ tracked_companies:
     scan_query: 'site:https://www.zenopower.com careers OR jobs'
 
   - name: Zero Impact Solutions
-    careers_url: https://www.zeroimpactsolutions.com/
+    careers_url: https://www.zeroimpactenergy.com/careers
     notes: 'Confidence: High, Status: Verified or clear official match'
     enabled: true
     scan_method: websearch

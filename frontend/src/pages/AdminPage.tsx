@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { adminApi, type SyncResult } from '@/api/admin';
+import { useQueryClient } from '@tanstack/react-query';
+import { adminApi, resetTestData, type SyncResult } from '@/api/admin';
 import {
   useAdminStatsQuery,
   useTrackedSyncStatusQuery,
@@ -21,6 +22,23 @@ export const AdminPage = () => {
   const { data: trackedSync } = useTrackedSyncStatusQuery();
   const startTrackedSync = useStartTrackedSyncMutation();
   const pauseTrackedSync = usePauseTrackedSyncMutation();
+  const queryClient = useQueryClient();
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleResetTestData = async () => {
+    if (!window.confirm('Delete all jobs, applications, run events and bulk-sync progress? Profile, resume and answers are kept.')) return;
+    setIsResetting(true);
+    try {
+      const counts = await resetTestData();
+      setResults([]);
+      queryClient.invalidateQueries();
+      toast.success(`DB cleaned: ${counts.jobs} jobs, ${counts.applications} applications removed; ${counts.tracked_companies_reset} companies reset`);
+    } catch (err: any) {
+      toast.error(`Reset failed: ${err?.response?.data?.detail ?? err.message}`);
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   const trackedSyncStatus = trackedSync?.status ?? 'idle';
   const trackedSyncIsRunning = trackedSyncStatus === 'running';
@@ -79,11 +97,22 @@ export const AdminPage = () => {
     <div className="space-y-6 max-w-5xl mx-auto">
 
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Admin Panel</h1>
-        <p className="text-gray-500 dark:text-gray-400 mt-1">
-          Scrape company job portals and sync them into the database.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Admin Panel</h1>
+          <p className="text-gray-500 dark:text-gray-400 mt-1">
+            Scrape company job portals and sync them into the database.
+          </p>
+        </div>
+        {/* TEMPORARY: test-run cleanup */}
+        <button
+          onClick={handleResetTestData}
+          disabled={isResetting || isRunning || trackedSyncIsRunning}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg border border-red-300 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          <Trash2 className="w-4 h-4" />
+          {isResetting ? 'Cleaning…' : 'Clean DB (test)'}
+        </button>
       </div>
 
       {/* Stats row */}

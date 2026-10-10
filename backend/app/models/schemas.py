@@ -38,6 +38,9 @@ class ProfileBase(BaseModel):
     willing_to_relocate: bool | None = None
     skills: list[str] | None = None
     summary: str | None = None
+    education: list[dict] | None = None
+    employment: list[dict] | None = None
+    extra: dict | None = None
 
 
 class ProfileCreate(ProfileBase):
@@ -80,6 +83,9 @@ class ProfileUpdate(BaseModel):
     willing_to_relocate: bool | None = None
     skills: list[str] | None = None
     summary: str | None = None
+    education: list[dict] | None = None
+    employment: list[dict] | None = None
+    extra: dict | None = None
 
 
 class ProfileOut(ProfileBase):

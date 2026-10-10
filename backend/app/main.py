@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -11,6 +12,19 @@ from app.core.db import init_db
 from app.core.exceptions import ConflictError, NotFoundError
 
 settings = get_settings()
+
+# Nothing else configures logging, so Python's default (WARNING) hid every
+# INFO line the app writes — the scraper's "Extracted N jobs", iframe and
+# explore steps never reached the terminal. Only the app's own loggers are
+# raised; uvicorn, httpx and the rest keep their defaults.
+_app_logger = logging.getLogger("app")
+if not _app_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S")
+    )
+    _app_logger.addHandler(_handler)
+    _app_logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager

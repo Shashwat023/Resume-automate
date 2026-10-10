@@ -49,6 +49,16 @@ class Profile(Base):
     willing_to_relocate: Mapped[bool | None] = mapped_column(default=None)
     skills: Mapped[list[str] | None] = mapped_column(JSON, default=None)
     summary: Mapped[str | None] = mapped_column(Text, default=None)
+    # The profile form's repeatable sections, stored as entered (lists of
+    # {degree, university, fieldOfStudy, startDate, endDate, grade, ...} /
+    # {company, role, location, startDate, endDate, currentlyWorking, ...}).
+    # Before these existed, both were silently dropped on every save.
+    education: Mapped[list[dict] | None] = mapped_column(JSON, default=None)
+    employment: Mapped[list[dict] | None] = mapped_column(JSON, default=None)
+    # Every other form field without a dedicated column (alternate phone,
+    # timezone, extra social links, job preferences, EEO answers, ...), so
+    # the whole form round-trips instead of losing them on reload.
+    extra: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -199,6 +209,7 @@ class TrackedCompany(Base):
     ats: Mapped[str | None] = mapped_column(Text, default=None)
     enabled: Mapped[bool] = mapped_column(default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
 
 
 class TrackedCompanySyncState(Base):
@@ -243,6 +254,7 @@ class TrackedCompanySyncState(Base):
     jobs_updated: Mapped[int] = mapped_column(default=0)
     companies_failed: Mapped[int] = mapped_column(default=0)
     current_company_name: Mapped[str | None] = mapped_column(Text, default=None)
+    last_company_error: Mapped[str | None] = mapped_column(Text, default=None)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
