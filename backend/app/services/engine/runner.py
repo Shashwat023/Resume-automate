@@ -18,16 +18,16 @@ pause/resume, and automated submission with verification.
                                         but not click itself (custom
                                         comboboxes, checkboxes, radios).
 
-Per the Day-4 scope correction, `needs_input` now has exactly two causes:
-2FA, and a CAPTCHA that failed twice (a deliberate, flagged deviation —
-see FLAGGED.md). Everything else — form-fill, CAPTCHA, submission — is
-fully automated; a run ends in `completed` or `failed`, not a permanent
-needs_input parking state.
+`needs_input` pauses the browser for steps that need a person, including
+account creation, verification challenges, and form/navigation cases the
+engine cannot resolve safely. The same browser session resumes afterward.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from stagehand import Stagehand
 
@@ -56,7 +56,7 @@ from app.services.engine.tier0_harvest import (
 )
 from app.services.engine.tier1_map import Tier1Result, map_fields
 from app.services.engine.tier2_resolve import Tier2Result, resolve_and_execute
-from app.services.engine.timeouts import with_timeout
+from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
 from app.services.engine.twofa_detect import detect_2fa
 from app.services.resume.storage import LocalFilesystemStorage
 from app.services.resume_service import ResumeService
@@ -76,9 +76,95 @@ _APPLY_BUTTON = re.compile(
     # throughout this project (job-boards.greenhouse.io/.../jobs/{id})
     # show the form directly with no landing-page Apply click needed, so
     # this path's return value never actually mattered until now.
-    r"^\s*\[([\w-]+)\]\s+button:\s*(Apply|Apply Now|Apply for this job)\s*$",
+    r"^\s*\[([\w-]+)\]\s+button:\s*"
+    r"(Apply|Apply Now|Apply for this job|Apply Manually)\s*$",
     re.I | re.M,
 )
+_APPLY_LINK = re.compile(
+    r"^\s*\[([\w-]+)\]\s+link:\s*(Apply|Apply Now|Apply for this job)\s*$",
+    re.I | re.M,
+)
+_ACCOUNT_HEADING = re.compile(
+    r"^\s*\[[\w-]+\]\s+heading:\s*(?:Create Account|Sign In)\s*$",
+    re.I | re.M,
+)
+_PASSWORD_FIELD = re.compile(
+    r"^\s*\[[\w-]+\]\s+(?:textbox|input):\s*"
+    r"(?:Password|Verify New Password)\s*$",
+    re.I | re.M,
+)
+_ACTION_CONTROL = re.compile(
+    r"^\s*\[[\w-]+\]\s+(button|link):\s*"
+    r"(Apply|Apply Now|Apply for this job|Apply Manually|"
+    r"Submit|Submit Application|Send Application|"
+    r"Continue|Save and Continue|Next|Sign In|Create Account)\s*$",
+    re.I | re.M,
+)
+_CONTROL = re.compile(r"^\s*\[[\w-]+\]\s+(button|link):", re.I | re.M)
+_NEXT_BUTTON = re.compile(
+    r"^\s*\[([\w-]+)\]\s+button:\s*"
+    r"(Save and Continue|Continue|Next|Next Step)\s*$",
+    re.I | re.M,
+)
+_ACCOUNT_TEXT = re.compile(r"\b(?:create account|sign in|log in|log into)\b", re.I)
+_PASSWORD_CONTROL = re.compile(
+    r"^\s*\[[\w-]+\]\s+(?:textbox|input(?:,\s*password)?):[^\n]*\bpassword\b",
+    re.I | re.M,
+)
+
+
+def _is_account_gate(tree: str) -> bool:
+    return bool(
+        (_ACCOUNT_HEADING.search(tree) and _PASSWORD_FIELD.search(tree))
+        or (_ACCOUNT_TEXT.search(tree) and _PASSWORD_CONTROL.search(tree))
+    )
+
+
+async def _account_gate_present(page, tree: str) -> bool:
+    if _is_account_gate(tree):
+        return True
+    try:
+        return bool(
+            await with_timeout(
+                page.evaluate(
+                    "(() => !!document.querySelector('input[type=password]') && "
+                    "/create account|sign in|log in/i.test(document.body?.innerText || ''))()"
+                ),
+                what="evaluate(account gate)",
+            )
+        )
+    except Exception:  # noqa: BLE001 - tree detection is the fallback
+        return False
+
+
+def _safe_url(url: str) -> str:
+    """Keep location useful in logs without retaining query parameters."""
+    parsed = urlsplit(url)
+    return (
+        f"{parsed.scheme}://{parsed.hostname}{parsed.path}"
+        if parsed.scheme in {"http", "https"} and parsed.hostname
+        else "<unavailable>"
+    )
+
+
+async def _page_location(page) -> str:
+    try:
+        return _safe_url(await with_timeout(page.url(), what="page.url"))
+    except Exception:  # noqa: BLE001 - diagnostics must never stop an application
+        return "<unavailable>"
+
+
+def _control_summary(tree: str) -> str:
+    """Summarize only fixed action labels; never log form values or page text."""
+    roles = [match.group(1).lower() for match in _CONTROL.finditer(tree)]
+    actions = [
+        f"{match.group(1).lower()}:{match.group(2)}"
+        for match in _ACTION_CONTROL.finditer(tree)
+    ]
+    return (
+        f"buttons={roles.count('button')}, links={roles.count('link')}, "
+        f"actions=[{', '.join(actions[:8])}]"
+    )
 
 
 class ApplicationCancelled(Exception):
@@ -258,62 +344,147 @@ async def run_application(application_id: str) -> None:
                     # this ran against a real form (snapshot taken too early -> stale xpath).
                     await page.wait_for_timeout(1500)
 
-                    clicked_apply = await _click_apply_if_present(page)
+                    clicked_apply = await _click_apply_if_present(page, application_id, sh)
                     if clicked_apply:
                         await _log(
                             application_id,
-                            "Clicked an 'Apply' button to reveal the application form",
+                            "Advanced past the Apply entry control",
                         )
                         await page.wait_for_timeout(1500)
 
-                    # CAPTCHA/2FA can gate the form itself, not just the final submit —
-                    # check before the fill cascade as well as around submission below.
-                    await _resolve_captcha_if_present(application_id, page)
-                    await _handle_2fa_if_present(application_id, page)
-
-                    cascade = await _run_fill_cascade(
-                        application_id,
-                        sh,
-                        page,
-                        profile_dict,
-                        profile_id,
-                        resume_file_path,
-                    )
-
-                    # Proactive self-check before ever attempting submit — not just
-                    # reactively after a validation error. Targeted at ONLY the
-                    # fields nothing handled in the first pass (never re-touches an
-                    # already-succeeded field: re-clicking an already-set checkbox
-                    # or dropdown risks toggling it back off).
-                    if _unhandled_labels(cascade):
-                        cascade = await _repair_unhandled_fields(
-                            application_id,
-                            sh,
-                            page,
-                            profile_dict,
-                            profile_id,
-                            cascade,
+                    # Workday and similar ATSs have several form pages. Check for
+                    # account/verification gates before EACH page, fill one page,
+                    # then advance until the actual Submit control is visible.
+                    auto_steps = 0
+                    total_tier0 = total_tier1 = total_tier2 = 0
+                    while True:
+                        await _check_paused_and_wait(application_id)
+                        await _resolve_captcha_if_present(application_id, page)
+                        await _handle_2fa_if_present(application_id, page)
+                        await _handle_account_gate_if_present(application_id, page)
+                        snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+                        fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
+                        submit_xpath = find_submit_button(
+                            snapshot.formatted_tree, snapshot.xpath_map
                         )
 
-                    await _escalate_unhandled_fields_if_any(application_id, cascade)
+                        if not fields and not submit_xpath:
+                            advanced = await _click_apply_if_present(
+                                page, application_id, sh
+                            )
+                            if not advanced:
+                                advanced = await _click_next_if_present(
+                                    page, application_id
+                                )
+                            if not advanced:
+                                await _log(
+                                    application_id,
+                                    "No form or Submit control is visible on "
+                                    f"{await _page_location(page)}; pausing for "
+                                    "manual navigation in Live View",
+                                    level="warn",
+                                    tier="navigation",
+                                )
+                                await _pause_for_human(
+                                    application_id,
+                                    "manual_navigation_required",
+                                    "Resumed after manual navigation",
+                                )
+                                auto_steps = 0
+                                continue
+                        else:
+                            await _log(
+                                application_id,
+                                f"Application step {auto_steps + 1}: "
+                                f"{len(fields)} field(s) on {await _page_location(page)}",
+                                tier="navigation",
+                            )
+                            cascade = await _run_fill_cascade(
+                                application_id,
+                                sh,
+                                page,
+                                profile_dict,
+                                profile_id,
+                                resume_file_path,
+                            )
+                            if _unhandled_labels(cascade):
+                                cascade = await _repair_unhandled_fields(
+                                    application_id,
+                                    sh,
+                                    page,
+                                    profile_dict,
+                                    profile_id,
+                                    cascade,
+                                )
+                            await _escalate_unhandled_fields_if_any(application_id, cascade)
+                            total_tier0 += len(cascade.tier0.filled)
+                            total_tier1 += len(cascade.tier1.filled) + len(
+                                cascade.tier1.from_library
+                            )
+                            total_tier2 += len(cascade.tier2.resolved)
 
-                    if get_settings().submit_enabled:
-                        submit_result = await _submit_and_verify(
-                            application_id,
-                            sh,
-                            page,
-                            profile_dict,
-                            profile_id,
-                            resume_file_path,
-                            cascade,
-                        )
-                    else:
-                        await _log(
-                            application_id,
-                            "Submission skipped — SUBMIT_ENABLED is False (dev safety). "
-                            "Form left filled, unsubmitted.",
-                        )
-                        submit_result = SubmitResult(outcome="skipped")
+                            # Filling can reveal a final Submit button.
+                            snapshot = await with_timeout(
+                                page.snapshot(), what="page.snapshot"
+                            )
+                            submit_xpath = find_submit_button(
+                                snapshot.formatted_tree, snapshot.xpath_map
+                            )
+                            if submit_xpath:
+                                if get_settings().submit_enabled:
+                                    submit_result = await _submit_and_verify(
+                                        application_id,
+                                        sh,
+                                        page,
+                                        profile_dict,
+                                        profile_id,
+                                        resume_file_path,
+                                        cascade,
+                                    )
+                                else:
+                                    await _log(
+                                        application_id,
+                                        "Submission skipped — SUBMIT_ENABLED is False "
+                                        "(dev safety). Form left filled, unsubmitted.",
+                                    )
+                                    submit_result = SubmitResult(outcome="skipped")
+                                break
+
+                            advanced = await _click_next_if_present(
+                                page, application_id
+                            )
+                            if not advanced:
+                                await _log(
+                                    application_id,
+                                    "Filled this page, but no Continue or Submit "
+                                    f"control was found on {await _page_location(page)}; "
+                                    "pausing for manual navigation in Live View",
+                                    level="warn",
+                                    tier="navigation",
+                                )
+                                await _pause_for_human(
+                                    application_id,
+                                    "manual_navigation_required",
+                                    "Resumed after manual navigation",
+                                )
+                                auto_steps = 0
+                                continue
+
+                        auto_steps += 1
+                        if auto_steps >= 10:
+                            await _log(
+                                application_id,
+                                "Ten automatic application steps reached; "
+                                "pausing for a manual check in Live View",
+                                level="warn",
+                                tier="navigation",
+                            )
+                            await _pause_for_human(
+                                application_id,
+                                "manual_navigation_required",
+                                "Resumed after manual navigation",
+                            )
+                            auto_steps = 0
                 finally:
                     await sh.close()
             finally:
@@ -333,9 +504,9 @@ async def run_application(application_id: str) -> None:
                 RunEvent(
                     application_id=application_id,
                     message=(
-                        f"Automation pass complete — Tier 0: {len(cascade.tier0.filled)}, "
-                        f"Tier 1: {len(cascade.tier1.filled) + len(cascade.tier1.from_library)}, "
-                        f"Tier 2: {len(cascade.tier2.resolved)} field(s) handled; "
+                        f"Automation pass complete — Tier 0: {total_tier0}, "
+                        f"Tier 1: {total_tier1}, "
+                        f"Tier 2: {total_tier2} field(s) handled; "
                         f"{len(still_unhandled)} still unhandled. "
                         f"Submission: {submit_result.outcome}"
                         + (f" ({submit_result.detail})" if submit_result.detail else "")
@@ -741,6 +912,15 @@ async def _submit_and_verify(
         snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
         xpath = find_submit_button(snapshot.formatted_tree, snapshot.xpath_map)
         if xpath is None:
+            await _log(
+                application_id,
+                "Submit control missing on "
+                f"{await _page_location(page)} (attempt {attempt + 1}/{MAX_SUBMIT_ATTEMPTS}); "
+                f"form fields={len(collect_fields(snapshot.formatted_tree, snapshot.xpath_map))}; "
+                + _control_summary(snapshot.formatted_tree),
+                level="warn",
+                tier="submit",
+            )
             return SubmitResult(outcome="unknown", detail="submit button not found")
 
         # Hard rule (PLAN.md Day 4 Part H): a paused job never submits. This
@@ -1073,35 +1253,328 @@ async def _resume_from_pause(application_id: str) -> None:
             await db.commit()
 
 
-async def _click_apply_if_present(page) -> bool:
+async def _llm_click_apply(page, sh, application_id: str) -> bool:
+    """Resolve an unfamiliar entry control with Stagehand, then verify its action."""
+    try:
+        observed = await with_timeout(
+            sh.observe(
+                "Find the control that starts this job application. Prefer "
+                "Apply Manually; otherwise choose Autofill with Resume or Apply. "
+                "Do not create an account, sign in, use a previous application, "
+                "or submit an application.",
+                page=page,
+            ),
+            LLM_CALL_TIMEOUT_SECONDS,
+            "observe(Apply entry)",
+        )
+        actions = observed.data or []
+        action = next(
+            (
+                item
+                for item in actions
+                if (item.method or "click").lower() == "click"
+                and re.search(
+                    r"apply|autofill|(?:start|begin).*application",
+                    item.description or "",
+                    re.I,
+                )
+                and not re.search(
+                    r"submit|create account|sign in|last application",
+                    item.description or "",
+                    re.I,
+                )
+            ),
+            None,
+        )
+        if action is None:
+            await _log(
+                application_id,
+                "Stagehand found no safe Apply entry control on "
+                f"{await _page_location(page)}",
+                tier="navigation",
+            )
+            return False
+
+        # A model-selected anchor may open a new tab. Follow its real href
+        # in the tracked tab so the fill cascade and Live View stay together.
+        selector = action.selector
+        try:
+            href = await with_timeout(
+                page.evaluate(
+                    "(() => {"
+                    f" const selector = {json.dumps(selector)};"
+                    " let node = null;"
+                    " if (selector.startsWith('//') || selector.startsWith('xpath=')) {"
+                    "   const path = selector.startsWith('xpath=') ? selector.slice(6) : selector;"
+                    "   node = document.evaluate(path, document, null,"
+                    "     XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;"
+                    " } else { try { node = document.querySelector(selector); } catch {} }"
+                    " return (node instanceof Element ? node : node?.parentElement)"
+                    "   ?.closest('a[href]')?.href ?? null;"
+                    " })()"
+                ),
+                what="evaluate(Stagehand Apply link)",
+            )
+        except Exception:  # noqa: BLE001 - a button can still be clicked by act()
+            href = None
+        parsed = urlsplit(href) if isinstance(href, str) else None
+        if parsed and parsed.scheme in {"http", "https"} and parsed.netloc:
+            await _log(
+                application_id,
+                f"Stagehand selected Apply link to {_safe_url(href)}",
+                tier="navigation",
+            )
+            await with_timeout(page.goto(href), what="page.goto(Stagehand Apply link)")
+            await with_timeout(
+                page.wait_for_load_state("load"), what="wait_for_load_state"
+            )
+        else:
+            await _log(
+                application_id,
+                f"Stagehand selected Apply entry control on {await _page_location(page)}",
+                tier="navigation",
+            )
+            acted = await with_timeout(
+                sh.act(action, page=page),
+                LLM_CALL_TIMEOUT_SECONDS,
+                "act(Apply entry)",
+            )
+            if not acted.data.success:
+                await _log(
+                    application_id,
+                    "Stagehand Apply entry click did not succeed",
+                    level="warn",
+                    tier="navigation",
+                )
+                return False
+        await page.wait_for_timeout(1500)
+        return True
+    except Exception as exc:  # noqa: BLE001 - deterministic/manual fallback remains
+        await _log(
+            application_id,
+            f"Stagehand Apply entry attempt failed ({type(exc).__name__})",
+            level="warn",
+            tier="navigation",
+        )
+        return False
+
+
+async def _click_next_if_present(page, application_id: str) -> bool:
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    before_url = await _page_location(page)
+    match = _NEXT_BUTTON.search(snapshot.formatted_tree)
+    if not match:
+        return False
+    xpath = snapshot.xpath_map.get(match.group(1))
+    if not xpath:
+        await _log(
+            application_id,
+            f"{match.group(2)} control has no XPath on {await _page_location(page)}",
+            level="warn",
+            tier="navigation",
+        )
+        return False
+    await _log(
+        application_id,
+        f"Clicking {match.group(2)} on {await _page_location(page)}",
+        tier="navigation",
+    )
+    await with_timeout(page.locator(xpath).click(), what="click(Continue)")
+    await page.wait_for_timeout(1500)
+    after = await with_timeout(page.snapshot(), what="page.snapshot")
+    after_url = await _page_location(page)
+    if after_url == before_url and after.formatted_tree == snapshot.formatted_tree:
+        await _log(
+            application_id,
+            f"{match.group(2)} did not advance the page on {before_url}; "
+            "pausing for manual review",
+            level="warn",
+            tier="navigation",
+        )
+        return False
+    await _log(
+        application_id,
+        f"Continue reached {after_url}",
+        tier="navigation",
+    )
+    return True
+
+
+async def _click_apply_if_present(
+    page, application_id: str | None = None, sh=None
+) -> bool:
     """
-    Heuristic, not universal: many ATS (Greenhouse among them) gate the
-    actual form behind an "Apply" button on a job-description landing page.
+    Heuristic, not universal: many ATS gate the actual form behind an
+    "Apply" control on a job-description landing page. Concentrix uses an
+    <a target="_blank"> link to a Workday form, so clicking it would leave
+    this automation's page on the job description. Read that link's real
+    href and navigate the current page instead.
     This is a cheap, deterministic, common-case check — the general "find
     and click the right control on an arbitrary page" problem is Tier 2's
     job (Stagehand observe/act), not Tier 0's.
 
-    One retry with a fresh snapshot: a snapshot's xpaths are a point-in-time
-    read, and a page that's still settling can invalidate them between the
-    snapshot and the click (observed against a real Greenhouse form).
+    Workday can add a second "Apply Manually" choice after the first link.
+    Follow at most two entry controls and stop as soon as form fields appear.
+    A stale xpath gets one fresh-snapshot retry at each step.
     """
-    for attempt in range(2):
+    opened = False
+    for hop in range(2):
+        for attempt in range(2):
+            snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+            fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
+            if opened and fields:
+                if application_id:
+                    await _log(
+                        application_id,
+                        f"Apply handoff reached {await _page_location(page)}; "
+                        f"form fields visible={len(fields)}",
+                        tier="navigation",
+                    )
+                return True
+            match = _APPLY_BUTTON.search(snapshot.formatted_tree)
+            is_link = False
+            if not match:
+                match = _APPLY_LINK.search(snapshot.formatted_tree)
+                is_link = match is not None
+            if not match:
+                # A form or account gate is already present. The model must
+                # not invent another Apply click on that page.
+                if (
+                    fields
+                    or _is_account_gate(snapshot.formatted_tree)
+                    or find_submit_button(snapshot.formatted_tree, snapshot.xpath_map)
+                ):
+                    return opened
+                if sh is not None and application_id:
+                    if await _llm_click_apply(page, sh, application_id):
+                        opened = True
+                        break
+                if application_id:
+                    await _log(
+                        application_id,
+                        f"No Apply control on {await _page_location(page)}; "
+                        f"form fields={len(fields)}; "
+                        + _control_summary(snapshot.formatted_tree),
+                        level="warn" if not opened and not fields else "info",
+                        tier="navigation",
+                    )
+                return opened
+            xpath = snapshot.xpath_map.get(match.group(1))
+            if not xpath:
+                if application_id:
+                    await _log(
+                        application_id,
+                        f"Apply control has no XPath on {await _page_location(page)}; "
+                        + _control_summary(snapshot.formatted_tree),
+                        level="warn",
+                        tier="navigation",
+                    )
+                return opened
+            try:
+                if is_link:
+                    # Read the href of the selected accessibility node.
+                    # Clicking target="_blank" would leave this page behind.
+                    href = await with_timeout(
+                        page.evaluate(
+                            "(() => {"
+                            f" const node = document.evaluate({json.dumps(xpath)}, document, null, "
+                            "XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;"
+                            " const element = node instanceof Element ? node : node?.parentElement;"
+                            " return element?.closest('a[href]')?.href ?? null;"
+                            " })()"
+                        ),
+                        what="evaluate(Apply link)",
+                    )
+                    parsed_href = urlsplit(href) if isinstance(href, str) else None
+                    if (
+                        not parsed_href
+                        or parsed_href.scheme not in {"http", "https"}
+                        or not parsed_href.netloc
+                    ):
+                        if application_id:
+                            await _log(
+                                application_id,
+                                f"Apply link has no usable HTTP URL on {await _page_location(page)}",
+                                level="warn",
+                                tier="navigation",
+                            )
+                        return opened
+                    if application_id:
+                        await _log(
+                            application_id,
+                            f"Apply hop {hop + 1}/2: following link to {_safe_url(href)}",
+                            tier="navigation",
+                        )
+                    await with_timeout(page.goto(href), what="page.goto(Apply link)")
+                    await with_timeout(
+                        page.wait_for_load_state("load"), what="wait_for_load_state"
+                    )
+                else:
+                    if application_id:
+                        await _log(
+                            application_id,
+                            f"Apply hop {hop + 1}/2: clicking {match.group(2)} "
+                            f"on {await _page_location(page)}",
+                            tier="navigation",
+                        )
+                    await page.locator(xpath).click()
+                opened = True
+                await page.wait_for_timeout(1500)
+                if application_id:
+                    await _log(
+                        application_id,
+                        f"Apply hop {hop + 1}/2 reached {await _page_location(page)}",
+                        tier="navigation",
+                    )
+                break
+            except Exception as exc:
+                if application_id:
+                    await _log(
+                        application_id,
+                        f"Apply hop {hop + 1}/2 failed on {await _page_location(page)} "
+                        f"({type(exc).__name__}); "
+                        + ("retrying with a fresh snapshot" if attempt == 0 else "retry exhausted"),
+                        level="warn",
+                        tier="navigation",
+                    )
+                if attempt == 0:
+                    await page.wait_for_timeout(1000)
+                    continue
+                raise
+    if application_id:
+        final_snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+        await _log(
+            application_id,
+            f"Apply handoff stopped after two hops on {await _page_location(page)}; "
+            f"form fields={len(collect_fields(final_snapshot.formatted_tree, final_snapshot.xpath_map))}; "
+            + _control_summary(final_snapshot.formatted_tree),
+            tier="navigation",
+        )
+    return opened
+
+
+async def _handle_account_gate_if_present(application_id: str, page) -> None:
+    """Let the applicant handle account credentials and legal consent.
+
+    Workday's Apply Manually step opens a Create Account form before the job
+    application. The field cascade must not invent a password or consent on
+    the user's behalf. Resume keeps the same browser and checks again.
+    """
+    while True:
         snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
-        match = _APPLY_BUTTON.search(snapshot.formatted_tree)
-        if not match:
-            return False
-        xpath = snapshot.xpath_map.get(match.group(1))
-        if not xpath:
-            return False
-        try:
-            await page.locator(xpath).click()
-            return True
-        except Exception:
-            if attempt == 0:
-                await page.wait_for_timeout(1000)
-                continue
-            raise
-    return False
+        tree = snapshot.formatted_tree
+        if not await _account_gate_present(page, tree):
+            return
+        await _log(
+            application_id,
+            "Account sign-in or creation is required on "
+            f"{await _page_location(page)} — pausing for manual input via live view",
+            level="warn",
+            tier="navigation",
+        )
+        await _pause_for_human(
+            application_id, "account_required", "Resumed after account sign-in or creation"
+        )
 
 
 async def _log(

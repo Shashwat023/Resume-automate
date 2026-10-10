@@ -10,8 +10,8 @@ interface LiveViewProps {
 
 /**
  * Canvas + input capture over WS /ws/apply/{id}/live-view — the one
- * remaining human-in-the-loop surface (Day 4 scope correction: 2FA only,
- * plus a CAPTCHA-solve-failed escalation). Backend sends JPEG screencast
+ * human-in-the-loop surface for account creation, verification, and manual
+ * navigation. Backend sends JPEG screencast
  * frames and forwards raw CDP Input.dispatch{Mouse,Key}Event params, so
  * this component only needs to scale click coordinates from the rendered
  * <img> size to the frame's natural (real viewport) size and pass key
@@ -131,9 +131,9 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
 
         <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 shrink-0 flex items-center justify-between gap-3">
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Click into the browser above and enter your verification code, then press Resume — or
-            Cancel to give up on this application. The agent will also continue automatically if
-            the challenge clears on its own.
+            Complete the requested step in the browser above, including account creation or
+            sign-in if needed, then press Resume. The application will continue from this page.
+            Verification challenges may also resume automatically when they clear.
           </p>
           <div className="flex items-center gap-2 shrink-0">
             <button

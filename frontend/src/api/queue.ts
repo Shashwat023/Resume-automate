@@ -1,5 +1,5 @@
-import api from './axios';
-import { getStoredProfileId } from '@/lib/session';
+import api, { isNotFound } from './axios';
+import { clearStoredProfileId, getStoredProfileId } from '@/lib/session';
 import type { QueueStateResponse, QueueItem, JobStatus, QueueStatus } from '../types';
 
 // Shape returned by GET /api/apply/history/{profile_id}
@@ -213,6 +213,19 @@ export const queueApi = {
     const profileId = getStoredProfileId();
     if (!profileId) throw new Error('Please save your profile first.');
 
+    // Validate the profile once before starting N identical requests. The
+    // id is persisted in localStorage, so it can outlive a recreated backend
+    // database and otherwise makes every selected job fail with the same 404.
+    try {
+      await api.get(`/api/profile/${profileId}`);
+    } catch (error) {
+      if (isNotFound(error)) {
+        clearStoredProfileId();
+        throw new Error('Your saved profile is no longer available. Open Profile and save it again.');
+      }
+      throw error;
+    }
+
     const results = await Promise.allSettled(
       payload.jobs.map((job) =>
         api.post('/api/apply/start', {
@@ -226,8 +239,15 @@ export const queueApi = {
       .filter((r) => r.status === 'fulfilled')
       .map((r) => (r as PromiseFulfilledResult<any>).value);
 
-    const failed = results.filter((r) => r.status === 'rejected').length;
+    const failedResults = results.filter((r) => r.status === 'rejected');
+    const failed = failedResults.length;
     if (failed > 0) console.warn(`${failed} job(s) failed to queue`);
+    if (succeeded.length === 0 && failedResults.length > 0) {
+      const firstFailure = failedResults[0] as PromiseRejectedResult;
+      throw firstFailure.reason instanceof Error
+        ? firstFailure.reason
+        : new Error('No jobs could be added to the queue.');
+    }
 
     return succeeded;
   },

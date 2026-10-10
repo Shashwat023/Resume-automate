@@ -576,6 +576,128 @@ async def test_completed_run_also_closes_the_browser_session(
     assert close_calls == [str(application.profile_id)]
 
 
+async def test_run_resumes_after_account_creation_and_advances_workday_steps(
+    async_session, monkeypatch
+):
+    from types import SimpleNamespace
+
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    workday_url = "https://workday.example/job/apply"
+
+    class Page:
+        stage = "landing"
+        current_url = "https://example.com/apply"
+
+        async def goto(self, url):
+            self.current_url = url
+            self.stage = "choice" if url == workday_url else "landing"
+
+        async def url(self):
+            return self.current_url
+
+        async def wait_for_load_state(self, _state):
+            pass
+
+        async def wait_for_timeout(self, _milliseconds):
+            pass
+
+        async def evaluate(self, expression):
+            if "document.evaluate" in expression:
+                return workday_url
+            return False
+
+        async def snapshot(self):
+            trees = {
+                "landing": ("[1] link: Apply\n", {"1": "//a[@id='apply']"}),
+                "choice": (
+                    "[2] button: Apply Manually\n",
+                    {"2": "//button[@id='manual']"},
+                ),
+                "account": (
+                    "[3] heading: Create Account\n[4] textbox: Password\n",
+                    {"4": "//input[@type='password']"},
+                ),
+                "info": (
+                    "[5] textbox: First Name\n[6] button: Save and Continue\n",
+                    {"5": "//input[@id='first']", "6": "//button[@id='next']"},
+                ),
+                "review": (
+                    "[7] heading: Review\n[8] button: Submit Application\n",
+                    {"8": "//button[@id='submit']"},
+                ),
+            }
+            tree, xpaths = trees[self.stage]
+            return SimpleNamespace(formatted_tree=tree, xpath_map=xpaths)
+
+        def locator(self, xpath):
+            page = self
+
+            class Locator:
+                async def click(self):
+                    if xpath == "//button[@id='manual']":
+                        page.stage = "account"
+                    elif xpath == "//button[@id='next']":
+                        page.stage = "review"
+                    else:
+                        raise AssertionError(xpath)
+
+            return Locator()
+
+    page = Page()
+
+    class Stagehand:
+        browser = SimpleNamespace(
+            context=SimpleNamespace(active_page=lambda: _active_page())
+        )
+
+        @staticmethod
+        async def create(**_kwargs):
+            return Stagehand()
+
+        async def close(self):
+            pass
+
+    async def _active_page():
+        return page
+
+    async def launch(_profile_id):
+        return SimpleNamespace(browser=object())
+
+    async def no_op(*_args, **_kwargs):
+        return False
+
+    pauses = []
+    fill_stages = []
+
+    async def pause(_application_id, reason, _message):
+        pauses.append(reason)
+        assert reason == "account_required"
+        page.stage = "info"
+
+    async def fill(_application_id, _sh, _page, *_args):
+        fill_stages.append(page.stage)
+        return cascade
+
+    async def submit(*_args):
+        return runner.SubmitResult(outcome="completed")
+
+    monkeypatch.setattr(runner, "Stagehand", Stagehand)
+    monkeypatch.setattr(runner, "get_or_launch", launch)
+    monkeypatch.setattr(runner, "close_session", no_op)
+    monkeypatch.setattr(runner, "_resolve_captcha_if_present", no_op)
+    monkeypatch.setattr(runner, "_handle_2fa_if_present", no_op)
+    monkeypatch.setattr(runner, "_pause_for_human", pause)
+    monkeypatch.setattr(runner, "_run_fill_cascade", fill)
+    monkeypatch.setattr(runner, "_submit_and_verify", submit)
+    monkeypatch.setattr(runner, "get_settings", lambda: SimpleNamespace(submit_enabled=True))
+
+    await runner.run_application(application.id)
+    await async_session.refresh(application)
+    assert application.status == st.COMPLETED
+    assert pauses == ["account_required"]
+    assert fill_stages == ["info", "review"]
+
+
 async def test_session_is_closed_before_the_profile_lock_releases(
     async_session, monkeypatch
 ):
