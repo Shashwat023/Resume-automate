@@ -7,6 +7,7 @@ log-tailing loop in api/ws.py.
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain import status as st
 from app.models.db_models import Application, Job, RunEvent
 
 
@@ -31,7 +32,7 @@ class ApplicationRepository:
             .where(
                 Application.profile_id == profile_id,
                 Application.job_id == job_id,
-                Application.status.not_in(("failed", "cancelled")),
+                Application.status.not_in((st.FAILED, st.CANCELLED)),
             )
             .order_by(Application.created_at.desc())
         )

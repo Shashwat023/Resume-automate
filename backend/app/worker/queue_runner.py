@@ -112,7 +112,7 @@ async def profile_session(profile_key: str, application_id: str | None = None):
                     task.cancel()
 
     await acquire()
-    if application_id is not None and is_paused(application_id):
+    while application_id is not None and is_paused(application_id):
         lock.release()
         if await wait_for_resume_or_cancel(application_id) == "cancelled":
             raise ApplicationCancelled

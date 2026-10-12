@@ -200,6 +200,33 @@ _SUBMIT_TREE_2 = "[3] button: Submit Application\n"
 _CONFIRMATION_TREE = "[4] StaticText: Thank you for applying\n"
 
 
+async def test_submit_settle_polls_submitting_without_a_button_until_confirmation(
+    monkeypatch,
+):
+    page = FakeSubmitPage(
+        [
+            ("[1] StaticText: Submitting…\n", {}),
+            (_CONFIRMATION_TREE, {}),
+        ]
+    )
+    monkeypatch.setattr(runner, "SUBMIT_SETTLE_TIMEOUT_SECONDS", 2)
+
+    snapshot = await runner._wait_for_submit_settle(page)
+
+    assert "Thank you" in snapshot.formatted_tree
+    assert page._index == 2
+
+
+async def test_submit_settle_stops_immediately_on_confirmation(monkeypatch):
+    page = FakeSubmitPage([(_CONFIRMATION_TREE, {})])
+    monkeypatch.setattr(runner, "SUBMIT_SETTLE_TIMEOUT_SECONDS", 2)
+
+    snapshot = await runner._wait_for_submit_settle(page)
+
+    assert "Thank you" in snapshot.formatted_tree
+    assert page._index == 1
+
+
 async def _seed_with_job_and_cascade(async_session, monkeypatch):
     from app.services.engine.tier0_harvest import HarvestResult
     from app.services.engine.tier1_map import Tier1Result
@@ -238,6 +265,7 @@ async def test_submit_clicks_again_after_2fa_resolves_before_reading_outcome(
     page = FakeSubmitPage(
         [
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit-1']"}),  # find submit (1st)
+            (_OTP_TREE, {}),  # settle detects the delayed challenge
             (_OTP_TREE, {}),  # _handle_2fa_if_present's own detect snapshot
             (_SUBMIT_TREE_2, {"3": "//button[@id='submit-2']"}),  # post-2FA re-check
             (_CONFIRMATION_TREE, {}),  # final read_outcome
@@ -360,14 +388,11 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
     page = FakeSubmitPage(
         [
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),  # attempt 0: find submit
-            (_VALIDATION_TREE, {}),  # attempt 0: 2fa-detect (none)
-            (_VALIDATION_TREE, {}),  # attempt 0: read_outcome -> validation_error
+            (_VALIDATION_TREE, {}),  # attempt 0: settle -> validation_error
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),  # attempt 1: find submit
-            (_VALIDATION_TREE, {}),  # attempt 1: 2fa-detect (none)
-            (_VALIDATION_TREE, {}),  # attempt 1: read_outcome -> validation_error again
+            (_VALIDATION_TREE, {}),  # attempt 1: settle -> validation_error again
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),  # attempt 2: find submit
-            (_CONFIRMATION_TREE, {}),  # attempt 2: 2fa-detect (none)
-            (_CONFIRMATION_TREE, {}),  # attempt 2: read_outcome -> completed
+            (_CONFIRMATION_TREE, {}),  # attempt 2: settle -> completed
         ]
     )
 
@@ -427,12 +452,9 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
         [
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),
             (_VALIDATION_TREE, {}),
-            (_VALIDATION_TREE, {}),
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),
             (_VALIDATION_TREE, {}),
-            (_VALIDATION_TREE, {}),
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),
-            (_VALIDATION_TREE, {}),
             (_VALIDATION_TREE, {}),  # STILL validation_error on the final attempt
         ]
     )
@@ -466,8 +488,8 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
     )
 
     assert result.outcome == "validation_error"
-    # Exactly 3 attempts (9 snapshots) — no infinite retrying.
-    assert page._index == 9
+    # Exactly 3 attempts (6 snapshots) — no infinite retrying.
+    assert page._index == 6
 
 
 # ---- every run closes its browser session, unconditionally ----

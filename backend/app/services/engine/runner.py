@@ -222,7 +222,7 @@ async def _wait_for_submit_settle(page):
     elapsed = 0
     while (
         read_outcome(snapshot.formatted_tree).outcome == "unknown"
-        and find_submit_button(snapshot.formatted_tree, snapshot.xpath_map)
+        and not detect_2fa(snapshot.formatted_tree)
         and elapsed < SUBMIT_SETTLE_TIMEOUT_SECONDS
     ):
         await page.wait_for_timeout(1000)
@@ -344,6 +344,7 @@ async def run_application(application_id: str) -> None:
                 tier="queue",
             )
         async with profile_session(str(profile_id), application_id):
+            await _check_paused_and_wait(application_id)
             async with async_session_factory() as db:
                 application = await db.get(Application, application_id)
                 if application is None:
@@ -353,6 +354,17 @@ async def run_application(application_id: str) -> None:
                 profile = await db.get(Profile, application.profile_id)
                 job = await db.get(Job, application.job_id)
                 if profile is None or job is None:
+                    application.status = st.FAILED
+                    application.error = "Profile or job not found"
+                    application.finished_at = datetime.now(timezone.utc)
+                    db.add(
+                        RunEvent(
+                            application_id=application_id,
+                            message="Failed: Profile or job not found",
+                            level="error",
+                        )
+                    )
+                    await db.commit()
                     return
                 profile_dict = {
                     c.name: getattr(profile, c.name) for c in profile.__table__.columns
@@ -372,7 +384,6 @@ async def run_application(application_id: str) -> None:
                     )
                     await db.commit()
 
-            await _check_paused_and_wait(application_id)
             session = await with_timeout(
                 get_or_launch(str(profile_id)), what="Chrome launch"
             )
@@ -491,7 +502,7 @@ async def run_application(application_id: str) -> None:
                                 profile_id,
                                 resume_file_path,
                             )
-                            if _unhandled_labels(cascade):
+                            if _repairable_unhandled_labels(cascade):
                                 cascade = await _repair_unhandled_fields(
                                     application_id,
                                     sh,
@@ -584,9 +595,25 @@ async def run_application(application_id: str) -> None:
                             )
                             auto_steps = 0
                 finally:
-                    await sh.close()
+                    try:
+                        await with_timeout(sh.close(), what="Stagehand close")
+                    except Exception as exc:  # noqa: BLE001 - cleanup cannot change outcome
+                        await _log(
+                            application_id,
+                            f"Stagehand close failed: {describe(exc)}",
+                            level="warn",
+                        )
             finally:
-                await close_session(str(profile_id))
+                try:
+                    await with_timeout(
+                        close_session(str(profile_id)), what="Chrome close"
+                    )
+                except Exception as exc:  # noqa: BLE001 - cleanup cannot change outcome
+                    await _log(
+                        application_id,
+                        f"Chrome close failed: {describe(exc)}",
+                        level="warn",
+                    )
 
         async with async_session_factory() as db:
             application = await db.get(Application, application_id)
@@ -882,6 +909,13 @@ def _unhandled_labels(cascade: FillCascadeResult) -> set[str]:
     return all_labels - handled_labels
 
 
+def _repairable_unhandled_labels(
+    cascade: FillCascadeResult, also_target: set[str] | None = None
+) -> set[str]:
+    file_labels = {field.label for field in cascade.fields if field.role == "file"}
+    return (_unhandled_labels(cascade) | (also_target or set())) - file_labels
+
+
 async def _repair_unhandled_fields(
     application_id: str,
     sh,
@@ -913,7 +947,9 @@ async def _repair_unhandled_fields(
     own click-success tracking, so it forces a re-target even when
     `_unhandled_labels` disagrees.
     """
-    unhandled = _unhandled_labels(cascade) | (also_target or set())
+    unhandled = _repairable_unhandled_labels(cascade, also_target)
+    if not unhandled:
+        return cascade
     await _log(
         application_id,
         f"Re-checking {len(unhandled)} field(s) left unhandled after the "
@@ -1043,7 +1079,9 @@ async def _submit_and_verify(
         # deliberate top-to-bottom re-check of the page immediately before
         # the irreversible click, not a leftover mid-scroll state.
         try:
-            await page.evaluate("window.scrollTo(0, 0)")
+            await with_timeout(
+                page.evaluate("window.scrollTo(0, 0)"), what="evaluate(scrollTo)"
+            )
         except Exception:  # noqa: BLE001 - purely cosmetic, never block on it
             pass
         await page.wait_for_timeout(300)
@@ -1086,9 +1124,12 @@ async def _submit_and_verify(
             await click_submit(page, xpath)
             click_dispatched = True
 
-            # A challenge can appear only after submission (e.g. email-based
-            # verification triggered by the attempt itself).
-            handled_2fa = await _handle_2fa_if_present(application_id, page)
+            # A challenge can render shortly after the click, so settle before
+            # looking for it rather than taking one too-early snapshot.
+            snapshot2 = await _wait_for_submit_settle(page)
+            handled_2fa = False
+            if detect_2fa(snapshot2.formatted_tree):
+                handled_2fa = await _handle_2fa_if_present(application_id, page)
 
             if handled_2fa:
                 # Real, live-caught bug: the ORIGINAL submit click only
@@ -1117,11 +1158,14 @@ async def _submit_and_verify(
                     clicked = True
                     await click_submit(page, post_2fa_submit_xpath)
 
-            snapshot2 = await _wait_for_submit_settle(page)
+            if handled_2fa or detect_2fa(snapshot2.formatted_tree):
+                snapshot2 = await _wait_for_submit_settle(page)
         except (ApplicationCancelled, TwoFactorTimeout):
             raise
         except Exception as exc:  # noqa: BLE001 - after a click, preserve uncertainty
-            if _is_session_lost(exc) or click_dispatched:
+            if _is_session_lost(exc) or (clicked and isinstance(exc, TimeoutError)):
+                return SubmitResult(outcome="unconfirmed", detail=describe(exc))
+            if click_dispatched:
                 return SubmitResult(outcome="unconfirmed", detail=describe(exc))
             raise
         result = read_outcome(snapshot2.formatted_tree)
@@ -1182,7 +1226,7 @@ async def _submit_and_verify(
             level="warn",
             tier="submit",
         )
-        if _unhandled_labels(cascade) or page_reported_invalid:
+        if _repairable_unhandled_labels(cascade, page_reported_invalid):
             cascade = await _repair_unhandled_fields(
                 application_id,
                 sh,
@@ -1200,7 +1244,9 @@ async def _submit_and_verify(
         # not our own guess about which fields matter.
         is_last_chance_before_final_attempt = attempt == MAX_SUBMIT_ATTEMPTS - 2
         escalate_target = page_reported_invalid | (
-            _unhandled_labels(cascade) if is_last_chance_before_final_attempt else set()
+            _repairable_unhandled_labels(cascade)
+            if is_last_chance_before_final_attempt
+            else set()
         )
         await _escalate_unhandled_fields_if_any(
             application_id, cascade, also_target=escalate_target
@@ -1213,7 +1259,32 @@ async def _submit_and_verify(
 
 
 async def _resolve_captcha_if_present(application_id: str, page) -> None:
-    outcome = await resolve_captcha(page)
+    settings = get_settings()
+    try:
+        try:
+            solve_call = resolve_captcha(
+                page,
+                on_solving=lambda seconds: _log(
+                    application_id,
+                    f"Solving CAPTCHA via 2captcha (up to {seconds} s)",
+                    tier="captcha",
+                ),
+            )
+        except TypeError:
+            # Existing test doubles and third-party adapters may still expose
+            # the original one-argument callable.
+            solve_call = resolve_captcha(page)
+        outcome = await with_timeout(
+            solve_call,
+            seconds=settings.captcha_solve_timeout_seconds * 2 + 30,
+            what="CAPTCHA solve",
+        )
+    except TimeoutError as exc:
+        if not settings.captcha_failure_escalates:
+            raise RuntimeError(f"CAPTCHA solving failed: {describe(exc)}") from exc
+        outcome = type(
+            "CaptchaTimeout", (), {"status": "failed_escalate", "detail": describe(exc)}
+        )()
     if outcome.status == "not_present":
         return
     if outcome.status == "solved":
@@ -1700,7 +1771,7 @@ async def _click_apply_if_present(
                             f"on {await _page_location(page)}",
                             tier="navigation",
                         )
-                    await page.locator(xpath).click()
+                    await with_timeout(page.locator(xpath).click(), what="click(Apply)")
                 opened = True
                 await page.wait_for_timeout(1500)
                 if application_id:
