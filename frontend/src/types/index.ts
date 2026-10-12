@@ -62,6 +62,7 @@ export interface QueueItem {
   duration?: number; // in seconds
   error?: string;
   currentStep?: string;
+  lastActivityAt?: string;
 }
 
 export interface QueueLog {

@@ -26,6 +26,7 @@ the same profile genuinely waits its turn instead of racing.
 """
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from app.ports import RunnerPort
@@ -34,7 +35,9 @@ _cancel_events: dict[str, asyncio.Event] = {}
 _resume_events: dict[str, asyncio.Event] = {}
 _pause_events: dict[str, asyncio.Event] = {}
 _profile_locks: dict[str, asyncio.Lock] = {}
+_tasks: dict[str, asyncio.Task[None]] = {}
 _run_fn: RunnerPort | None = None
+logger = logging.getLogger(__name__)
 
 
 # A run holds the profile lock for its ENTIRE Chrome-touching portion,
@@ -135,7 +138,25 @@ async def enqueue_application(application_id: str) -> None:
     _resume_events[application_id] = asyncio.Event()
     _pause_events[application_id] = asyncio.Event()
     if _run_fn is not None:
-        asyncio.create_task(_run_fn(application_id))
+        task = asyncio.create_task(_run_fn(application_id))
+        _tasks[application_id] = task
+
+        def _finished(completed: asyncio.Task[None]) -> None:
+            _tasks.pop(application_id, None)
+            if completed.cancelled():
+                return
+            try:
+                exception = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if exception is not None:
+                logger.exception(
+                    "Application task %s ended unexpectedly",
+                    application_id,
+                    exc_info=(type(exception), exception, exception.__traceback__),
+                )
+
+        task.add_done_callback(_finished)
 
 
 async def signal_resume(application_id: str) -> None:
@@ -154,6 +175,15 @@ async def signal_cancel(application_id: str) -> None:
     event = _cancel_events.get(application_id)
     if event is not None:
         event.set()
+
+
+def cancel_task(application_id: str) -> bool:
+    """Cancel a supervised task, returning whether it was still running."""
+    task = _tasks.get(application_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 
 async def signal_pause(application_id: str) -> None:

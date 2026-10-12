@@ -165,6 +165,28 @@ def test_cleanup_removes_all_three_events():
     assert "app-3" not in qr._pause_events
 
 
+async def test_enqueue_keeps_task_reference_until_completion_then_removes_it():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_run(_app_id):
+        started.set()
+        await release.wait()
+
+    qr.set_run_fn(_fake_run)
+    try:
+        await qr.enqueue_application("supervised")
+        await started.wait()
+        assert "supervised" in qr._tasks
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert "supervised" not in qr._tasks
+    finally:
+        qr.set_run_fn(None)
+        qr._tasks.pop("supervised", None)
+
+
 async def test_get_profile_lock_returns_same_lock_for_same_profile():
     lock1 = qr.get_profile_lock("profile-1")
     lock2 = qr.get_profile_lock("profile-1")

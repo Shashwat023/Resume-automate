@@ -264,6 +264,7 @@ async def resolve_and_execute(
     page,
     fields: list[tuple[FormField, str]],
     checkpoint: Callable[[], Awaitable[None]] | None = None,
+    on_field: Callable[[FormField], Awaitable[None]] | None = None,
 ) -> Tier2Result:
     resolved: list[tuple[str, str]] = []
     errored: list[tuple[str, str]] = []
@@ -271,6 +272,8 @@ async def resolve_and_execute(
     for field, value in fields:
         if checkpoint is not None:
             await checkpoint()
+        if on_field is not None:
+            await on_field(field)
         if field.role == "combobox":
             outcome = await _resolve_combobox(sh, page, field, value)
         else:

@@ -170,6 +170,8 @@ class ApplyStatusOut(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    current_step: str | None = None
+    last_activity_at: datetime | None = None
 
 
 class ApplyHistoryItemOut(BaseModel):
@@ -183,6 +185,8 @@ class ApplyHistoryItemOut(BaseModel):
     apply_url: str | None = None
     company_url: str | None = None
     ats: str | None = None
+    current_step: str | None = None
+    last_activity_at: datetime | None = None
 
 
 class RunEventOut(BaseModel):

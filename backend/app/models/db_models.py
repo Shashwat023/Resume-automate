@@ -143,6 +143,8 @@ class Application(Base):
     status: Mapped[str] = mapped_column(Text, default="queued")
     pause_reason: Mapped[str | None] = mapped_column(Text, default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
+    current_step: Mapped[str | None] = mapped_column(Text, default=None)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)

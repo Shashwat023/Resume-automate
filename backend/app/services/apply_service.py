@@ -96,6 +96,8 @@ class ApplyService:
             started_at=application.started_at,
             finished_at=application.finished_at,
             error=application.error,
+            current_step=application.current_step,
+            last_activity_at=application.last_activity_at,
         )
 
     async def get_history(self, profile_id: int) -> list[ApplyHistoryItemOut]:
@@ -112,6 +114,8 @@ class ApplyService:
                 apply_url=job.apply_url,
                 company_url=job.company_url,
                 ats=job.ats,
+                current_step=app.current_step,
+                last_activity_at=app.last_activity_at,
             )
             for app, job in rows
         ]

@@ -23,6 +23,7 @@ account creation, verification challenges, and form/navigation cases the
 engine cannot resolve safely. The same browser session resumes afterward.
 """
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -342,6 +343,7 @@ async def run_application(application_id: str) -> None:
                 application_id,
                 "Waiting for another application on this profile to finish",
                 tier="queue",
+                step="Waiting for browser session",
             )
         async with profile_session(str(profile_id), application_id):
             await _check_paused_and_wait(application_id)
@@ -384,6 +386,7 @@ async def run_application(application_id: str) -> None:
                     )
                     await db.commit()
 
+            await _set_step(application_id, "Launching Chrome")
             session = await with_timeout(
                 get_or_launch(str(profile_id)), what="Chrome launch"
             )
@@ -415,7 +418,11 @@ async def run_application(application_id: str) -> None:
                         or await sh.browser.context.new_page()
                     )
 
-                    await _log(application_id, f"Navigating to {job.apply_url}")
+                    await _log(
+                        application_id,
+                        f"Navigating to {job.apply_url}",
+                        step="Navigating to job page",
+                    )
                     await with_timeout(page.goto(job.apply_url), what="page.goto")
                     await _check_paused_and_wait(application_id)
                     await with_timeout(
@@ -493,6 +500,7 @@ async def run_application(application_id: str) -> None:
                                 f"Application step {auto_steps + 1}: "
                                 f"{len(fields)} field(s) on {await _page_location(page)}",
                                 tier="navigation",
+                                step=f"Filling form (page {auto_steps + 1})",
                             )
                             cascade = await _run_fill_cascade(
                                 application_id,
@@ -666,6 +674,9 @@ async def run_application(application_id: str) -> None:
     except ApplicationCancelled:
         pass  # status already set to CANCELLED by apply_service.cancel()
 
+    except asyncio.CancelledError:
+        raise
+
     except Exception as exc:  # noqa: BLE001 - report to the application record, don't crash the worker
         detail = (
             f"{type(exc).__name__}: {exc}"
@@ -717,7 +728,30 @@ async def run_application(application_id: str) -> None:
         # could leak this application_id's queue-runner event entries
         # forever with no FAILED status at all (see this function's own
         # opening comment). One place, always reached.
-        cleanup(application_id)
+        try:
+            async with async_session_factory() as db:
+                application = await db.get(Application, application_id)
+                if application is not None and application.status in {
+                    st.QUEUED,
+                    st.RUNNING,
+                    st.NEEDS_INPUT,
+                    st.PAUSED,
+                }:
+                    application.status = st.FAILED
+                    application.error = "Run ended unexpectedly"
+                    application.finished_at = datetime.now(timezone.utc)
+                    db.add(
+                        RunEvent(
+                            application_id=application_id,
+                            message="Failed: Run ended unexpectedly",
+                            level="error",
+                        )
+                    )
+                    await db.commit()
+        except Exception:  # noqa: BLE001 - task cleanup must never raise
+            pass
+        finally:
+            cleanup(application_id)
 
 
 async def _map_fields(
@@ -799,6 +833,7 @@ async def _run_fill_cascade(
     await _check_paused_and_wait(application_id)
 
     # ---- Tier 1: batched LLM field mapping ----
+    await _set_step(application_id, "Tier 1 mapping")
     tier1 = await _map_fields(page, remaining_fields, profile_dict, profile_id)
 
     for label, _value in tier1.filled:
@@ -855,6 +890,7 @@ async def _run_fill_cascade(
         page,
         tier1.for_tier2,
         checkpoint=lambda: _check_paused_and_wait(application_id),
+        on_field=lambda field: _set_step(application_id, f"Tier 2: {field.label}"),
     )
     for label, description in tier2.resolved:
         await _log(
@@ -1117,12 +1153,14 @@ async def _submit_and_verify(
         # is the closest-to-the-click checkpoint achievable — right before
         # the action that makes the application irreversible.
         await _check_paused_and_wait(application_id)
+        await _set_step(application_id, "Submitting")
 
         click_dispatched = False
         try:
             clicked = True
             await click_submit(page, xpath)
             click_dispatched = True
+            await _set_step(application_id, "Verifying submission")
 
             # A challenge can render shortly after the click, so settle before
             # looking for it rather than taking one too-early snapshot.
@@ -1268,6 +1306,7 @@ async def _resolve_captcha_if_present(application_id: str, page) -> None:
                     application_id,
                     f"Solving CAPTCHA via 2captcha (up to {seconds} s)",
                     tier="captcha",
+                    step="Solving CAPTCHA",
                 ),
             ),
             seconds=settings.captcha_solve_timeout_seconds * 2 + 30,
@@ -1349,8 +1388,9 @@ async def _handle_2fa_if_present(application_id: str, page) -> bool:
         f"{TWOFA_POLL_INTERVAL_SECONDS}s; giving up after "
         f"{TWOFA_TIMEOUT_SECONDS // 60} min)",
         level="warn",
+        step="Waiting for 2FA",
     )
-    await _pause_for_input(application_id, "2fa_required")
+    await _pause_for_input(application_id, "2fa_required", step="Waiting for 2FA")
 
     elapsed = 0
     while True:
@@ -1474,13 +1514,17 @@ async def _pause_for_human(
     await _log(application_id, resumed_message)
 
 
-async def _pause_for_input(application_id: str, pause_reason: str) -> None:
+async def _pause_for_input(
+    application_id: str, pause_reason: str, *, step: str = "Waiting for manual input"
+) -> None:
     clear_resume(application_id)
     async with async_session_factory() as db:
         application = await db.get(Application, application_id)
         if application is not None and application.status not in st.TERMINAL:
             application.status = st.NEEDS_INPUT
             application.pause_reason = pause_reason
+            application.current_step = step
+            application.last_activity_at = datetime.now(timezone.utc)
             await db.commit()
 
 
@@ -1830,12 +1874,31 @@ async def _handle_account_gate_if_present(application_id: str, page) -> None:
 
 
 async def _log(
-    application_id: str, message: str, *, level: str = "info", tier: str | None = None
+    application_id: str,
+    message: str,
+    *,
+    level: str = "info",
+    tier: str | None = None,
+    step: str | None = None,
 ) -> None:
     async with async_session_factory() as db:
+        application = await db.get(Application, application_id)
+        if application is not None:
+            application.last_activity_at = datetime.now(timezone.utc)
+            if step is not None:
+                application.current_step = step
         db.add(
             RunEvent(
                 application_id=application_id, message=message, level=level, tier=tier
             )
         )
         await db.commit()
+
+
+async def _set_step(application_id: str, step: str) -> None:
+    async with async_session_factory() as db:
+        application = await db.get(Application, application_id)
+        if application is not None:
+            application.current_step = step
+            application.last_activity_at = datetime.now(timezone.utc)
+            await db.commit()

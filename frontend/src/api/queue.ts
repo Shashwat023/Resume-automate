@@ -14,6 +14,8 @@ interface BackendApplyHistoryItem {
   apply_url?: string | null;
   company_url?: string | null;
   ats?: string | null;
+  current_step?: string | null;
+  last_activity_at?: string | null;
 }
 
 function mapBackendStatusToJobStatus(status: string): JobStatus {
@@ -101,12 +103,16 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
       ats: h.ats ?? undefined,
       status,
       rawStatus: h.status,
-      statusLabel: describeBackendStatus(h.status),
+      statusLabel: h.status === 'running' && h.current_step
+        ? `Applying — ${h.current_step}`
+        : describeBackendStatus(h.status),
       attempts: 1,
       addedAt: h.started_at ?? new Date().toISOString(),
       startedAt: h.started_at ?? undefined,
       processedAt: h.finished_at ?? undefined,
       duration: durationSec,
+      currentStep: h.current_step ?? undefined,
+      lastActivityAt: h.last_activity_at ?? undefined,
     };
   });
 

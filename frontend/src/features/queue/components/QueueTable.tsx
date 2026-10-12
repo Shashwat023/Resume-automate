@@ -23,6 +23,16 @@ const columnHelper = createColumnHelper<QueueItem>();
 // Statuses a job can be pause/resumed from — never a terminal one.
 const PAUSABLE_RAW_STATUSES = new Set(['queued', 'pending', 'running']);
 
+function activityHint(item: QueueItem): { title: string; warning?: string } {
+  if (!item.lastActivityAt) return { title: item.statusLabel ?? '' };
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(item.lastActivityAt).getTime()) / 60_000));
+  const relative = minutes < 1 ? 'just now' : `${minutes} min ago`;
+  const warning = item.rawStatus === 'running' && minutes > 120
+    ? `No activity for ${Math.floor(minutes / 60)} min`
+    : undefined;
+  return { title: `${item.statusLabel ?? ''}\nLast activity ${relative}`, warning };
+}
+
 export const QueueTable = () => {
   const queueState = useQueueStore((state) => state.queueState);
   const [timelineJobId, setTimelineJobId] = useState<string | null>(null);
@@ -80,14 +90,18 @@ export const QueueTable = () => {
     }),
     columnHelper.accessor('status', {
       header: 'Status',
-      cell: info => (
+      cell: info => {
+        const activity = activityHint(info.row.original);
+        return (
         // title carries the finer-grained backend label (e.g. distinguishing
         // "Paused" from an ordinary "Queued", both of which render the same
         // badge) without a visual redesign — hover to see it.
-        <span title={info.row.original.statusLabel}>
+        <span title={activity.title} className="inline-flex items-center gap-1">
           <QueueStatusBadge status={info.getValue()} />
+          {activity.warning && <span className="text-amber-600 text-xs">{activity.warning}</span>}
         </span>
-      ),
+        );
+      },
     }),
     columnHelper.accessor('duration', {
       header: 'Duration',
