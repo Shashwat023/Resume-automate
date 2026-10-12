@@ -6,9 +6,10 @@ in the route, since that's inherently coupled to the specific Starlette
 WebSocket connection object, not a business-logic concern to relocate.
 """
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
+from app.domain import status as st
 from app.repositories.application_repository import ApplicationRepository
-from app.services.browser.chrome_launcher import ChromeSession, get_or_launch
+from app.services.browser.chrome_launcher import ChromeSession, get_session
 from app.services.browser.live_view import LiveViewProxy
 
 
@@ -21,7 +22,12 @@ class LiveViewService:
         if application is None:
             raise NotFoundError("Application not found")
 
-        session: ChromeSession = await get_or_launch(str(application.profile_id))
+        session: ChromeSession | None = get_session(str(application.profile_id))
+        if (
+            application.status not in (st.RUNNING, st.NEEDS_INPUT, st.PAUSED)
+            or session is None
+        ):
+            raise ConflictError("No active browser session for this application")
         proxy = LiveViewProxy(session)
         await proxy.connect()
         await proxy.start_screencast()

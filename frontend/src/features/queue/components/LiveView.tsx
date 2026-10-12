@@ -21,6 +21,7 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
   const imgRef = useRef<HTMLImageElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const resumeMutation = useResumeJobMutation();
   const cancelMutation = useCancelJobMutation();
@@ -57,6 +58,8 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'frame') {
         setFrameSrc(`data:image/jpeg;base64,${msg.data}`);
+      } else if (msg.type === 'error') {
+        setConnectionError(msg.message);
       }
     };
     return () => ws.close();
@@ -124,6 +127,8 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
               onMouseUp={(e) => sendMouse('mouseReleased', e)}
               onMouseMove={(e) => sendMouse('mouseMoved', e)}
             />
+          ) : connectionError ? (
+            <p className="text-red-300 text-sm">{connectionError}</p>
           ) : (
             <p className="text-gray-400 text-sm">Waiting for the browser feed...</p>
           )}

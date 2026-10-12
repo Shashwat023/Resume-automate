@@ -31,6 +31,7 @@ from stagehand import Page
 
 from app.domain.semantic_dictionary import match_field, resolve_value
 from app.services.engine.field_fill import fill_textbox
+from app.services.engine.timeouts import with_timeout
 
 # Role is USUALLY a single bare word (StaticText/ListMarker/textbox/...),
 # but the file-upload control on a real Greenhouse form renders as a
@@ -238,7 +239,10 @@ async def fill_deterministic(
                 unmatched.append(f.label)
                 continue
             try:
-                await page.locator(f.xpath).set_input_files(resume_file_path)
+                await with_timeout(
+                    page.locator(f.xpath).set_input_files(resume_file_path),
+                    what="set_input_files(resume)",
+                )
                 # Confirmed live (see FLAGGED.md): Greenhouse's own widget
                 # does an async upload after the file is set — a progress
                 # bar, then "resume.pdf" + "Remove file" once it settles,

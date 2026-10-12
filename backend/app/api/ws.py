@@ -1,14 +1,16 @@
 import asyncio
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.db import async_session_factory
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.repositories.application_repository import ApplicationRepository
 from app.services.live_view_service import LiveViewService
 from app.services.log_stream_service import LogStreamService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.websocket("/ws/apply/{application_id}/live-view")
@@ -24,6 +26,17 @@ async def live_view_ws(websocket: WebSocket, application_id: str) -> None:
             proxy = await live_view.connect(application_id)
     except NotFoundError:
         await websocket.close(code=4404)
+        return
+    except ConflictError as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=4409)
+        return
+    except Exception:  # noqa: BLE001 - websocket must fail closed, not launch Chrome
+        logger.exception("Live view attach failed")
+        await websocket.send_json(
+            {"type": "error", "message": "Could not attach to the browser session"}
+        )
+        await websocket.close(code=4409)
         return
 
     async def pump_frames():

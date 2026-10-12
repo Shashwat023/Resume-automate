@@ -33,6 +33,8 @@ Two launch paths, selected by settings.use_real_chrome:
 
 import asyncio
 import json
+import logging
+import re
 import shutil
 import socket
 import subprocess
@@ -40,6 +42,8 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+from weakref import WeakKeyDictionary
 
 import httpx
 from stagehand import StagehandBrowser, local_browser
@@ -50,6 +54,10 @@ from app.services.captcha.proxy import parse_proxy_url
 settings = get_settings()
 
 _sessions: dict[str, "ChromeSession"] = {}
+_launch_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    WeakKeyDictionary()
+)
+logger = logging.getLogger(__name__)
 
 _EXTENSION_READY_TIMEOUT_SECONDS = 30
 _EXTENSION_POLL_INTERVAL_SECONDS = 0.5
@@ -109,6 +117,14 @@ class ChromeSession:
         return f"http://localhost:{self.port}"
 
 
+def profile_cmdline_pattern(
+    user_data_dir: Path, flavor: Literal["python", "ere"] = "python"
+) -> str:
+    """Match this exact --user-data-dir argument, not a numeric prefix."""
+    suffix = r'("|[[:space:]]|$)' if flavor == "ere" else r'("|\s|$)'
+    return rf'"?--user-data-dir={re.escape(str(user_data_dir))}{suffix}'
+
+
 def _kill_profile_chrome(user_data_dir: Path) -> None:
     """
     Kills any Chrome still running against this user-data-dir. Chrome
@@ -118,7 +134,7 @@ def _kill_profile_chrome(user_data_dir: Path) -> None:
     us no process handle to terminate, so we find the leftovers by their
     --user-data-dir argument instead.
     """
-    needle = str(user_data_dir).replace("'", "''")
+    windows_pattern = profile_cmdline_pattern(user_data_dir).replace("'", "''")
     if sys.platform == "win32":
         subprocess.run(
             [
@@ -126,7 +142,7 @@ def _kill_profile_chrome(user_data_dir: Path) -> None:
                 "-NoProfile",
                 "-Command",
                 "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-                f"Where-Object {{ $_.CommandLine -like '*{needle}*' }} | "
+                f"Where-Object {{ $_.CommandLine -match '{windows_pattern}' }} | "
                 "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                 "-ErrorAction SilentlyContinue }",
             ],
@@ -135,10 +151,17 @@ def _kill_profile_chrome(user_data_dir: Path) -> None:
         )
     else:
         subprocess.run(
-            ["pkill", "-f", f"--user-data-dir={user_data_dir}"],
+            # ERE differs slightly from Python regex; this pattern stays in
+            # their shared escaped-literal subset.
+            ["pkill", "-f", profile_cmdline_pattern(user_data_dir, "ere")],
             capture_output=True,
             check=False,
         )
+
+
+def get_session(profile_key: str) -> ChromeSession | None:
+    session = _sessions.get(profile_key)
+    return session if session is not None and not session.browser.closed else None
 
 
 def _free_port() -> int:
@@ -315,93 +338,107 @@ async def get_or_launch(profile_key: str) -> ChromeSession:
     from reusing the same `user_data_dir` below, not from keeping one
     Chrome process alive across different applications.
     """
-    existing = _sessions.get(profile_key)
-    if existing is not None and not existing.browser.closed:
-        return existing
+    loop = asyncio.get_running_loop()
+    locks = _launch_locks.setdefault(loop, {})
+    lock = locks.setdefault(profile_key, asyncio.Lock())
+    async with lock:
+        existing = get_session(profile_key)
+        if existing is not None:
+            return existing
 
-    port = _free_port()
+        port = _free_port()
 
-    if settings.use_real_chrome:
-        session = await _launch_real_chrome_and_connect(profile_key, port)
-    else:
-        user_data_dir = settings.chrome_profiles_dir / profile_key
-        # A leftover Chrome from an earlier run/failed launch would swallow
-        # this launch (see _kill_profile_chrome) and cause a 60s timeout.
-        await asyncio.to_thread(_kill_profile_chrome, user_data_dir)
-        await asyncio.to_thread(
-            _prepare_profile_dir, user_data_dir, profile_key in EPHEMERAL_PROFILE_KEYS
-        )
+        if settings.use_real_chrome:
+            session = await _launch_real_chrome_and_connect(profile_key, port)
+        else:
+            user_data_dir = settings.chrome_profiles_dir / profile_key
+            # A leftover Chrome from an earlier run/failed launch would swallow
+            # this launch (see _kill_profile_chrome) and cause a 60s timeout.
+            await asyncio.to_thread(_kill_profile_chrome, user_data_dir)
+            await asyncio.to_thread(
+                _prepare_profile_dir,
+                user_data_dir,
+                profile_key in EPHEMERAL_PROFILE_KEYS,
+            )
 
-        proxy_kwargs: dict = {}
-        if settings.captcha_proxy_url:
-            # Same proxy the 2captcha solve call uses (solver.py) — so the
-            # IP that solves the challenge matches the IP that submits the
-            # token. See config.py's captcha_proxy_url docstring.
-            proxy = parse_proxy_url(settings.captcha_proxy_url)
-            proxy_kwargs = {
-                "proxy_server": proxy.server_url,
-                "proxy_username": proxy.username,
-                "proxy_password": proxy.password,
-            }
+            proxy_kwargs: dict = {}
+            if settings.captcha_proxy_url:
+                # Same proxy the 2captcha solve call uses (solver.py) — so the
+                # IP that solves the challenge matches the IP that submits the
+                # token. See config.py's captcha_proxy_url docstring.
+                proxy = parse_proxy_url(settings.captcha_proxy_url)
+                proxy_kwargs = {
+                    "proxy_server": proxy.server_url,
+                    "proxy_username": proxy.username,
+                    "proxy_password": proxy.password,
+                }
 
-        browser = await local_browser.launch(
-            executable_path=settings.chrome_executable_path,
-            port=port,
-            user_data_dir=str(user_data_dir),
-            headless=False,
-            # Default False per user direction (was True). Note: `sh.close()`
-            # (called at the end of every application, see runner.py) never
-            # touches this flag either way — it only detaches the Stagehand
-            # wrapper, never the underlying browser/Chrome process — so this
-            # change alone does NOT stop Chrome processes from piling up;
-            # nothing currently calls `chrome_launcher.close_session()`
-            # (the one path that would actually honor this and terminate
-            # the process). Flagged in FLAGGED.md as the real remaining gap.
-            keep_alive=False,
-            # Layer 2 (best-effort bot-detection mitigation, not a
-            # guaranteed bypass — see FLAGGED.md): removes the
-            # `navigator.webdriver=true` signal Chrome sets under CDP
-            # control. The real fix for risk-based reCAPTCHA Enterprise
-            # scoring is Layer 1's proxy (captcha_proxy_url) matching the
-            # browser's egress IP to the solving IP — this flag is a
-            # cheap, low-maintenance supplement to that, not a
-            # replacement. The persistent per-profile user_data_dir above
-            # already accumulates real cookies/history across runs.
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--hide-crash-restore-bubble",
-                "--disable-session-crashed-bubble",
-            ],
-            **proxy_kwargs,
-        )
-        # Discovered the same way as the real-Chrome `--load-extension`
-        # path above (Stagehand's own `Extensions.loadUnpacked` bootstrap
-        # registers a service worker the same way) — not currently reused
-        # anywhere since every application gets a fresh Chrome process
-        # (see this function's own docstring), but harmless to keep on
-        # the session for now.
-        extension_id = await _discover_extension_id(port)
-        session = ChromeSession(
-            profile_key=profile_key,
-            port=port,
-            browser=browser,
-            extension_id=extension_id,
-            user_data_dir=user_data_dir,
-        )
+            browser = await local_browser.launch(
+                executable_path=settings.chrome_executable_path,
+                port=port,
+                user_data_dir=str(user_data_dir),
+                headless=False,
+                # Default False per user direction (was True). Note: `sh.close()`
+                # (called at the end of every application, see runner.py) never
+                # touches this flag either way — it only detaches the Stagehand
+                # wrapper, never the underlying browser/Chrome process — so this
+                # change alone does NOT stop Chrome processes from piling up;
+                # nothing currently calls `chrome_launcher.close_session()`
+                # (the one path that would actually honor this and terminate
+                # the process). Flagged in FLAGGED.md as the real remaining gap.
+                keep_alive=False,
+                # Layer 2 (best-effort bot-detection mitigation, not a
+                # guaranteed bypass — see FLAGGED.md): removes the
+                # `navigator.webdriver=true` signal Chrome sets under CDP
+                # control. The real fix for risk-based reCAPTCHA Enterprise
+                # scoring is Layer 1's proxy (captcha_proxy_url) matching the
+                # browser's egress IP to the solving IP — this flag is a
+                # cheap, low-maintenance supplement to that, not a
+                # replacement. The persistent per-profile user_data_dir above
+                # already accumulates real cookies/history across runs.
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--hide-crash-restore-bubble",
+                    "--disable-session-crashed-bubble",
+                ],
+                **proxy_kwargs,
+            )
+            # Discovered the same way as the real-Chrome `--load-extension`
+            # path above (Stagehand's own `Extensions.loadUnpacked` bootstrap
+            # registers a service worker the same way) — not currently reused
+            # anywhere since every application gets a fresh Chrome process
+            # (see this function's own docstring), but harmless to keep on
+            # the session for now.
+            extension_id = await _discover_extension_id(port)
+            session = ChromeSession(
+                profile_key=profile_key,
+                port=port,
+                browser=browser,
+                extension_id=extension_id,
+                user_data_dir=user_data_dir,
+            )
 
-    _sessions[profile_key] = session
-    return session
+        _sessions[profile_key] = session
+        return session
 
 
 async def close_session(profile_key: str) -> None:
     session = _sessions.pop(profile_key, None)
     if session is None:
         return
-    await session.browser.close()
-    if session.process is not None:
-        session.process.terminate()
-    if session.user_data_dir is not None:
-        # Stagehand-launched Chrome has no process handle, and browser.close()
-        # doesn't reliably end it — kill by profile so the next launch isn't
-        # swallowed by it.
-        await asyncio.to_thread(_kill_profile_chrome, session.user_data_dir)
+    try:
+        try:
+            await session.browser.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Chrome browser.close failed: %s", exc)
+        if session.process is not None:
+            try:
+                session.process.terminate()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Chrome process termination failed: %s", exc)
+    finally:
+        if session.user_data_dir is not None:
+            # Stagehand-launched Chrome has no process handle, and browser.close()
+            # doesn't reliably end it — kill by profile so the next launch isn't
+            # swallowed by it.
+            await asyncio.to_thread(_kill_profile_chrome, session.user_data_dir)

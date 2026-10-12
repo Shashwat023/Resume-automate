@@ -31,6 +31,7 @@ from app.services.engine.field_fill import fill_textbox
 from app.services.engine.openrouter_client import OpenRouterError, chat_json
 from app.services.engine.resume_parse import ResumeFacts
 from app.services.engine.tier0_harvest import FormField, strip_country_code
+from app.services.engine.timeouts import with_timeout
 
 settings = get_settings()
 
@@ -381,7 +382,10 @@ async def _apply(
             await fill_textbox(page, field.xpath, value)
             filled.append((field.label, value))
         elif field.is_native_select:
-            await page.locator(field.xpath).select_option(value)
+            await with_timeout(
+                page.locator(field.xpath).select_option(value),
+                what="select_option",
+            )
             filled.append((field.label, value))
         else:
             # Custom combobox with no known options, checkbox, or radio —

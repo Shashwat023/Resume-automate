@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from stagehand import Page
 
 from app.services.engine.tier0_harvest import _FIELD_LINE, _GROUP_ROLE, TARGET_ROLES
+from app.services.engine.timeouts import with_timeout
 
 _SUBMIT_BUTTON = re.compile(
     r"^\s*\[([\w-]+)\]\s+button:\s*"
@@ -77,7 +78,7 @@ def read_outcome(formatted_tree: str) -> SubmitResult:
 
 
 async def click_submit(page: Page, xpath: str) -> None:
-    await page.locator(xpath).click()
+    await with_timeout(page.locator(xpath).click(), what="click(Submit)")
 
 
 def find_invalid_field_labels(formatted_tree: str) -> list[str]:

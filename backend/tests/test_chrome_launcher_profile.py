@@ -1,4 +1,5 @@
 import json
+import re
 
 from app.services.browser import chrome_launcher
 
@@ -46,3 +47,23 @@ def test_missing_profile_dir_is_created_without_error(tmp_path):
 
 def test_only_the_scraper_profile_is_ephemeral():
     assert chrome_launcher.EPHEMERAL_PROFILE_KEYS == {"scraper"}
+
+
+def test_profile_cmdline_pattern_does_not_match_profile_prefixes(tmp_path):
+    profile = tmp_path / ".chrome-profiles" / "1"
+    pattern = chrome_launcher.profile_cmdline_pattern(profile)
+
+    assert re.search(pattern, f"--user-data-dir={profile}")
+    assert re.search(pattern, f'"--user-data-dir={profile}"')
+    assert re.search(pattern, f"--user-data-dir={profile} --foo")
+    assert not re.search(pattern, f"--user-data-dir={profile}0")
+    assert not re.search(pattern, f"--user-data-dir={profile}00")
+    assert "[[:space:]]" in chrome_launcher.profile_cmdline_pattern(profile, "ere")
+
+
+def test_get_session_never_launches_and_rejects_closed_sessions(monkeypatch):
+    chrome_launcher._sessions.clear()
+    assert chrome_launcher.get_session("missing") is None
+    closed = type("Session", (), {"browser": type("Browser", (), {"closed": True})()})()
+    chrome_launcher._sessions["closed"] = closed
+    assert chrome_launcher.get_session("closed") is None
