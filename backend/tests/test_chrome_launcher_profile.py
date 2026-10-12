@@ -1,6 +1,8 @@
 import json
 import re
 
+import pytest
+
 from app.services.browser import chrome_launcher
 
 
@@ -59,6 +61,34 @@ def test_profile_cmdline_pattern_does_not_match_profile_prefixes(tmp_path):
     assert not re.search(pattern, f"--user-data-dir={profile}0")
     assert not re.search(pattern, f"--user-data-dir={profile}00")
     assert "[[:space:]]" in chrome_launcher.profile_cmdline_pattern(profile, "ere")
+
+
+@pytest.mark.parametrize(
+    "suffix, matches",
+    [
+        ("", True),
+        ('"', True),
+        (" --foo", True),
+        ("\t--foo", True),
+        ("0", False),
+        ("00", False),
+        ("x", False),
+        (".bak", False),
+        ("/child", False),
+        ("-copy", False),
+    ],
+)
+def test_profile_cmdline_pattern_has_an_exact_directory_boundary(
+    tmp_path, suffix, matches
+):
+    profile = tmp_path / ".chrome-profiles" / "1"
+    found = bool(
+        re.search(
+            chrome_launcher.profile_cmdline_pattern(profile),
+            f"--user-data-dir={profile}{suffix}",
+        )
+    )
+    assert found is matches
 
 
 def test_get_session_never_launches_and_rejects_closed_sessions(monkeypatch):

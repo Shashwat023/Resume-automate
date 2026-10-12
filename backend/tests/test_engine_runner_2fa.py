@@ -272,7 +272,7 @@ async def test_submit_clicks_again_after_2fa_resolves_before_reading_outcome(
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -314,7 +314,7 @@ async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -396,7 +396,7 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -459,7 +459,7 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")

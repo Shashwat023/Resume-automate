@@ -39,7 +39,7 @@ from app.repositories.answer_library_repository import AnswerLibraryRepository
 from app.repositories.profile_repository import ProfileRepository
 from app.repositories.resume_repository import ResumeRepository
 from app.services.browser.chrome_launcher import close_session, get_or_launch
-from app.services.captcha.service import resolve_captcha
+from app.services.captcha.service import CaptchaOutcome, resolve_captcha
 from app.services.engine.llm_client import openrouter_llm
 from app.services.engine.submit import (
     SubmitResult,
@@ -1261,30 +1261,22 @@ async def _submit_and_verify(
 async def _resolve_captcha_if_present(application_id: str, page) -> None:
     settings = get_settings()
     try:
-        try:
-            solve_call = resolve_captcha(
+        outcome = await with_timeout(
+            resolve_captcha(
                 page,
                 on_solving=lambda seconds: _log(
                     application_id,
                     f"Solving CAPTCHA via 2captcha (up to {seconds} s)",
                     tier="captcha",
                 ),
-            )
-        except TypeError:
-            # Existing test doubles and third-party adapters may still expose
-            # the original one-argument callable.
-            solve_call = resolve_captcha(page)
-        outcome = await with_timeout(
-            solve_call,
+            ),
             seconds=settings.captcha_solve_timeout_seconds * 2 + 30,
             what="CAPTCHA solve",
         )
     except TimeoutError as exc:
         if not settings.captcha_failure_escalates:
             raise RuntimeError(f"CAPTCHA solving failed: {describe(exc)}") from exc
-        outcome = type(
-            "CaptchaTimeout", (), {"status": "failed_escalate", "detail": describe(exc)}
-        )()
+        outcome = CaptchaOutcome(status="failed_escalate", detail=describe(exc))
     if outcome.status == "not_present":
         return
     if outcome.status == "solved":

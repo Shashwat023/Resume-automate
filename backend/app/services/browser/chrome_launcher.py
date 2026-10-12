@@ -120,7 +120,10 @@ class ChromeSession:
 def profile_cmdline_pattern(
     user_data_dir: Path, flavor: Literal["python", "ere"] = "python"
 ) -> str:
-    """Match this exact --user-data-dir argument, not a numeric prefix."""
+    """Match this exact --user-data-dir argument, not a numeric prefix.
+
+    PowerShell's .NET ``-match`` relies on the escaped-space form below.
+    """
     suffix = r'("|[[:space:]]|$)' if flavor == "ere" else r'("|\s|$)'
     return rf'"?--user-data-dir={re.escape(str(user_data_dir))}{suffix}'
 
