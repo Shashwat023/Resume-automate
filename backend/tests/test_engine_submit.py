@@ -45,13 +45,16 @@ def test_finds_bare_submit_button():
     assert find_submit_button(tree, xmap) == "//button[@id='submit']"
 
 
-def test_ignores_apply_button_variant_reused_for_landing_page():
-    # "Apply Now" also matches the landing-page Apply button pattern in
-    # runner.py, but on the actual form page it's the real submit control —
-    # both regexes deliberately overlap on this label.
+def test_does_not_treat_apply_now_as_submit():
     tree = "[5-1] button: Apply Now\n"
     xmap = {"5-1": "//button[@id='apply']"}
-    assert find_submit_button(tree, xmap) == "//button[@id='apply']"
+    assert find_submit_button(tree, xmap) is None
+
+
+def test_finds_submit_your_application_button():
+    tree = "[5-1] button: Submit your application\n"
+    xmap = {"5-1": "//button[@id='submit']"}
+    assert find_submit_button(tree, xmap) == "//button[@id='submit']"
 
 
 def test_returns_none_when_no_submit_button_present():

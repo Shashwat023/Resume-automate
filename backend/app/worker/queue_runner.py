@@ -49,6 +49,10 @@ _run_fn: RunnerPort | None = None
 PROFILE_LOCK_TIMEOUT_SECONDS = 30 * 60
 
 
+class ApplicationCancelled(Exception):
+    """Raised when a queued or paused application is cancelled."""
+
+
 class ProfileBusyError(RuntimeError):
     """A run waited past PROFILE_LOCK_TIMEOUT_SECONDS for the profile's
     browser session and gave up. Surfaced as a normal application failure
@@ -64,18 +68,55 @@ def get_profile_lock(profile_key: str) -> asyncio.Lock:
 
 
 @asynccontextmanager
-async def profile_session(profile_key: str):
+async def profile_session(profile_key: str, application_id: str | None = None):
     """`get_profile_lock` with a bound on the ACQUIRE. Release is unchanged
     — once held, the lock is held for as long as the run needs it."""
     lock = get_profile_lock(profile_key)
-    try:
-        await asyncio.wait_for(lock.acquire(), timeout=PROFILE_LOCK_TIMEOUT_SECONDS)
-    except TimeoutError as exc:
-        raise ProfileBusyError(
-            f"another application for this profile has held the browser "
-            f"session for over {PROFILE_LOCK_TIMEOUT_SECONDS // 60} minutes "
-            f"— giving up rather than waiting indefinitely"
-        ) from exc
+
+    async def acquire() -> None:
+        if application_id is None:
+            try:
+                await asyncio.wait_for(
+                    lock.acquire(), timeout=PROFILE_LOCK_TIMEOUT_SECONDS
+                )
+            except TimeoutError as exc:
+                raise ProfileBusyError(
+                    f"another application for this profile has held the browser "
+                    f"session for over {PROFILE_LOCK_TIMEOUT_SECONDS // 60} minutes "
+                    f"— giving up rather than waiting indefinitely"
+                ) from exc
+            return
+
+        cancel_event = _cancel_events.setdefault(application_id, asyncio.Event())
+        acquire_task = asyncio.create_task(lock.acquire())
+        cancel_task = asyncio.create_task(cancel_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {acquire_task, cancel_task},
+                timeout=PROFILE_LOCK_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done or cancel_event.is_set():
+                if acquire_task.done() and not acquire_task.cancelled():
+                    lock.release()
+                raise ApplicationCancelled
+            if acquire_task not in done:
+                raise ProfileBusyError(
+                    f"another application for this profile has held the browser "
+                    f"session for over {PROFILE_LOCK_TIMEOUT_SECONDS // 60} minutes "
+                    f"— giving up rather than waiting indefinitely"
+                )
+        finally:
+            for task in (acquire_task, cancel_task):
+                if not task.done():
+                    task.cancel()
+
+    await acquire()
+    if application_id is not None and is_paused(application_id):
+        lock.release()
+        if await wait_for_resume_or_cancel(application_id) == "cancelled":
+            raise ApplicationCancelled
+        await acquire()
     try:
         yield
     finally:
@@ -116,6 +157,7 @@ async def signal_cancel(application_id: str) -> None:
 
 
 async def signal_pause(application_id: str) -> None:
+    clear_resume(application_id)
     event = _pause_events.get(application_id)
     if event is not None:
         event.set()
@@ -129,6 +171,12 @@ def is_cancelled(application_id: str) -> bool:
 def is_paused(application_id: str) -> bool:
     event = _pause_events.get(application_id)
     return event is not None and event.is_set()
+
+
+def clear_resume(application_id: str) -> None:
+    event = _resume_events.get(application_id)
+    if event is not None:
+        event.clear()
 
 
 async def wait_for_resume_or_cancel(
@@ -148,7 +196,11 @@ async def wait_for_resume_or_cancel(
     no timeout keep the original indefinite-wait behavior exactly."""
     resume_event = _resume_events.setdefault(application_id, asyncio.Event())
     cancel_event = _cancel_events.setdefault(application_id, asyncio.Event())
-    resume_event.clear()
+    if cancel_event.is_set():
+        return "cancelled"
+    if resume_event.is_set():
+        resume_event.clear()
+        return "resumed"
 
     resume_task = asyncio.create_task(resume_event.wait())
     cancel_task = asyncio.create_task(cancel_event.wait())
@@ -165,7 +217,10 @@ async def wait_for_resume_or_cancel(
 
     if not done:
         return "timeout"
-    return "cancelled" if cancel_task in done else "resumed"
+    if cancel_task in done:
+        return "cancelled"
+    resume_event.clear()
+    return "resumed"
 
 
 def cleanup(application_id: str) -> None:

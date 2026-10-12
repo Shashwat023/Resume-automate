@@ -54,6 +54,18 @@ async def test_wait_for_resume_or_cancel_returns_resumed():
     assert result == "resumed"
 
 
+async def test_wait_for_resume_or_cancel_consumes_a_resume_signalled_before_waiting():
+    await _seed("app-early-resume")
+    await qr.signal_resume("app-early-resume")
+
+    result = await asyncio.wait_for(
+        qr.wait_for_resume_or_cancel("app-early-resume"), timeout=0.1
+    )
+
+    assert result == "resumed"
+    assert qr._resume_events["app-early-resume"].is_set() is False
+
+
 async def test_wait_for_resume_or_cancel_returns_cancelled():
     await _seed("app-1")
 

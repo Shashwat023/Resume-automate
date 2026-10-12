@@ -17,7 +17,7 @@ installed package source, see PLAN.md Part C).
 
 import re
 from dataclasses import dataclass
-from typing import Any, Coroutine
+from typing import Any, Awaitable, Callable, Coroutine
 
 from stagehand import Stagehand
 
@@ -260,12 +260,17 @@ class Tier2Result:
 
 
 async def resolve_and_execute(
-    sh: Stagehand, page, fields: list[tuple[FormField, str]]
+    sh: Stagehand,
+    page,
+    fields: list[tuple[FormField, str]],
+    checkpoint: Callable[[], Awaitable[None]] | None = None,
 ) -> Tier2Result:
     resolved: list[tuple[str, str]] = []
     errored: list[tuple[str, str]] = []
 
     for field, value in fields:
+        if checkpoint is not None:
+            await checkpoint()
         if field.role == "combobox":
             outcome = await _resolve_combobox(sh, page, field, value)
         else:

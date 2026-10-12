@@ -56,12 +56,19 @@ from app.services.engine.tier0_harvest import (
 )
 from app.services.engine.tier1_map import Tier1Result, map_fields
 from app.services.engine.tier2_resolve import Tier2Result, resolve_and_execute
-from app.services.engine.timeouts import LLM_CALL_TIMEOUT_SECONDS, with_timeout
+from app.services.engine.timeouts import (
+    LLM_CALL_TIMEOUT_SECONDS,
+    describe,
+    with_timeout,
+)
 from app.services.engine.twofa_detect import detect_2fa
 from app.services.resume.storage import LocalFilesystemStorage
 from app.services.resume_service import ResumeService
 from app.worker.queue_runner import (
+    ApplicationCancelled,
+    clear_resume,
     cleanup,
+    get_profile_lock,
     is_cancelled,
     is_paused,
     profile_session,
@@ -167,14 +174,6 @@ def _control_summary(tree: str) -> str:
     )
 
 
-class ApplicationCancelled(Exception):
-    """Raised out of a pause-wait when the user cancels while the
-    application was blocked (user-paused, 2FA, or CAPTCHA escalation) —
-    `apply_service.cancel()` already set status=CANCELLED directly via the
-    API call, so this just unwinds the runner cleanly without the generic
-    except-block overwriting that with FAILED."""
-
-
 class TwoFactorTimeout(Exception):
     """Raised when a 2FA challenge is still present after
     TWOFA_TIMEOUT_SECONDS of polling with no manual resume either. Real
@@ -196,6 +195,66 @@ class FillCascadeResult:
     tier0: HarvestResult
     tier1: Tier1Result
     tier2: Tier2Result
+
+
+SUBMIT_SETTLE_TIMEOUT_SECONDS = 15
+
+
+def _is_session_lost(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "session with given id not found",
+            "target closed",
+            "execution context was destroyed",
+            "rpc client is closed",
+            "cannot find context",
+            "inspected target navigated or closed",
+        )
+    )
+
+
+async def _wait_for_submit_settle(page):
+    """Wait for the post-submit page state without turning uncertainty into a retry."""
+    await page.wait_for_timeout(2000)
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    elapsed = 0
+    while (
+        read_outcome(snapshot.formatted_tree).outcome == "unknown"
+        and find_submit_button(snapshot.formatted_tree, snapshot.xpath_map)
+        and elapsed < SUBMIT_SETTLE_TIMEOUT_SECONDS
+    ):
+        await page.wait_for_timeout(1000)
+        elapsed += 1
+        snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    return snapshot
+
+
+async def _log_page_diagnostics(
+    application_id: str, page, formatted_tree: str, reason: str
+) -> None:
+    """Append safe, compact form metadata for a manual or submit investigation."""
+    try:
+        fields = collect_fields(formatted_tree, {})[:40]
+        labels = ", ".join(f"{field.role}:{field.label[:60]}" for field in fields)
+        invalid = ", ".join(find_invalid_field_labels(formatted_tree))
+        try:
+            aria_invalid = await with_timeout(
+                page.evaluate(
+                    "document.querySelectorAll('[aria-invalid=\"true\"]').length"
+                ),
+                what="evaluate(aria-invalid)",
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never interrupt a run
+            aria_invalid = "unavailable"
+        message = (
+            f"{reason}; url={await _page_location(page)}; {_control_summary(formatted_tree)}; "
+            f"fields=[{labels}]; invalid_labels=[{invalid}]; aria_invalid={aria_invalid}"
+        )[:1500]
+        await _log(application_id, message, tier="diagnostics")
+    except Exception:  # noqa: BLE001 - diagnostics must never interrupt a run
+        pass
 
 
 async def run_application(application_id: str) -> None:
@@ -262,31 +321,7 @@ async def run_application(application_id: str) -> None:
                 await db.commit()
                 return
 
-            profile_dict = {
-                c.name: getattr(profile, c.name) for c in profile.__table__.columns
-            }
             profile_id = profile.id
-
-        async with async_session_factory() as db:
-            resume = await ResumeRepository(db).get(profile_id)
-            resume_file_path = resume.file_path if resume is not None else None
-
-            application = await db.get(Application, application_id)
-            application.status = st.RUNNING
-            application.started_at = datetime.now(timezone.utc)
-            db.add(
-                RunEvent(application_id=application_id, message="Automation started")
-            )
-            await db.commit()
-
-        if is_cancelled(application_id):
-            return
-
-        # Pause-before-start: a job paused the instant it was queued (before
-        # this task even got to run) must cost nothing — no browser launch,
-        # no LLM call. `apply_service.pause()` already set status=PAUSED;
-        # this is just the runner honouring that before doing anything.
-        await _check_paused_and_wait(application_id)
 
         # Serialize per profile: chrome_launcher.get_or_launch reuses ONE
         # shared Chrome session per profile (deliberate — cookies/login
@@ -301,7 +336,43 @@ async def run_application(application_id: str) -> None:
         # that page's current state; a second application must not jump in
         # and start navigating the same browser while the first is merely
         # paused, not finished.
-        async with profile_session(str(profile_id)):
+        lock = get_profile_lock(str(profile_id))
+        if lock.locked():
+            await _log(
+                application_id,
+                "Waiting for another application on this profile to finish",
+                tier="queue",
+            )
+        async with profile_session(str(profile_id), application_id):
+            async with async_session_factory() as db:
+                application = await db.get(Application, application_id)
+                if application is None:
+                    return
+                if application.status in st.TERMINAL:
+                    raise ApplicationCancelled
+                profile = await db.get(Profile, application.profile_id)
+                job = await db.get(Job, application.job_id)
+                if profile is None or job is None:
+                    return
+                profile_dict = {
+                    c.name: getattr(profile, c.name) for c in profile.__table__.columns
+                }
+                resume = await ResumeRepository(db).get(profile.id)
+                resume_file_path = resume.file_path if resume is not None else None
+                if application.status in (st.QUEUED, st.RUNNING):
+                    application.status = st.RUNNING
+                    application.started_at = application.started_at or datetime.now(
+                        timezone.utc
+                    )
+                    db.add(
+                        RunEvent(
+                            application_id=application_id,
+                            message="Automation started",
+                        )
+                    )
+                    await db.commit()
+
+            await _check_paused_and_wait(application_id)
             session = await with_timeout(
                 get_or_launch(str(profile_id)), what="Chrome launch"
             )
@@ -335,6 +406,7 @@ async def run_application(application_id: str) -> None:
 
                     await _log(application_id, f"Navigating to {job.apply_url}")
                     await with_timeout(page.goto(job.apply_url), what="page.goto")
+                    await _check_paused_and_wait(application_id)
                     await with_timeout(
                         page.wait_for_load_state("load"), what="wait_for_load_state"
                     )
@@ -390,6 +462,12 @@ async def run_application(application_id: str) -> None:
                                     "manual navigation in Live View",
                                     level="warn",
                                     tier="navigation",
+                                )
+                                await _log_page_diagnostics(
+                                    application_id,
+                                    page,
+                                    snapshot.formatted_tree,
+                                    "manual_navigation_required: no form or controls",
                                 )
                                 await _pause_for_human(
                                     application_id,
@@ -470,6 +548,12 @@ async def run_application(application_id: str) -> None:
                                     level="warn",
                                     tier="navigation",
                                 )
+                                await _log_page_diagnostics(
+                                    application_id,
+                                    page,
+                                    snapshot.formatted_tree,
+                                    "manual_navigation_required: filled page has no Continue or Submit",
+                                )
                                 await _pause_for_human(
                                     application_id,
                                     "manual_navigation_required",
@@ -487,6 +571,12 @@ async def run_application(application_id: str) -> None:
                                 level="warn",
                                 tier="navigation",
                             )
+                            await _log_page_diagnostics(
+                                application_id,
+                                page,
+                                snapshot.formatted_tree,
+                                "manual_navigation_required: automatic step cap reached",
+                            )
                             await _pause_for_human(
                                 application_id,
                                 "manual_navigation_required",
@@ -502,8 +592,29 @@ async def run_application(application_id: str) -> None:
             application = await db.get(Application, application_id)
             still_unhandled = sorted(_unhandled_labels(cascade))
 
+            if application is None:
+                return
+            if application.status in st.TERMINAL:
+                db.add(
+                    RunEvent(
+                        application_id=application_id,
+                        message=(
+                            "Run ended after cancellation; engine result was: "
+                            f"{submit_result.outcome}"
+                        ),
+                        level="warn",
+                    )
+                )
+                await db.commit()
+                return
             if submit_result.outcome in ("completed", "skipped"):
                 application.status = st.COMPLETED
+            elif submit_result.outcome == "unconfirmed":
+                application.status = st.NEEDS_REVIEW
+                application.error = (
+                    "Submission may have gone through — verify in your email/ATS "
+                    f"before retrying: {submit_result.detail}"
+                )
             else:
                 application.status = st.FAILED
                 application.error = submit_result.detail or submit_result.outcome
@@ -536,7 +647,7 @@ async def run_application(application_id: str) -> None:
         )
         async with async_session_factory() as db:
             application = await db.get(Application, application_id)
-            if application is not None:
+            if application is not None and application.status not in st.TERMINAL:
                 application.status = st.FAILED
                 application.error = detail
                 application.finished_at = datetime.now(timezone.utc)
@@ -545,6 +656,15 @@ async def run_application(application_id: str) -> None:
                         application_id=application_id,
                         message=f"Failed: {detail}",
                         level="error",
+                    )
+                )
+                await db.commit()
+            elif application is not None:
+                db.add(
+                    RunEvent(
+                        application_id=application_id,
+                        message=f"Run ended after cancellation; engine result was: failed ({detail})",
+                        level="warn",
                     )
                 )
                 await db.commit()
@@ -703,7 +823,12 @@ async def _run_fill_cascade(
     await _check_paused_and_wait(application_id)
 
     # ---- Tier 2: Stagehand observe/act for custom widgets ----
-    tier2 = await resolve_and_execute(sh, page, tier1.for_tier2)
+    tier2 = await resolve_and_execute(
+        sh,
+        page,
+        tier1.for_tier2,
+        checkpoint=lambda: _check_paused_and_wait(application_id),
+    )
     for label, description in tier2.resolved:
         await _log(
             application_id,
@@ -817,7 +942,12 @@ async def _repair_unhandled_fields(
             tier="tier1",
         )
 
-    tier2_extra = await resolve_and_execute(sh, page, tier1_extra.for_tier2)
+    tier2_extra = await resolve_and_execute(
+        sh,
+        page,
+        tier1_extra.for_tier2,
+        checkpoint=lambda: _check_paused_and_wait(application_id),
+    )
     for label, description in tier2_extra.resolved:
         await _log(
             application_id,
@@ -899,6 +1029,7 @@ async def _submit_and_verify(
     # human-assisted attempt still fails does this actually give up —
     # not an infinite loop, a bounded one extra step.
     MAX_SUBMIT_ATTEMPTS = 3
+    clicked = False
     for attempt in range(MAX_SUBMIT_ATTEMPTS):
         # Invisible reCAPTCHA/hCaptcha frequently only renders once a
         # submit is actually attempted — check again right before clicking,
@@ -929,48 +1060,70 @@ async def _submit_and_verify(
                 level="warn",
                 tier="submit",
             )
-            return SubmitResult(outcome="unknown", detail="submit button not found")
+            await _log_page_diagnostics(
+                application_id,
+                page,
+                snapshot.formatted_tree,
+                "submit control missing",
+            )
+            if clicked:
+                return SubmitResult(
+                    outcome="unconfirmed",
+                    detail="Submit control disappeared after a submit click; outcome unverified",
+                )
+            return SubmitResult(
+                outcome="no_button_found", detail="submit button not found"
+            )
 
         # Hard rule (PLAN.md Day 4 Part H): a paused job never submits. This
         # is the closest-to-the-click checkpoint achievable — right before
         # the action that makes the application irreversible.
         await _check_paused_and_wait(application_id)
 
-        await click_submit(page, xpath)
-        await page.wait_for_timeout(2000)
+        click_dispatched = False
+        try:
+            clicked = True
+            await click_submit(page, xpath)
+            click_dispatched = True
 
-        # A challenge can appear only after submission (e.g. email-based
-        # verification triggered by the attempt itself).
-        handled_2fa = await _handle_2fa_if_present(application_id, page)
+            # A challenge can appear only after submission (e.g. email-based
+            # verification triggered by the attempt itself).
+            handled_2fa = await _handle_2fa_if_present(application_id, page)
 
-        if handled_2fa:
-            # Real, live-caught bug: the ORIGINAL submit click only
-            # TRIGGERED the challenge (confirmed live on Figma: an
-            # email-OTP step) — it did not finalize the application.
-            # Entering the code alone isn't enough; the ATS's own form
-            # still needs an explicit second submit/verify click. Without
-            # this, the very next read_outcome() below sees neither a
-            # confirmation nor a validation error (the code was accepted,
-            # nothing is "wrong") and reports a false "unknown" outcome
-            # while the application never actually completes. Scoped to
-            # ONLY the post-2FA path — an ordinary no-2FA submit must
-            # never risk clicking Submit twice.
-            post_2fa_snapshot = await with_timeout(
-                page.snapshot(), what="page.snapshot"
-            )
-            post_2fa_submit_xpath = find_submit_button(
-                post_2fa_snapshot.formatted_tree, post_2fa_snapshot.xpath_map
-            )
-            if post_2fa_submit_xpath:
-                await _log(
-                    application_id,
-                    "Clicking submit again after 2FA/verification",
-                    tier="submit",
+            if handled_2fa:
+                # Real, live-caught bug: the ORIGINAL submit click only
+                # TRIGGERED the challenge (confirmed live on Figma: an
+                # email-OTP step) — it did not finalize the application.
+                # Entering the code alone isn't enough; the ATS's own form
+                # still needs an explicit second submit/verify click. Without
+                # this, the very next read_outcome() below sees neither a
+                # confirmation nor a validation error (the code was accepted,
+                # nothing is "wrong") and reports a false "unknown" outcome
+                # while the application never actually completes. Scoped to
+                # ONLY the post-2FA path — an ordinary no-2FA submit must
+                # never risk clicking Submit twice.
+                post_2fa_snapshot = await with_timeout(
+                    page.snapshot(), what="page.snapshot"
                 )
-                await click_submit(page, post_2fa_submit_xpath)
-                await page.wait_for_timeout(2000)
+                post_2fa_submit_xpath = find_submit_button(
+                    post_2fa_snapshot.formatted_tree, post_2fa_snapshot.xpath_map
+                )
+                if post_2fa_submit_xpath:
+                    await _log(
+                        application_id,
+                        "Clicking submit again after 2FA/verification",
+                        tier="submit",
+                    )
+                    clicked = True
+                    await click_submit(page, post_2fa_submit_xpath)
 
-        snapshot2 = await with_timeout(page.snapshot(), what="page.snapshot")
+            snapshot2 = await _wait_for_submit_settle(page)
+        except (ApplicationCancelled, TwoFactorTimeout):
+            raise
+        except Exception as exc:  # noqa: BLE001 - after a click, preserve uncertainty
+            if _is_session_lost(exc) or click_dispatched:
+                return SubmitResult(outcome="unconfirmed", detail=describe(exc))
+            raise
         result = read_outcome(snapshot2.formatted_tree)
 
         if result.outcome == "completed":
@@ -980,6 +1133,13 @@ async def _submit_and_verify(
                 tier="submit",
             )
             return result
+
+        await _log_page_diagnostics(
+            application_id,
+            page,
+            snapshot2.formatted_tree,
+            f"submit outcome: {result.outcome}",
+        )
 
         # The ATS's own error location beats our own click-success
         # bookkeeping — see _repair_unhandled_fields's `also_target`
@@ -996,6 +1156,12 @@ async def _submit_and_verify(
                 "page: " + ", ".join(sorted(page_reported_invalid)),
                 level="warn",
                 tier="submit",
+            )
+
+        if result.outcome == "unknown" and not page_reported_invalid:
+            return SubmitResult(
+                outcome="unconfirmed",
+                detail="submit click did not produce a confirmation or validation error",
             )
 
         is_last_attempt = attempt == MAX_SUBMIT_ATTEMPTS - 1
@@ -1161,6 +1327,8 @@ async def _check_paused_and_wait(application_id: str) -> None:
     above, `apply_service.pause()` already set status=PAUSED itself via the
     API call that triggered this — the runner's only job here is to notice
     and block, not to set status."""
+    if is_cancelled(application_id):
+        raise ApplicationCancelled
     if not is_paused(application_id):
         return
     await _log(application_id, "Paused by user — waiting to resume", level="warn")
@@ -1244,9 +1412,10 @@ async def _pause_for_human(
 
 
 async def _pause_for_input(application_id: str, pause_reason: str) -> None:
+    clear_resume(application_id)
     async with async_session_factory() as db:
         application = await db.get(Application, application_id)
-        if application is not None:
+        if application is not None and application.status not in st.TERMINAL:
             application.status = st.NEEDS_INPUT
             application.pause_reason = pause_reason
             await db.commit()
@@ -1255,7 +1424,7 @@ async def _pause_for_input(application_id: str, pause_reason: str) -> None:
 async def _resume_from_pause(application_id: str) -> None:
     async with async_session_factory() as db:
         application = await db.get(Application, application_id)
-        if application is not None:
+        if application is not None and application.status not in st.TERMINAL:
             application.status = st.RUNNING
             application.pause_reason = None
             await db.commit()
@@ -1398,6 +1567,12 @@ async def _click_next_if_present(page, application_id: str) -> bool:
             "pausing for manual review",
             level="warn",
             tier="navigation",
+        )
+        await _log_page_diagnostics(
+            application_id,
+            page,
+            after.formatted_tree,
+            f"{match.group(2)} did not advance the page",
         )
         return False
     await _log(
