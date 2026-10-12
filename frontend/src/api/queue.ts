@@ -38,6 +38,7 @@ function mapBackendStatusToJobStatus(status: string): JobStatus {
     case 'success':
       return 'completed';
     case 'failed':
+    case 'needs_review':
     case 'error':
     case 'link_expired_rescraped_still_unavailable':
       return 'failed';
@@ -71,6 +72,8 @@ function describeBackendStatus(status: string): string {
       return 'Completed';
     case 'failed':
       return 'Failed';
+    case 'needs_review':
+      return 'Submission unconfirmed — verify before retrying';
     default:
       return status;
   }
@@ -188,6 +191,10 @@ export interface BackendApplyDetails {
   events: BackendRunEvent[];
 }
 
+export interface ClearQueueHistoryResponse {
+  deleted_count: number;
+}
+
 export const queueApi = {
   startApply: (profileId: number, jobId: number) =>
     api.post('/api/apply/start', { profile_id: profileId, job_id: jobId }),
@@ -206,6 +213,9 @@ export const queueApi = {
 
   cancelApply: (applicationId: string) =>
     api.post(`/api/apply/${applicationId}/cancel`),
+
+  clearApplyHistory: (profileId: number): Promise<ClearQueueHistoryResponse> =>
+    api.delete(`/api/apply/history/${profileId}`),
 
   createQueue: async (payload: {
     jobs: { id: string; title: string; company_name: string; apply_url: string }[];

@@ -133,6 +133,32 @@ export const useCancelQueueMutation = () => {
   });
 };
 
+// Temporary test support: clear only terminal applications from the backend
+// history. Active runs stay intact so their browser task cannot outlive its DB
+// record. The same jobs can then be queued again for a clean test run.
+export const useClearQueueHistoryMutation = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async () => {
+      const profileId = getStoredProfileId();
+      if (!profileId) throw new Error('No profile selected');
+      return queueApi.clearApplyHistory(profileId);
+    },
+    onSuccess: async ({ deleted_count }) => {
+      toast.success(
+        deleted_count === 1
+          ? 'Removed 1 previous application from the queue.'
+          : `Removed ${deleted_count} previous applications from the queue.`
+      );
+      await queryClient.invalidateQueries({ queryKey: ['queue-status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to clear previous applications');
+    },
+  });
+};
+
 export const useRetryJobMutation = () => {
   const queryClient = useQueryClient();
   return useMutation({

@@ -1,8 +1,9 @@
-import { Play, Pause, XCircle, Download } from 'lucide-react';
+import { Play, Pause, XCircle, Download, Trash2 } from 'lucide-react';
 import { 
   usePauseQueueMutation, 
   useResumeQueueMutation, 
-  useCancelQueueMutation 
+  useCancelQueueMutation,
+  useClearQueueHistoryMutation
 } from '../services/queue.queries';
 import { useQueueStore } from '../../../store/queueStore';
 
@@ -11,6 +12,7 @@ export const QueueControls = () => {
   const pauseMutation = usePauseQueueMutation();
   const resumeMutation = useResumeQueueMutation();
   const cancelMutation = useCancelQueueMutation();
+  const clearHistoryMutation = useClearQueueHistoryMutation();
 
   const status = queueState?.status || 'idle';
   const currentJob = queueState?.items.find((i) => i.id === queueState.currentJobId);
@@ -19,6 +21,21 @@ export const QueueControls = () => {
   // prompt. CurrentJobCard's "Take Control" button is the only correct
   // entry point for that case; this button stays disabled until then.
   const needsInput = currentJob?.status === 'waiting_for_user';
+  const hasPreviousApplications = queueState?.items.some(
+    (item) =>
+      item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled'
+  );
+
+  const handleClearPreviousApplications = () => {
+    if (
+      !window.confirm(
+        'Delete all completed, failed, cancelled, and awaiting-review applications from the backend queue? This cannot be undone.'
+      )
+    ) {
+      return;
+    }
+    clearHistoryMutation.mutate();
+  };
 
   const handleExport = () => {
     if (!queueState?.items) return;
@@ -112,6 +129,15 @@ export const QueueControls = () => {
         className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-700 dark:border-gray-700 dark:text-gray-300 rounded-lg font-medium text-sm hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
       >
         <Download className="w-4 h-4" /> Export Report
+      </button>
+
+      <button
+        onClick={handleClearPreviousApplications}
+        disabled={!hasPreviousApplications || clearHistoryMutation.isPending}
+        title="Temporary test control: removes completed, failed, and cancelled applications from the backend queue"
+        className="flex items-center gap-2 px-4 py-2 border border-red-200 text-red-600 dark:border-red-900/30 dark:text-red-400 rounded-lg font-medium text-sm hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50"
+      >
+        <Trash2 className="w-4 h-4" /> Clear Previous Applications
       </button>
     </div>
   );

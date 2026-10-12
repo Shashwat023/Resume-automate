@@ -139,12 +139,12 @@ export const QueueTable = () => {
                 <PauseCircle className="w-4 h-4" />
               </button>
             )}
-            {item.status === 'failed' && (
+            {item.status === 'failed' && item.rawStatus !== 'needs_review' && (
               <button onClick={() => retryMutation.mutate(item.jobId)} className="p-1.5 text-gray-400 hover:text-indigo-600 transition-colors" title="Retry">
                 <PlayCircle className="w-4 h-4" />
               </button>
             )}
-            {(item.status === 'waiting' || item.status === 'failed') && (
+            {(item.status === 'waiting' || item.status === 'failed') && item.rawStatus !== 'needs_review' && (
               <button onClick={() => skipMutation.mutate(item.jobId)} className="p-1.5 text-gray-400 hover:text-amber-600 transition-colors" title="Skip">
                 <SkipForward className="w-4 h-4" />
               </button>

@@ -46,9 +46,15 @@ export const useCreateQueueMutation = () => {
     mutationFn: (payload: { jobs: { id: string; title: string; company_name: string; apply_url: string }[] }) => {
       return queueApi.createQueue(payload);
     },
-    onSuccess: () => {
-      toast.success('Successfully added to queue');
+    onSuccess: (succeeded, variables) => {
+      const added = succeeded.length;
+      toast.success(`Added ${added} job${added === 1 ? '' : 's'} to the queue`);
+      const skipped = variables.jobs.length - added;
+      if (skipped > 0) {
+        toast.warning(`${skipped} job${skipped === 1 ? '' : 's'} skipped (already queued, applied, or awaiting review)`);
+      }
       queryClient.invalidateQueries({ queryKey: ['queue'] });
+      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
     },
     onError: (error: any) => {
       toast.error(error.message || 'Failed to create queue');
