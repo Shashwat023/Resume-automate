@@ -336,6 +336,78 @@ async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
     assert page.click_calls == ["//button[@id='submit-1']"]
 
 
+async def test_submit_unknown_after_click_is_unconfirmed_with_single_click(
+    async_session, monkeypatch
+):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage(
+        [(_SUBMIT_TREE_1, {"1": "//submit"}), ("[2] heading: Form\n", {})]
+    )
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    monkeypatch.setattr(runner, "is_paused", lambda _id: False)
+
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert result.outcome == "unconfirmed"
+    assert page.click_calls == ["//submit"]
+
+
+@pytest.mark.parametrize(
+    "exception", [RuntimeError("Session with given id not found"), TimeoutError()]
+)
+async def test_submit_failure_after_click_is_unconfirmed(
+    async_session, monkeypatch, exception
+):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage([(_SUBMIT_TREE_1, {"1": "//submit"})])
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    async def fails(*_args, **_kwargs):
+        raise exception
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    monkeypatch.setattr(runner, "is_paused", lambda _id: False)
+    monkeypatch.setattr(runner, "click_submit", fails)
+
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert result.outcome == "unconfirmed"
+
+
+async def test_submit_missing_button_first_attempt_is_no_button_found(
+    async_session, monkeypatch
+):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage([("[1] heading: Form\n", {})])
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert result.outcome == "no_button_found"
+    assert page.click_calls == []
+
+
 # ---- submit escalation: never give up without a human-assisted final try ----
 
 

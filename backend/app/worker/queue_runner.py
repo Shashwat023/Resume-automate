@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # minutes is far longer than any legitimate run (the longest real run
 # observed is a few minutes) while still guaranteeing the queue drains.
 PROFILE_LOCK_TIMEOUT_SECONDS = 30 * 60
+LOCK_WAIT_LOG_INTERVAL_SECONDS = 5 * 60
 
 
 class ApplicationCancelled(Exception):
@@ -103,7 +104,7 @@ async def profile_session(
             while True:
                 done, _pending = await asyncio.wait(
                     {acquire_task, cancel_task},
-                    timeout=300,
+                    timeout=LOCK_WAIT_LOG_INTERVAL_SECONDS,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if cancel_task in done or cancel_event.is_set():
@@ -112,7 +113,7 @@ async def profile_session(
                     raise ApplicationCancelled
                 if acquire_task in done:
                     return
-                waited_seconds += 300
+                waited_seconds += LOCK_WAIT_LOG_INTERVAL_SECONDS
                 if on_wait is not None:
                     await on_wait(waited_seconds // 60)
         finally:

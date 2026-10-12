@@ -23,12 +23,12 @@ const columnHelper = createColumnHelper<QueueItem>();
 // Statuses a job can be pause/resumed from — never a terminal one.
 const PAUSABLE_RAW_STATUSES = new Set(['queued', 'pending', 'running']);
 
-function activityHint(item: QueueItem): { title: string; warning?: string } {
+export function activityHint(item: QueueItem): { title: string; warning?: string } {
   if (!item.lastActivityAt) return { title: item.statusLabel ?? '' };
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(item.lastActivityAt).getTime()) / 60_000));
   const relative = minutes < 1 ? 'just now' : `${minutes} min ago`;
-  const warning = item.rawStatus === 'running' && minutes > 120
-    ? `No activity for ${Math.floor(minutes / 60)} min`
+  const warning = item.rawStatus === 'running' && minutes >= 2
+    ? `No activity for ${minutes} min`
     : undefined;
   return { title: `${item.statusLabel ?? ''}\nLast activity ${relative}`, warning };
 }

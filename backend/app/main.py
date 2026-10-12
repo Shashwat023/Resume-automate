@@ -42,7 +42,10 @@ async def lifespan(app: FastAPI):
     from app.services.apply_recovery import recover_orphaned_applications
     from app.worker.watchdog import watchdog_loop
 
-    await recover_orphaned_applications()
+    try:
+        await recover_orphaned_applications()
+    except Exception:  # noqa: BLE001 - a failed recovery must not prevent startup
+        _app_logger.exception("Application startup recovery failed")
     watchdog_stop = asyncio.Event()
     watchdog_task = asyncio.create_task(watchdog_loop(watchdog_stop))
 

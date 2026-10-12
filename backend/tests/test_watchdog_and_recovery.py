@@ -158,6 +158,7 @@ async def test_application_lock_wait_has_no_timeout_but_unscoped_wait_does(monke
     lock = queue_runner.get_profile_lock(key)
     await lock.acquire()
     monkeypatch.setattr(queue_runner, "PROFILE_LOCK_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(queue_runner, "LOCK_WAIT_LOG_INTERVAL_SECONDS", 0.01)
     try:
         entered = []
 
@@ -179,3 +180,24 @@ async def test_application_lock_wait_has_no_timeout_but_unscoped_wait_does(monke
         if lock.locked():
             lock.release()
         queue_runner._profile_locks.pop(key, None)
+
+
+async def test_watchdog_loop_survives_an_iteration_exception(monkeypatch):
+    stop = asyncio.Event()
+    calls = 0
+
+    async def _run_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary database error")
+        stop.set()
+
+    monkeypatch.setattr(watchdog, "run_watchdog_once", _run_once)
+    monkeypatch.setattr(
+        watchdog, "get_settings", lambda: SimpleNamespace(watchdog_interval_seconds=0)
+    )
+
+    await watchdog.watchdog_loop(stop)
+
+    assert calls == 2
