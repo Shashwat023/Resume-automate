@@ -126,7 +126,7 @@ class Application(Base):
     """
     status vocabulary: queued, pending, checking_url, rescraped_retry_queued,
     link_expired_rescraping, running, needs_input, completed, success, failed,
-    error, link_expired_rescraped_still_unavailable, cancelled
+    error, link_expired_rescraped_still_unavailable, cancelled, needs_review
     (see frontend/src/api/queue.ts mapBackendStatusToJobStatus)
     """
 

@@ -158,6 +158,10 @@ class ApplyStartOut(BaseModel):
     status: str
 
 
+class ClearApplicationHistoryOut(BaseModel):
+    deleted_count: int
+
+
 class ApplyStatusOut(BaseModel):
     application_id: str
     status: str

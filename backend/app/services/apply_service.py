@@ -6,9 +6,11 @@ domain/application_transitions.py; this orchestrates repository +
 domain + queue.
 """
 
+import asyncio
+import weakref
 from datetime import datetime, timezone
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.domain import application_transitions as transitions
 from app.domain import status as st
 from app.models.db_models import Application
@@ -16,12 +18,27 @@ from app.models.schemas import (
     ApplyDetailsOut,
     ApplyHistoryItemOut,
     ApplyStatusOut,
+    ClearApplicationHistoryOut,
     RunEventOut,
 )
 from app.ports import QueuePort
 from app.repositories.application_repository import ApplicationRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.profile_repository import ProfileRepository
+
+
+_start_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _start_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _start_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _start_locks[loop] = lock
+    return lock
 
 
 class ApplyService:
@@ -45,10 +62,25 @@ class ApplyService:
         if job is None:
             raise NotFoundError("Job not found")
 
-        application = await self._applications.create(profile_id, job_id, st.QUEUED)
-        await self._applications.add_event(application.id, "Application queued")
-        await self._applications.commit()
-        await self._applications.refresh(application)
+        async with _start_lock():
+            blocking = await self._applications.find_blocking_for_job(
+                profile_id, job_id
+            )
+            if blocking is not None:
+                messages = {
+                    st.COMPLETED: "This job was already applied to. Use Clear Previous Applications to run it again",
+                    st.NEEDS_REVIEW: "A previous submission for this job is awaiting your review. Verify it, then clear it before retrying",
+                }
+                raise ConflictError(
+                    messages.get(
+                        blocking.status,
+                        "This job is already queued or running for this profile",
+                    )
+                )
+            application = await self._applications.create(profile_id, job_id, st.QUEUED)
+            await self._applications.add_event(application.id, "Application queued")
+            await self._applications.commit()
+            await self._applications.refresh(application)
 
         await self._queue.enqueue_application(application.id)
         return application
@@ -83,6 +115,22 @@ class ApplyService:
             )
             for app, job in rows
         ]
+
+    async def clear_history(self, profile_id: int) -> ClearApplicationHistoryOut:
+        """Remove terminal applications for one profile so they can be retested.
+
+        Active, queued, paused, and human-input runs are deliberately retained:
+        deleting a row an in-process browser task still owns would leave that
+        task writing to a record that no longer exists.
+        """
+        profile = await self._profiles.get(profile_id)
+        if profile is None:
+            raise NotFoundError("Profile not found")
+        deleted_count = await self._applications.delete_terminal_for_profile(
+            profile_id, st.TERMINAL
+        )
+        await self._applications.commit()
+        return ClearApplicationHistoryOut(deleted_count=deleted_count)
 
     async def get_details(self, application_id: str) -> ApplyDetailsOut:
         application = await self._require(application_id)
@@ -133,7 +181,7 @@ class ApplyService:
     async def resume(self, application_id: str) -> ApplyStatusOut:
         application = await self._require(application_id)
         transitions.ensure_can_resume(application.status)
-        application.status = st.RUNNING
+        application.status = st.QUEUED if application.started_at is None else st.RUNNING
         application.pause_reason = None
         await self._applications.add_event(application.id, "Resumed by user")
         await self._applications.commit()

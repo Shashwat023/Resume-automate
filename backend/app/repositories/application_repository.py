@@ -4,7 +4,7 @@ Extracted verbatim from what was inline across api/apply.py and the
 log-tailing loop in api/ws.py.
 """
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db_models import Application, Job, RunEvent
@@ -22,6 +22,20 @@ class ApplicationRepository:
         self._db.add(application)
         await self._db.flush()
         return application
+
+    async def find_blocking_for_job(
+        self, profile_id: int, job_id: int
+    ) -> Application | None:
+        stmt = (
+            select(Application)
+            .where(
+                Application.profile_id == profile_id,
+                Application.job_id == job_id,
+                Application.status.not_in(("failed", "cancelled")),
+            )
+            .order_by(Application.created_at.desc())
+        )
+        return (await self._db.execute(stmt)).scalars().first()
 
     async def add_event(
         self,
@@ -51,6 +65,33 @@ class ApplicationRepository:
             .order_by(Application.created_at.desc())
         )
         return list((await self._db.execute(stmt)).all())
+
+    async def delete_terminal_for_profile(
+        self, profile_id: int, terminal_statuses: set[str]
+    ) -> int:
+        """Delete completed history while preserving queued or active runs."""
+        application_ids = list(
+            (
+                await self._db.execute(
+                    select(Application.id).where(
+                        Application.profile_id == profile_id,
+                        Application.status.in_(terminal_statuses),
+                    )
+                )
+            ).scalars()
+        )
+        if not application_ids:
+            return 0
+
+        # Delete explicitly rather than relying on SQLite foreign-key pragma
+        # configuration for RunEvent's ON DELETE CASCADE behavior.
+        await self._db.execute(
+            delete(RunEvent).where(RunEvent.application_id.in_(application_ids))
+        )
+        result = await self._db.execute(
+            delete(Application).where(Application.id.in_(application_ids))
+        )
+        return result.rowcount or 0
 
     async def events_after(self, application_id: str, last_id: int) -> list[RunEvent]:
         stmt = (

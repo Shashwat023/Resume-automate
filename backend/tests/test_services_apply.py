@@ -6,6 +6,7 @@ the router used to import queue_runner's functions directly.
 """
 
 import pytest
+from datetime import datetime, timezone
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.domain import status as st
@@ -97,7 +98,7 @@ async def test_pause_then_resume_signals_queue(async_session):
     assert queue.paused == [application.id]
 
     resumed = await service.resume(application.id)
-    assert resumed.status == st.RUNNING
+    assert resumed.status == st.QUEUED
     assert queue.resumed == [application.id]
 
 
@@ -108,6 +109,7 @@ async def test_resume_from_needs_input_still_works(async_session):
     application = await service.start(profile.id, job.id)
     application_row = await service._require(application.id)
     application_row.status = st.NEEDS_INPUT
+    application_row.started_at = datetime.now(timezone.utc)
     await async_session.commit()
 
     resumed = await service.resume(application.id)
@@ -190,3 +192,71 @@ async def test_get_history_includes_real_job_id(async_session):
     assert history[0].apply_url == job.apply_url
     assert history[0].company_url == job.company_url
     assert history[0].ats == job.ats
+
+
+async def test_clear_history_deletes_terminal_runs_but_keeps_queued_runs(async_session):
+    service, queue, profile, job = await _make_service(async_session)
+    completed = await service.start(profile.id, job.id)
+    second_job = Job(
+        title="Sales Engineer", company_name="Anthropic", apply_url="https://x.com/2"
+    )
+    async_session.add(second_job)
+    await async_session.commit()
+    await async_session.refresh(second_job)
+    queued = await service.start(profile.id, second_job.id)
+
+    completed_row = await service._require(completed.id)
+    completed_row.status = st.COMPLETED
+    await service._applications.add_event(completed.id, "Application completed")
+    await service._applications.commit()
+
+    result = await service.clear_history(profile.id)
+
+    assert result.deleted_count == 1
+    assert await service._applications.get(completed.id) is None
+    assert await service._applications.events_after(completed.id, 0) == []
+    assert (await service._applications.get(queued.id)) is not None
+    assert queue.enqueued == [completed.id, queued.id]
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (st.QUEUED, "already queued or running"),
+        (st.COMPLETED, "already applied"),
+        (st.NEEDS_REVIEW, "awaiting your review"),
+    ],
+)
+async def test_start_rejects_a_blocking_duplicate(async_session, status, message):
+    service, _queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+    application.status = status
+    await service._applications.commit()
+
+    with pytest.raises(ConflictError, match=message):
+        await service.start(profile.id, job.id)
+
+
+@pytest.mark.parametrize("status", [st.FAILED, st.CANCELLED])
+async def test_start_allows_a_duplicate_after_a_non_blocking_terminal_status(
+    async_session, status
+):
+    service, _queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+    application.status = status
+    await service._applications.commit()
+
+    retry = await service.start(profile.id, job.id)
+    assert retry.id != application.id
+
+
+async def test_resuming_a_never_started_application_returns_it_to_queued(async_session):
+    service, queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+    application.status = st.PAUSED
+    await service._applications.commit()
+
+    resumed = await service.resume(application.id)
+
+    assert resumed.status == st.QUEUED
+    assert queue.resumed == [application.id]
