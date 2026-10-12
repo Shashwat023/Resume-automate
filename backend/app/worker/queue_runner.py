@@ -28,6 +28,7 @@ the same profile genuinely waits its turn instead of racing.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 
 from app.ports import RunnerPort
 
@@ -71,7 +72,11 @@ def get_profile_lock(profile_key: str) -> asyncio.Lock:
 
 
 @asynccontextmanager
-async def profile_session(profile_key: str, application_id: str | None = None):
+async def profile_session(
+    profile_key: str,
+    application_id: str | None = None,
+    on_wait: Callable[[int], Awaitable[None]] | None = None,
+):
     """`get_profile_lock` with a bound on the ACQUIRE. Release is unchanged
     — once held, the lock is held for as long as the run needs it."""
     lock = get_profile_lock(profile_key)
@@ -93,22 +98,23 @@ async def profile_session(profile_key: str, application_id: str | None = None):
         cancel_event = _cancel_events.setdefault(application_id, asyncio.Event())
         acquire_task = asyncio.create_task(lock.acquire())
         cancel_task = asyncio.create_task(cancel_event.wait())
+        waited_seconds = 0
         try:
-            done, _pending = await asyncio.wait(
-                {acquire_task, cancel_task},
-                timeout=PROFILE_LOCK_TIMEOUT_SECONDS,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if cancel_task in done or cancel_event.is_set():
-                if acquire_task.done() and not acquire_task.cancelled():
-                    lock.release()
-                raise ApplicationCancelled
-            if acquire_task not in done:
-                raise ProfileBusyError(
-                    f"another application for this profile has held the browser "
-                    f"session for over {PROFILE_LOCK_TIMEOUT_SECONDS // 60} minutes "
-                    f"— giving up rather than waiting indefinitely"
+            while True:
+                done, _pending = await asyncio.wait(
+                    {acquire_task, cancel_task},
+                    timeout=300,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
+                if cancel_task in done or cancel_event.is_set():
+                    if acquire_task.done() and not acquire_task.cancelled():
+                        lock.release()
+                    raise ApplicationCancelled
+                if acquire_task in done:
+                    return
+                waited_seconds += 300
+                if on_wait is not None:
+                    await on_wait(waited_seconds // 60)
         finally:
             for task in (acquire_task, cancel_task):
                 if not task.done():

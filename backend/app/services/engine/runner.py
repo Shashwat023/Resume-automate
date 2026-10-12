@@ -345,7 +345,18 @@ async def run_application(application_id: str) -> None:
                 tier="queue",
                 step="Waiting for browser session",
             )
-        async with profile_session(str(profile_id), application_id):
+        else:
+            await _set_step(application_id, "Waiting for browser session")
+        async with profile_session(
+            str(profile_id),
+            application_id,
+            on_wait=lambda minutes: _log(
+                application_id,
+                f"Still waiting for the browser session ({minutes} min)",
+                tier="queue",
+                step="Waiting for browser session",
+            ),
+        ):
             await _check_paused_and_wait(application_id)
             async with async_session_factory() as db:
                 application = await db.get(Application, application_id)

@@ -194,6 +194,24 @@ async def test_get_history_includes_real_job_id(async_session):
     assert history[0].ats == job.ats
 
 
+async def test_status_and_history_include_current_step_and_activity(async_session):
+    service, _queue, profile, job = await _make_service(async_session)
+    application = await service.start(profile.id, job.id)
+    timestamp = datetime.now(timezone.utc)
+    row = await service._require(application.id)
+    row.current_step = "Navigating to job page"
+    row.last_activity_at = timestamp
+    await service._applications.commit()
+
+    status = await service.get_status(application.id)
+    history = await service.get_history(profile.id)
+
+    assert status.current_step == "Navigating to job page"
+    assert status.last_activity_at == timestamp
+    assert history[0].current_step == "Navigating to job page"
+    assert history[0].last_activity_at == timestamp
+
+
 async def test_clear_history_deletes_terminal_runs_but_keeps_queued_runs(async_session):
     service, queue, profile, job = await _make_service(async_session)
     completed = await service.start(profile.id, job.id)
