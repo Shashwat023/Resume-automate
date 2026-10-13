@@ -25,6 +25,24 @@ class FieldMatch:
 
 # Ordered longest/most-specific pattern first within each tier of specificity.
 _PATTERNS: list[tuple[re.Pattern, FieldMatch]] = [
+    # Keep phone-specific controls before their generic phone/country
+    # counterparts.  A dial-code selector must never be treated as a country
+    # of residence or a complete telephone number.
+    (
+        re.compile(
+            r"\bcountry\s+(?:phone\s+)?code\b|\bphone\s+(?:country\s+)?code\b"
+            r"|\bdial(?:ing)?\s+code\b|\bcalling\s+code\b|\bphone\s+country\b"
+            r"|\bcountry\s+dial\b"
+        ),
+        FieldMatch("phone_country_code"),
+    ),
+    (re.compile(r"\bext(?:ension)?\b"), FieldMatch("phone_extension")),
+    (
+        re.compile(
+            r"\bphone\s+(?:device\s+)?type\b|\btype\s+of\s+phone\b|\bdevice\s+type\b"
+        ),
+        FieldMatch("phone_type"),
+    ),
     (re.compile(r"\bfirst\s*name\b"), FieldMatch("full_name", "first_name")),
     (
         re.compile(r"\blast\s*name\b|\bsurname\b|\bfamily\s*name\b"),
@@ -97,6 +115,15 @@ def match_field(label: str) -> FieldMatch | None:
 
 
 def resolve_value(profile: dict, match: FieldMatch) -> str | None:
+    if match.profile_attr == "phone_extension":
+        return None
+    if match.profile_attr == "phone_type":
+        return "Mobile"
+    if match.profile_attr == "phone_country_code":
+        from app.domain.phone import parse_phone
+
+        parsed = parse_phone(profile.get("phone"), profile.get("country"))
+        return parsed.dial_code if parsed else None
     raw = profile.get(match.profile_attr)
     if raw is None:
         return None

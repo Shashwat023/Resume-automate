@@ -26,9 +26,9 @@ distinction is exactly the Tier 1 vs Tier 2 boundary:
 import re
 from dataclasses import dataclass, field
 
-import phonenumbers
 from stagehand import Page
 
+from app.domain.phone import parse_phone
 from app.domain.semantic_dictionary import match_field, resolve_value
 from app.services.engine.field_fill import fill_textbox
 from app.services.engine.timeouts import with_timeout
@@ -87,11 +87,22 @@ _RESUME_FIELD_LABEL = re.compile(r"resum[eé]|\bcv\b", re.I)
 # `phonenumbers` (Google's libphonenumber) parses against the real ITU
 # calling-code table instead of guessing.
 def strip_country_code(value: str) -> str:
-    try:
-        parsed = phonenumbers.parse(value, None)
-    except phonenumbers.NumberParseException:
-        return value
-    return str(parsed.national_number)
+    """Compatibility helper; preserve leading significant zeroes."""
+    parsed = parse_phone(value)
+    return parsed.national_number if parsed else value
+
+
+_LOCAL_PHONE_LABEL = re.compile(
+    r"without country code|local number|number only|excluding country", re.I
+)
+
+
+def has_phone_code_selector(fields: list["FormField"]) -> bool:
+    for candidate in fields:
+        match = match_field(candidate.label)
+        if match is not None and match.profile_attr == "phone_country_code":
+            return True
+    return False
 
 
 @dataclass
@@ -297,18 +308,27 @@ async def fill_deterministic(
             unmatched.append(f.label)
             continue
 
+        if match.profile_attr == "phone_extension":
+            # Extensions belong to the candidate, not a safe default.  Do not
+            # send them on to a guessing tier either.
+            continue
+
         value = resolve_value(profile, match)
         if not value:
             unmatched.append(f.label)
             continue
 
-        if match.profile_attr == "phone" and value.startswith("+"):
-            has_country_selector = any(
-                other.role == "combobox" and "country" in other.label.lower()
-                for other in fields
-            )
-            if has_country_selector:
-                value = strip_country_code(value)
+        if match.profile_attr == "phone":
+            parsed_phone = parse_phone(value, profile.get("country"))
+            if parsed_phone and (
+                has_phone_code_selector(fields)
+                or any(
+                    other.role == "combobox" and "country" in other.label.lower()
+                    for other in fields
+                )
+                or _LOCAL_PHONE_LABEL.search(f.label)
+            ):
+                value = parsed_phone.national_number
 
         if f.xpath is None:
             unmatched.append(f.label)

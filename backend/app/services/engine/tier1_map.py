@@ -18,6 +18,7 @@ is the only tier that ever invokes Stagehand's LLM callback.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field, ValidationError
@@ -25,12 +26,13 @@ from stagehand import Page
 
 from app.core.config import get_settings
 from app.domain.answer_key import question_hash
+from app.domain.phone import COUNTRY_NAMES_BY_DIAL, ParsedPhone, parse_phone
 from app.domain.semantic_dictionary import match_field
 from app.repositories.answer_library_repository import AnswerLibraryRepository
 from app.services.engine.field_fill import fill_textbox
 from app.services.engine.openrouter_client import OpenRouterError, chat_json
 from app.services.engine.resume_parse import ResumeFacts
-from app.services.engine.tier0_harvest import FormField, strip_country_code
+from app.services.engine.tier0_harvest import FormField, has_phone_code_selector
 from app.services.engine.timeouts import with_timeout
 
 settings = get_settings()
@@ -91,6 +93,7 @@ class Tier1Result:
     errored: list[tuple[str, str]]
     usage: dict
     already_set: set[str] = field(default_factory=set)
+    deterministic_filled: set[str] = field(default_factory=set)
 
 
 def build_prompt(
@@ -159,6 +162,7 @@ async def map_fields(
     unanswered: list[str] = []
     errored: list[tuple[str, str]] = []
     already_set: set[str] = set()
+    deterministic_filled: set[str] = set()
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     def result() -> Tier1Result:
@@ -175,20 +179,68 @@ async def map_fields(
             errored=errored,
             usage=usage,
             already_set=already_set,
+            deterministic_filled=deterministic_filled,
         )
 
     # Same "does a sibling Country selector exist" signal tier0_harvest.py
     # uses — computed once here so any phone-like field Tier 1 ends up
     # applying (see _apply's phone-normalization note) gets the same
     # country-code handling regardless of which tier actually writes it.
-    has_country_selector = any(
+    has_country_selector = has_phone_code_selector(fields) or any(
         f.role == "combobox" and "country" in f.label.lower() for f in fields
     )
+
+    parsed_phone = parse_phone(profile.get("phone"), profile.get("country"))
 
     # 1. Answers library first — free, no LLM call. Only fields with no
     #    fixed option set are cacheable this way (see module docstring).
     remaining: list[FormField] = []
     for f in fields:
+        semantic_match = match_field(f.label)
+        if (
+            semantic_match is not None
+            and semantic_match.profile_attr == "phone_extension"
+        ):
+            # A form's extension is neither safely knowable nor a question
+            # worth guessing.  It must not reach cache, prompt, or Tier 2.
+            continue
+
+        if semantic_match is not None:
+            if (
+                semantic_match.profile_attr == "phone_country_code"
+                and parsed_phone is not None
+            ):
+                value = _country_code_option(f, parsed_phone)
+                if value is not None:
+                    await _apply(
+                        page,
+                        f,
+                        value,
+                        filled,
+                        for_tier2,
+                        errored,
+                        has_country_selector,
+                        already_set,
+                        force_refill,
+                    )
+                    deterministic_filled.add(f.label)
+                    continue
+            elif semantic_match.profile_attr == "phone_type":
+                value = _phone_type_option(f)
+                await _apply(
+                    page,
+                    f,
+                    value,
+                    filled,
+                    for_tier2,
+                    errored,
+                    has_country_selector,
+                    already_set,
+                    force_refill,
+                )
+                deterministic_filled.add(f.label)
+                continue
+
         if not f.options:
             cached = await answer_repo.get(profile_id, question_hash(f.label))
             # Real bug found live: a cache write is only gated on
@@ -397,10 +449,11 @@ async def _apply(
             if (
                 semantic_match is not None
                 and semantic_match.profile_attr == "phone"
-                and value.startswith("+")
-                and has_country_selector
+                and (has_country_selector or _LOCAL_PHONE_LABEL.search(field.label))
             ):
-                value = strip_country_code(value)
+                parsed_phone = parse_phone(value)
+                if parsed_phone is not None:
+                    value = parsed_phone.national_number
             changed = await fill_textbox(page, field.xpath, value, force=force_refill)
             filled.append((field.label, value))
             if not changed and already_set is not None:
@@ -417,6 +470,43 @@ async def _apply(
             for_tier2.append((field, value))
     except Exception as exc:  # noqa: BLE001
         errored.append((field.label, str(exc)))
+
+
+_LOCAL_PHONE_LABEL = re.compile(
+    r"without country code|local number|number only|excluding country", re.I
+)
+
+
+def _country_code_option(field: FormField, phone: ParsedPhone) -> str | None:
+    """Choose a native option, or give Tier 2 an explicit human label."""
+    if not field.options:
+        name = COUNTRY_NAMES_BY_DIAL.get(
+            phone.dial_code, (phone.region or phone.dial_code,)
+        )[0]
+        return f"{name} ({phone.dial_code})"
+
+    dial_digits = re.escape(phone.dial_code[1:])
+    dial_token = re.compile(rf"(?<!\d)\+?{dial_digits}(?!\d)")
+    for option in field.options:
+        if dial_token.search(option):
+            return option
+    for name in COUNTRY_NAMES_BY_DIAL.get(phone.dial_code, ()):
+        name_token = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)", re.I)
+        for option in field.options:
+            if name_token.search(option):
+                return option
+    # Native selects only accept one of their exposed option strings.  Leave
+    # an unfamiliar list to the normal mapping path instead of selecting a
+    # made-up value.
+    return None
+
+
+def _phone_type_option(field: FormField) -> str:
+    if field.options:
+        for option in field.options:
+            if re.search(r"\b(?:mobile|cell)\b", option, re.I):
+                return option
+    return "Mobile"
 
 
 async def _chat_with_repair(messages: list[dict]) -> tuple[TierOneResponse, dict]:

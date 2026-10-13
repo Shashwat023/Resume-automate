@@ -1071,9 +1071,17 @@ def _match_field_for_label(label: str, fields: list[FormField]) -> FormField | N
 
 
 def _is_factual_field(field: FormField) -> bool:
+    semantic_match = match_field(field.label)
+    # A bare "Device Type" can describe many unrelated controls.  Preserve
+    # C2's safe any-option repair for that generic shape; the deterministic
+    # phone-type policy only applies when the label actually identifies it as
+    # a phone field.
+    semantic_factual = semantic_match is not None and (
+        semantic_match.profile_attr != "phone_type" or "phone" in field.label.casefold()
+    )
     return bool(
         not _NON_FACTUAL_DROPDOWN.search(field.label)
-        and (_FACTUAL_LABEL.search(field.label) or match_field(field.label))
+        and (_FACTUAL_LABEL.search(field.label) or semantic_factual)
     )
 
 
@@ -1129,6 +1137,10 @@ async def _run_fill_cascade(
         for f in fields
         if f.role != "file"
         and not (f.role == "textbox" and f.label in tier0_filled_labels)
+        and not (
+            match_field(f.label) is not None
+            and match_field(f.label).profile_attr == "phone_extension"
+        )
     ]
 
     await _check_paused_and_wait(application_id)
@@ -1139,6 +1151,8 @@ async def _run_fill_cascade(
 
     for label, _value in tier1.filled:
         suffix = " (already set)" if label in tier1.already_set else ""
+        if label in tier1.deterministic_filled:
+            suffix += " (deterministic)"
         await _log(application_id, f"Tier 1 filled '{label}'{suffix}", tier="tier1")
     for label, _value in tier1.from_library:
         await _log(
@@ -1238,7 +1252,14 @@ def _unhandled_labels(cascade: FillCascadeResult) -> set[str]:
     never legitimately contribute a label `tier1.filled`/`tier2.resolved`
     doesn't already have.
     """
-    all_labels = {f.label for f in cascade.fields}
+    all_labels = {
+        f.label
+        for f in cascade.fields
+        if not (
+            match_field(f.label) is not None
+            and match_field(f.label).profile_attr == "phone_extension"
+        )
+    }
     handled_labels = (
         {label for label, _ in cascade.tier0.filled}
         | {label for label, _ in cascade.tier1.filled}
