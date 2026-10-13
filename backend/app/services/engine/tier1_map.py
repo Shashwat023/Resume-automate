@@ -18,7 +18,7 @@ is the only tier that ever invokes Stagehand's LLM callback.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field, ValidationError
 from stagehand import Page
@@ -90,6 +90,7 @@ class Tier1Result:
     unanswered: list[str]
     errored: list[tuple[str, str]]
     usage: dict
+    already_set: set[str] = field(default_factory=set)
 
 
 def build_prompt(
@@ -149,6 +150,7 @@ async def map_fields(
     profile_id: int,
     answer_repo: AnswerLibraryRepository,
     resume_facts: ResumeFacts | None = None,
+    force_refill: bool = False,
 ) -> Tier1Result:
     filled: list[tuple[str, str]] = []
     from_library: list[tuple[str, str]] = []
@@ -156,6 +158,7 @@ async def map_fields(
     low_confidence_filled: list[str] = []
     unanswered: list[str] = []
     errored: list[tuple[str, str]] = []
+    already_set: set[str] = set()
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     def result() -> Tier1Result:
@@ -164,13 +167,14 @@ async def map_fields(
         key, and the normal end) that previously each repeated the same
         seven positional arguments in the same order."""
         return Tier1Result(
-            filled,
-            from_library,
-            for_tier2,
-            low_confidence_filled,
-            unanswered,
-            errored,
-            usage,
+            filled=filled,
+            from_library=from_library,
+            for_tier2=for_tier2,
+            low_confidence_filled=low_confidence_filled,
+            unanswered=unanswered,
+            errored=errored,
+            usage=usage,
+            already_set=already_set,
         )
 
     # Same "does a sibling Country selector exist" signal tier0_harvest.py
@@ -208,6 +212,8 @@ async def map_fields(
                     for_tier2,
                     errored,
                     has_country_selector,
+                    already_set,
+                    force_refill,
                 )
                 continue
         remaining.append(f)
@@ -238,6 +244,8 @@ async def map_fields(
         low_confidence_filled,
         errored,
         has_country_selector,
+        already_set,
+        force_refill,
     )
     missing = [f for node_id, f in by_id.items() if node_id not in answered_ids]
 
@@ -263,6 +271,8 @@ async def map_fields(
                 low_confidence_filled,
                 errored,
                 has_country_selector,
+                already_set,
+                force_refill,
             )
             answered_ids |= repaired_ids
             missing = [f for f in missing if f.node_id not in repaired_ids]
@@ -285,6 +295,8 @@ async def _apply_answers(
     low_confidence_filled: list[str],
     errored: list[tuple[str, str]],
     has_country_selector: bool = False,
+    already_set: set[str] | None = None,
+    force_refill: bool = False,
 ) -> set[str]:
     """Applies every answer the model actually returned (regardless of
     confidence — see the accepted-tradeoff note in map_fields); returns the
@@ -309,7 +321,15 @@ async def _apply_answers(
         answered_ids.add(answer.field_id)
 
         await _apply(
-            page, field, answer.value, filled, for_tier2, errored, has_country_selector
+            page,
+            field,
+            answer.value,
+            filled,
+            for_tier2,
+            errored,
+            has_country_selector,
+            already_set,
+            force_refill,
         )
         if answer.confidence < settings.tier1_confidence_threshold:
             low_confidence_filled.append(field.label)
@@ -342,6 +362,8 @@ async def _apply(
     for_tier2: list[tuple[FormField, str]],
     errored: list[tuple[str, str]],
     has_country_selector: bool = False,
+    already_set: set[str] | None = None,
+    force_refill: bool = False,
 ) -> None:
     if field.xpath is None:
         errored.append((field.label, "no xpath available"))
@@ -379,8 +401,10 @@ async def _apply(
                 and has_country_selector
             ):
                 value = strip_country_code(value)
-            await fill_textbox(page, field.xpath, value)
+            changed = await fill_textbox(page, field.xpath, value, force=force_refill)
             filled.append((field.label, value))
+            if not changed and already_set is not None:
+                already_set.add(field.label)
         elif field.is_native_select:
             await with_timeout(
                 page.locator(field.xpath).select_option(value),

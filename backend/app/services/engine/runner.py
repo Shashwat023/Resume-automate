@@ -223,6 +223,7 @@ class NextResult:
     clicked: bool
     advanced: bool
     reason: str
+    label: str | None = None
 
 
 SUBMIT_SETTLE_TIMEOUT_SECONDS = 15
@@ -621,18 +622,19 @@ async def run_application(application_id: str) -> None:
                                 if next_result.reason == "no_progress":
                                     await _log(
                                         application_id,
-                                        "Clicked Continue but the page did not advance",
+                                        f"Clicked {next_result.label or 'Continue'} but the page did not advance",
                                         level="warn",
                                         tier="navigation",
                                     )
-                                await _log(
-                                    application_id,
-                                    "Filled this page, but no Continue or Submit "
-                                    f"control was found on {await _page_location(page)}; "
-                                    "pausing for manual navigation in Live View",
-                                    level="warn",
-                                    tier="navigation",
-                                )
+                                elif next_result.reason in {"no_control", "no_xpath"}:
+                                    await _log(
+                                        application_id,
+                                        "Filled this page, but no Continue or Submit "
+                                        f"control was found on {await _page_location(page)}; "
+                                        "pausing for manual navigation in Live View",
+                                        level="warn",
+                                        tier="navigation",
+                                    )
                                 await _log_page_diagnostics(
                                     application_id,
                                     page,
@@ -820,7 +822,12 @@ async def run_application(application_id: str) -> None:
 
 
 async def _map_fields(
-    page, fields: list[FormField], profile_dict: dict, profile_id: int
+    page,
+    fields: list[FormField],
+    profile_dict: dict,
+    profile_id: int,
+    *,
+    force_refill: bool = False,
 ) -> Tier1Result:
     """One Tier 1 call with its DB-backed context (cached resume facts +
     the answers library), in a session scoped to just that call. Both the
@@ -839,6 +846,7 @@ async def _map_fields(
             profile_id,
             AnswerLibraryRepository(db),
             resume_facts,
+            force_refill,
         )
 
 
@@ -862,7 +870,8 @@ async def _run_fill_cascade(
     tier0 = await fill_deterministic(page, fields, profile_dict, resume_file_path)
 
     for label, _value in tier0.filled:
-        await _log(application_id, f"Tier 0 filled '{label}'", tier="tier0")
+        suffix = " (already set)" if label in tier0.already_set else ""
+        await _log(application_id, f"Tier 0 filled '{label}'{suffix}", tier="tier0")
     for label, err in tier0.errored:
         await _log(
             application_id,
@@ -902,7 +911,8 @@ async def _run_fill_cascade(
     tier1 = await _map_fields(page, remaining_fields, profile_dict, profile_id)
 
     for label, _value in tier1.filled:
-        await _log(application_id, f"Tier 1 filled '{label}'", tier="tier1")
+        suffix = " (already set)" if label in tier1.already_set else ""
+        await _log(application_id, f"Tier 1 filled '{label}'{suffix}", tier="tier1")
     for label, _value in tier1.from_library:
         await _log(
             application_id,
@@ -1066,11 +1076,17 @@ async def _repair_unhandled_fields(
         # on) — nothing left to target, cascade stands as-is.
         return cascade
 
-    tier1_extra = await _map_fields(page, targets, profile_dict, profile_id)
+    tier1_extra = await _map_fields(
+        page, targets, profile_dict, profile_id, force_refill=True
+    )
 
     for label, _value in tier1_extra.filled:
         await _log(
-            application_id, f"Tier 1 filled '{label}' (repair pass)", tier="tier1"
+            application_id,
+            f"Tier 1 filled '{label}'"
+            + (" (already set)" if label in tier1_extra.already_set else "")
+            + " (repair pass)",
+            tier="tier1",
         )
     for label, _value in tier1_extra.from_library:
         await _log(
@@ -1111,6 +1127,7 @@ async def _repair_unhandled_fields(
             k: cascade.tier1.usage[k] + tier1_extra.usage[k]
             for k in cascade.tier1.usage
         },
+        already_set=cascade.tier1.already_set | tier1_extra.already_set,
     )
     merged_tier2 = Tier2Result(
         resolved=cascade.tier2.resolved + tier2_extra.resolved,
@@ -1743,24 +1760,15 @@ async def _click_next(page, application_id: str) -> NextResult:
                 f"Continue reached {after_url}",
                 tier="navigation",
             )
-            return NextResult(True, True, "advanced")
+            return NextResult(True, True, "advanced", match.group(2))
         elapsed += PAGE_PROGRESS_POLL_MS
-    if _page_fingerprint(after_url, after.formatted_tree) == before_fingerprint:
-        await _log(
-            application_id,
-            f"{match.group(2)} did not advance the page on {before_url}; "
-            "pausing for manual review",
-            level="warn",
-            tier="navigation",
-        )
-        await _log_page_diagnostics(
-            application_id,
-            page,
-            after.formatted_tree,
-            f"{match.group(2)} did not advance the page",
-        )
-        return NextResult(True, False, "no_progress")
-    return NextResult(True, False, "no_progress")
+    await _log_page_diagnostics(
+        application_id,
+        page,
+        after.formatted_tree,
+        f"{match.group(2)} did not advance the page",
+    )
+    return NextResult(True, False, "no_progress", match.group(2))
 
 
 async def _click_next_if_present(page, application_id: str) -> bool:

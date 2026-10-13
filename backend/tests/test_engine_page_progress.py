@@ -3,6 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.engine import runner
+from app.services.engine.tier0_harvest import FormField, HarvestResult
+from app.services.engine.tier1_map import Tier1Result
+from app.services.engine.tier2_resolve import Tier2Result
 
 
 def test_fingerprint_ignores_validation_text_and_changes_with_page():
@@ -136,6 +139,115 @@ async def test_click_next_reports_no_control_vs_no_progress(monkeypatch):
     monkeypatch.setattr(runner, "_log_page_diagnostics", log)
     result = await runner._click_next(page, "app")
     assert result.clicked is True and result.reason == "no_progress"
+
+
+@pytest.mark.asyncio
+async def test_no_progress_does_not_also_log_no_control_message(monkeypatch):
+    page = _NextPage(["[next] button: Save & Continue\n[1] heading: Details\n"])
+    messages = []
+
+    async def log(*args, **_kwargs):
+        messages.append(args[1] if len(args) > 1 else "")
+
+    async def diagnostics(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(runner, "PAGE_PROGRESS_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(runner, "_log", log)
+    monkeypatch.setattr(runner, "_log_page_diagnostics", diagnostics)
+
+    result = await runner._click_next(page, "app")
+
+    assert result.label == "Save & Continue"
+    assert not any("no Continue or Submit control" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_repair_pass_forces_refill(monkeypatch):
+    field = FormField(node_id="city", role="textbox", label="City", xpath="//city")
+    cascade = runner.FillCascadeResult(
+        fields=[field],
+        tier0=HarvestResult(filled=[], unmatched=[], errored=[]),
+        tier1=Tier1Result([], [], [], [], [], [], {}),
+        tier2=Tier2Result(resolved=[], errored=[]),
+    )
+    calls = []
+
+    class Page:
+        async def snapshot(self):
+            return SimpleNamespace(formatted_tree="", xpath_map={})
+
+    async def map_fields(*_args, **kwargs):
+        calls.append(kwargs)
+        return Tier1Result([], [], [], [], [], [], {})
+
+    async def no_op(*_args, **_kwargs):
+        return Tier2Result(resolved=[], errored=[])
+
+    monkeypatch.setattr(runner, "_log", no_op)
+    monkeypatch.setattr(runner, "collect_fields", lambda *_args: [field])
+    monkeypatch.setattr(runner, "_map_fields", map_fields)
+    monkeypatch.setattr(runner, "resolve_and_execute", no_op)
+
+    await runner._repair_unhandled_fields("app", None, Page(), {}, 1, cascade)
+
+    assert calls == [{"force_refill": True}]
+
+
+@pytest.mark.asyncio
+async def test_log_marks_already_set_fields(monkeypatch):
+    field = FormField(node_id="name", role="textbox", label="Name", xpath="//name")
+    messages = []
+
+    class Page:
+        async def snapshot(self):
+            return SimpleNamespace(formatted_tree="", xpath_map={})
+
+    async def log(_application_id, message, **_kwargs):
+        messages.append(message)
+
+    async def map_fields(*_args, **_kwargs):
+        return Tier1Result(
+            filled=[("Question", "answer")],
+            from_library=[],
+            for_tier2=[],
+            low_confidence_filled=[],
+            unanswered=[],
+            errored=[],
+            usage={},
+            already_set={"Question"},
+        )
+
+    async def no_op(*_args, **_kwargs):
+        return Tier2Result(resolved=[], errored=[])
+
+    monkeypatch.setattr(runner, "_check_paused_and_wait", no_op)
+    monkeypatch.setattr(runner, "_set_step", no_op)
+    monkeypatch.setattr(runner, "_log", log)
+    monkeypatch.setattr(runner, "collect_fields", lambda *_args: [field])
+    monkeypatch.setattr(
+        runner,
+        "fill_deterministic",
+        lambda *_args: _result(
+            HarvestResult(
+                filled=[("Name", "Jane")],
+                unmatched=[],
+                errored=[],
+                already_set={"Name"},
+            )
+        ),
+    )
+    monkeypatch.setattr(runner, "_map_fields", map_fields)
+    monkeypatch.setattr(runner, "resolve_and_execute", no_op)
+
+    await runner._run_fill_cascade("app", None, Page(), {}, 1, None)
+
+    assert "Tier 0 filled 'Name' (already set)" in messages
+    assert "Tier 1 filled 'Question' (already set)" in messages
+
+
+async def _result(value):
+    return value
 
 
 def test_manual_resume_on_a_stuck_page_lets_the_engine_retry():

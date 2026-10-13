@@ -56,3 +56,12 @@ async def test_unchanged_fields_are_not_retyped_on_a_second_pass():
     locator.value = "value"
     assert await fill_textbox(page, "//field", "value") is False
     assert [call[0] for call in locator.calls] == ["fill", "type"]
+
+
+async def test_forced_fill_retypes_even_when_value_equal():
+    locator = _Locator("same value")
+
+    assert (
+        await fill_textbox(_Page(locator), "//field", "same value", force=True) is True
+    )
+    assert [call[0] for call in locator.calls] == ["fill", "type"]

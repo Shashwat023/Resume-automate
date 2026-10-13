@@ -113,6 +113,7 @@ class HarvestResult:
     errored: list[
         tuple[str, str]
     ]  # (label, error) - matched but the fill itself failed
+    already_set: set[str] = field(default_factory=set)
 
 
 def collect_fields(formatted_tree: str, xpath_map: dict[str, str]) -> list[FormField]:
@@ -226,6 +227,7 @@ async def fill_deterministic(
     filled: list[tuple[str, str]] = []
     unmatched: list[str] = []
     errored: list[tuple[str, str]] = []
+    already_set: set[str] = set()
 
     for f in fields:
         if f.role == "file":
@@ -284,9 +286,16 @@ async def fill_deterministic(
             # A field earlier in this loop may have reflowed the DOM enough
             # to invalidate this xpath even though it came from the same
             # snapshot — one bad field must not abort the rest of the fill.
-            await fill_textbox(page, f.xpath, value)
+            changed = await fill_textbox(page, f.xpath, value)
             filled.append((f.label, value))
+            if not changed:
+                already_set.add(f.label)
         except Exception as exc:  # noqa: BLE001
             errored.append((f.label, str(exc)))
 
-    return HarvestResult(filled=filled, unmatched=unmatched, errored=errored)
+    return HarvestResult(
+        filled=filled,
+        unmatched=unmatched,
+        errored=errored,
+        already_set=already_set,
+    )
