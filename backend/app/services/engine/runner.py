@@ -36,6 +36,7 @@ from stagehand import Stagehand
 from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.domain import status as st
+from app.domain.semantic_dictionary import match_field
 from app.models.db_models import Application, Job, Profile, RunEvent
 from app.repositories.answer_library_repository import AnswerLibraryRepository
 from app.repositories.profile_repository import ProfileRepository
@@ -112,9 +113,17 @@ _EEO_LABEL = re.compile(
 )
 _CREDENTIAL_LABEL = re.compile(
     r"password|passcode|passphrase|\bpin\b|security (code|answer|question)|"
-    r"verify (new )?password|otp|one[- ]time",
+    r"verify (new )?password|\botp\b|one[- ]time",
     re.I,
 )
+_FACTUAL_LABEL = re.compile(
+    r"country|state\b|province|city|location|phone|dial|calling|\bcode\b|"
+    r"nationality|citizen|language|degree|major|field of study|university|"
+    r"school|institution|salary|compensation|notice|years|experience|relocat|"
+    r"start date|availability|graduat|gpa",
+    re.I,
+)
+_NON_FACTUAL_DROPDOWN = re.compile(r"\bphone device type\b", re.I)
 _DECLINE_OPTION = re.compile(
     r"decline|prefer not|do not wish|don't wish|not to (?:say|disclose)", re.I
 )
@@ -940,16 +949,7 @@ async def _resolve_blocking_fields(
     escalated: list[str] = []
     picks: list[tuple[str, str]] = []
     for label in labels:
-        field = next(
-            (
-                f
-                for f in fields
-                if f.label.lower() == label.lower()
-                or f.label.lower() in label.lower()
-                or label.lower() in f.label.lower()
-            ),
-            None,
-        )
+        field = _match_field_for_label(label, fields)
         if field is None:
             escalated.append(label)
             continue
@@ -970,6 +970,22 @@ async def _resolve_blocking_fields(
                 acted = True
             else:
                 escalated.append(field.label)
+            continue
+        if _is_factual_field(field):
+            mapped = await _map_fields(
+                page, [field], profile_dict, profile_id, force_refill=True
+            )
+            if mapped.filled:
+                acted = True
+                picks.extend(mapped.filled)
+                continue
+            if mapped.for_tier2:
+                resolved = await resolve_and_execute(sh, page, mapped.for_tier2)
+                if resolved.resolved:
+                    acted = True
+                    picks.extend(resolved.resolved)
+                    continue
+            escalated.append(field.label)
             continue
         if field.is_native_select and field.xpath:
             options = [
@@ -1025,6 +1041,39 @@ async def _resolve_blocking_fields(
         acted=acted,
         escalated=list(dict.fromkeys(escalated)),
         picks=picks,
+    )
+
+
+def _normalize_blocking_label(label: str) -> str:
+    return re.sub(r"\s+", " ", label.strip().strip("*").strip()).casefold()
+
+
+def _match_field_for_label(label: str, fields: list[FormField]) -> FormField | None:
+    """Match page-reported validation labels without fuzzy short-string hits."""
+    normalized = _normalize_blocking_label(label)
+    if not normalized:
+        return None
+    candidates = [
+        (field, _normalize_blocking_label(field.label))
+        for field in fields
+        if _normalize_blocking_label(field.label)
+    ]
+    for field, field_label in candidates:
+        if field_label == normalized:
+            return field
+    for field, field_label in candidates:
+        shorter, longer = sorted((normalized, field_label), key=len)
+        if len(shorter) < 4:
+            continue
+        if re.search(rf"(?<!\w){re.escape(shorter)}(?!\w)", longer):
+            return field
+    return None
+
+
+def _is_factual_field(field: FormField) -> bool:
+    return bool(
+        not _NON_FACTUAL_DROPDOWN.search(field.label)
+        and (_FACTUAL_LABEL.search(field.label) or match_field(field.label))
     )
 
 

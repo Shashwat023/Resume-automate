@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 from app.services.engine import runner, validation
 from app.services.engine.submit import find_invalid_field_labels
-from app.services.engine.tier0_harvest import collect_fields
+from app.services.engine.tier0_harvest import FormField, collect_fields
+from app.services.engine.tier1_map import Tier1Result
 
 
 def test_find_page_validation_issues_attributes_error_to_preceding_label():
@@ -217,3 +218,96 @@ def test_button_dropdown_count_event_logged_once_per_page():
     logged.add(fingerprint)
     events += [count] if count and fingerprint not in logged else []
     assert events == [1]
+
+
+def test_empty_field_label_never_matches_a_flagged_label():
+    fields = [FormField("1", "combobox", "", "//field")]
+
+    assert runner._match_field_for_label("Country", fields) is None
+
+
+def test_short_labels_do_not_substring_match():
+    fields = [FormField("1", "combobox", "Candidate ID", "//field")]
+
+    assert runner._match_field_for_label("ID", fields) is None
+
+
+def test_word_boundary_containment_matches():
+    field = FormField("1", "combobox", "Phone Device Type", "//field")
+
+    assert runner._match_field_for_label("Phone Device Type Required", [field]) is field
+
+
+def test_credential_label_does_not_match_footprint():
+    assert runner._CREDENTIAL_LABEL.search("Footprint") is None
+
+
+async def test_factual_dropdown_uses_decided_value_not_any_option(monkeypatch):
+    page = _BlockingPage(
+        "[1] combobox: Country\n  [2] option: Select One\n  [3] option: Canada\n"
+        "[4] text: Country is required\n",
+        {"1": "//country"},
+    )
+
+    async def map_fields(*_args, **_kwargs):
+        return Tier1Result(
+            filled=[("Country", "Canada")],
+            from_library=[],
+            for_tier2=[],
+            low_confidence_filled=[],
+            unanswered=[],
+            errored=[],
+            usage={},
+        )
+
+    async def any_option(*_args, **_kwargs):
+        raise AssertionError("factual fields must not use any-option resolution")
+
+    monkeypatch.setattr(runner, "_map_fields", map_fields)
+    monkeypatch.setattr(runner, "resolve_any_option", any_option)
+
+    result = await runner._resolve_blocking_fields("app", None, page, {}, 1, None)
+
+    assert result.acted is True
+    assert result.picks == [("Country", "Canada")]
+    assert page.selected == []
+
+
+async def test_factual_dropdown_without_a_decision_is_escalated(monkeypatch):
+    page = _BlockingPage(
+        "[1] combobox: Country\n  [2] option: Canada\n[3] text: Country is required\n",
+        {"1": "//country"},
+    )
+
+    async def map_fields(*_args, **_kwargs):
+        return Tier1Result([], [], [], [], [], [], {})
+
+    async def any_option(*_args, **_kwargs):
+        raise AssertionError("factual fields must not use any-option resolution")
+
+    monkeypatch.setattr(runner, "_map_fields", map_fields)
+    monkeypatch.setattr(runner, "resolve_any_option", any_option)
+
+    result = await runner._resolve_blocking_fields("app", None, page, {}, 1, None)
+
+    assert result.acted is False
+    assert result.escalated == ["Country"]
+    assert page.selected == []
+
+
+async def test_non_factual_dropdown_still_uses_any_option(monkeypatch):
+    page = _BlockingPage(
+        "[1] combobox: How did you hear about us?\n[2] text: Please select\n",
+        {"1": "//source"},
+    )
+
+    async def any_option(*_args, **_kwargs):
+        return "Referral"
+
+    monkeypatch.setattr(runner, "resolve_any_option", any_option)
+    monkeypatch.setattr(runner, "_log", _quiet_log)
+
+    result = await runner._resolve_blocking_fields("app", object(), page, {}, 1, None)
+
+    assert result.acted is True
+    assert result.picks == [("How did you hear about us?", "Referral")]
