@@ -108,3 +108,32 @@ def parse_phone(
         region=phonenumbers.region_code_for_number(parsed) or _region(default_country),
         e164=phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164),
     )
+
+
+def _region_display_name(region: str) -> str:
+    candidates = [name for name, code in _COUNTRY_REGIONS.items() if code == region]
+    if not candidates:
+        return region
+    return max(candidates, key=len).title()
+
+
+def country_names_for_dial(
+    dial_code: str, region: str | None = None
+) -> tuple[str, ...]:
+    """Likely option names for a dial code, most specific first.
+
+    The parsed number's own region wins (a +1 number from Canada must not be
+    labelled "United States"); the static table and libphonenumber's region
+    list supply the rest.
+    """
+    names: list[str] = []
+    if region:
+        names.append(_region_display_name(region))
+    names.extend(COUNTRY_NAMES_BY_DIAL.get(dial_code, ()))
+    try:
+        for code in phonenumbers.region_codes_for_country_code(int(dial_code[1:])):
+            if code != "001":
+                names.append(_region_display_name(code))
+    except ValueError:
+        pass
+    return tuple(dict.fromkeys(names))

@@ -26,7 +26,7 @@ from stagehand import Page
 
 from app.core.config import get_settings
 from app.domain.answer_key import question_hash
-from app.domain.phone import COUNTRY_NAMES_BY_DIAL, ParsedPhone, parse_phone
+from app.domain.phone import ParsedPhone, country_names_for_dial, parse_phone
 from app.domain.semantic_dictionary import match_field
 from app.repositories.answer_library_repository import AnswerLibraryRepository
 from app.services.engine.field_fill import fill_textbox
@@ -227,19 +227,20 @@ async def map_fields(
                     continue
             elif semantic_match.profile_attr == "phone_type":
                 value = _phone_type_option(f)
-                await _apply(
-                    page,
-                    f,
-                    value,
-                    filled,
-                    for_tier2,
-                    errored,
-                    has_country_selector,
-                    already_set,
-                    force_refill,
-                )
-                deterministic_filled.add(f.label)
-                continue
+                if value is not None:
+                    await _apply(
+                        page,
+                        f,
+                        value,
+                        filled,
+                        for_tier2,
+                        errored,
+                        has_country_selector,
+                        already_set,
+                        force_refill,
+                    )
+                    deterministic_filled.add(f.label)
+                    continue
 
         if not f.options:
             cached = await answer_repo.get(profile_id, question_hash(f.label))
@@ -480,9 +481,8 @@ _LOCAL_PHONE_LABEL = re.compile(
 def _country_code_option(field: FormField, phone: ParsedPhone) -> str | None:
     """Choose a native option, or give Tier 2 an explicit human label."""
     if not field.options:
-        name = COUNTRY_NAMES_BY_DIAL.get(
-            phone.dial_code, (phone.region or phone.dial_code,)
-        )[0]
+        names = country_names_for_dial(phone.dial_code, phone.region)
+        name = names[0] if names else phone.dial_code
         return f"{name} ({phone.dial_code})"
 
     dial_digits = re.escape(phone.dial_code[1:])
@@ -490,7 +490,7 @@ def _country_code_option(field: FormField, phone: ParsedPhone) -> str | None:
     for option in field.options:
         if dial_token.search(option):
             return option
-    for name in COUNTRY_NAMES_BY_DIAL.get(phone.dial_code, ()):
+    for name in country_names_for_dial(phone.dial_code, phone.region):
         name_token = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)", re.I)
         for option in field.options:
             if name_token.search(option):

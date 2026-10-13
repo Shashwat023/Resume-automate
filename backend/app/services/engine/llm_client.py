@@ -464,6 +464,12 @@ async def openrouter_llm(params, model: str | None = None):
 
     if is_structured:
         structured = _parse_structured_text(text)
+        if structured is None:
+            # One reformat request, then null-coercion to the requested
+            # schema (providers routinely ignore response_format).
+            structured = await _repair_to_json(body, text)
+        if isinstance(structured, (dict, list)):
+            structured = _coerce_nulls_to_schema_type(structured, schema_dict)
         return LLMStructuredGenerateResult(
             role=LLMRole.assistant,
             content=[content_block],

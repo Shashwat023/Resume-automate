@@ -5,7 +5,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { useState } from 'react';
-import { PlayCircle, PauseCircle, SkipForward, ExternalLink, History, MonitorPlay } from 'lucide-react';
+import { PlayCircle, PauseCircle, SkipForward, ExternalLink, History, MonitorPlay, XCircle } from 'lucide-react';
 import { QueueStatusBadge } from './QueueStatusBadge';
 import { JobTimelineModal } from './JobTimelineModal';
 import { LiveView } from './LiveView';
@@ -17,7 +17,9 @@ import {
   useRetryJobMutation,
   usePauseJobMutation,
   useResumeJobMutation,
+  useCancelJobMutation,
 } from '../services/queue.queries';
+import { isCancellable } from '../lib/queueSelectors';
 
 const columnHelper = createColumnHelper<QueueItem>();
 
@@ -32,6 +34,7 @@ export const QueueTable = () => {
   const retryMutation = useRetryJobMutation();
   const pauseMutation = usePauseJobMutation();
   const resumeMutation = useResumeJobMutation();
+  const cancelMutation = useCancelJobMutation();
 
   const columns = [
     columnHelper.accessor((_, index) => index + 1, {
@@ -142,6 +145,20 @@ export const QueueTable = () => {
                 title="Pause — stop this application before it goes further"
               >
                 <PauseCircle className="w-4 h-4" />
+              </button>
+            )}
+            {isCancellable(item) && (
+              <button
+                onClick={() => {
+                  if (window.confirm('Cancel this application?')) {
+                    cancelMutation.mutate(item.id);
+                  }
+                }}
+                disabled={cancelMutation.isPending}
+                className="p-1.5 text-gray-400 hover:text-red-600 transition-colors disabled:opacity-50"
+                title="Cancel this application"
+              >
+                <XCircle className="w-4 h-4" />
               </button>
             )}
             {item.status === 'failed' && item.rawStatus !== 'needs_review' && (

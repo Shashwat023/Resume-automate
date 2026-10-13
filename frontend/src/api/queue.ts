@@ -1,6 +1,7 @@
 import api, { isNotFound } from './axios';
 import { clearStoredProfileId, getStoredProfileId } from '@/lib/session';
 import type { QueueStateResponse, QueueItem, JobStatus, QueueStatus } from '../types';
+import { pickCurrentItem } from '@/features/queue/lib/queueSelectors';
 
 // Shape returned by GET /api/apply/history/{profile_id}
 interface BackendApplyHistoryItem {
@@ -128,7 +129,7 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
   // the job actively being worked, just blocked on the user. Excluding it
   // here would hide CurrentJobCard (and the live-view entry point) at
   // exactly the moment the user most needs to see it.
-  const running = items.find((i) => i.status === 'running' || i.status === 'waiting_for_user');
+  const running = pickCurrentItem(items);
   // A job blocked on 2FA/manual input is still the job the queue is working
   // on — it just can't progress without a human. Counting only 'running' here
   // made the header report "Idle / No active jobs" while the panel directly
@@ -242,14 +243,23 @@ export const queueApi = {
       throw error;
     }
 
-    const results = await Promise.allSettled(
-      payload.jobs.map((job) =>
-        api.post('/api/apply/start', {
-          profile_id: profileId,
-          job_id: Number(job.id),
-        })
-      )
-    );
+    // Small batches rather than one burst: each accepted job spawns a
+    // backend task, and hundreds at once contend on the SQLite file.
+    const results: PromiseSettledResult<unknown>[] = [];
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < payload.jobs.length; i += BATCH_SIZE) {
+      const batch = payload.jobs.slice(i, i + BATCH_SIZE);
+      results.push(
+        ...(await Promise.allSettled(
+          batch.map((job) =>
+            api.post('/api/apply/start', {
+              profile_id: profileId,
+              job_id: Number(job.id),
+            })
+          )
+        ))
+      );
+    }
 
     const succeeded = results
       .filter((r) => r.status === 'fulfilled')

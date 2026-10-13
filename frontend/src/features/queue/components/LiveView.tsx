@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Play, XCircle } from 'lucide-react';
 import { wsUrl } from '@/lib/wsUrl';
+import { buildKeyMessage, mapPointToViewport } from '../lib/liveViewInput';
 import { useResumeJobMutation, useCancelJobMutation } from '../services/queue.queries';
 
 interface LiveViewProps {
@@ -22,6 +23,8 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
   const wsRef = useRef<WebSocket | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  // Real page size (CSS px) reported with each frame; the JPEG may be scaled.
+  const viewportRef = useRef<{ width?: number; height?: number }>({});
   const [connected, setConnected] = useState(false);
   const resumeMutation = useResumeJobMutation();
   const cancelMutation = useCancelJobMutation();
@@ -57,6 +60,7 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'frame') {
+        viewportRef.current = { width: msg.width, height: msg.height };
         setFrameSrc(`data:image/jpeg;base64,${msg.data}`);
       } else if (msg.type === 'error') {
         setConnectionError(msg.message);
@@ -65,28 +69,39 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
     return () => ws.close();
   }, [applicationId]);
 
-  const sendMouse = (eventType: string, e: React.MouseEvent<HTMLImageElement>) => {
+  const pointFor = (e: { clientX: number; clientY: number }) => {
     const img = imgRef.current;
+    if (!img || !img.naturalWidth) return null;
+    return mapPointToViewport(
+      e.clientX,
+      e.clientY,
+      img.getBoundingClientRect(),
+      { width: img.naturalWidth, height: img.naturalHeight },
+      viewportRef.current
+    );
+  };
+
+  const sendMouse = (eventType: string, e: React.MouseEvent<HTMLImageElement>) => {
     const ws = wsRef.current;
-    if (!img || !img.naturalWidth || !ws || ws.readyState !== WebSocket.OPEN) return;
-    const rect = img.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * img.naturalWidth;
-    const y = ((e.clientY - rect.top) / rect.height) * img.naturalHeight;
-    ws.send(JSON.stringify({ type: 'mouse', event: eventType, x, y, button: 'left' }));
+    const point = pointFor(e);
+    if (!point || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'mouse', event: eventType, ...point, button: 'left' }));
+  };
+
+  const sendWheel = (e: React.WheelEvent<HTMLImageElement>) => {
+    const ws = wsRef.current;
+    const point = pointFor(e);
+    if (!point || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({ type: 'wheel', ...point, deltaX: e.deltaX, deltaY: e.deltaY })
+    );
   };
 
   const sendKey = (eventType: 'keyDown' | 'keyUp', e: React.KeyboardEvent) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     e.preventDefault();
-    ws.send(
-      JSON.stringify({
-        type: 'key',
-        event: eventType,
-        key: e.key,
-        text: eventType === 'keyDown' && e.key.length === 1 ? e.key : undefined,
-      })
-    );
+    ws.send(JSON.stringify(buildKeyMessage(eventType, e)));
   };
 
   return (
@@ -126,6 +141,7 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
               onMouseDown={(e) => sendMouse('mousePressed', e)}
               onMouseUp={(e) => sendMouse('mouseReleased', e)}
               onMouseMove={(e) => sendMouse('mouseMoved', e)}
+              onWheel={sendWheel}
             />
           ) : connectionError ? (
             <p className="text-red-300 text-sm">{connectionError}</p>

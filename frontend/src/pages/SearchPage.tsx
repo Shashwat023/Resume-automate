@@ -12,7 +12,11 @@ import { useJobSearch } from '../features/search/hooks/useJobSearch';
 import { useFilters } from '../features/search/hooks/useFilters';
 import { usePagination } from '../features/search/hooks/usePagination';
 import { useRowSelection } from '../features/search/hooks/useRowSelection';
-import { useSearchJobsQuery, useCreateQueueMutation } from '../features/search/services/search.queries';
+import {
+  useSearchJobsQuery,
+  useCreateQueueMutation,
+  fetchAllFilteredJobs,
+} from '../features/search/services/search.queries';
 import {
   useQueueConfirmation,
   QUICK_SELECT_OPTIONS,
@@ -59,6 +63,8 @@ export const SearchPage = () => {
     createQueue,
     clearSelection,
     setSelectedRowIds,
+    fetchAllFiltered: () =>
+      fetchAllFilteredJobs({ keyword: debouncedKeyword, filters }),
   });
 
   return (

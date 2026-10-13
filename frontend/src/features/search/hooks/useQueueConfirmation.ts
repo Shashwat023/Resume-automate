@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import type { Job } from '@/types';
-import type { useCreateQueueMutation } from '../services/search.queries';
+import {
+  MAX_FILTERED_QUEUE_JOBS,
+  type useCreateQueueMutation,
+} from '../services/search.queries';
 
 export const QUICK_SELECT_OPTIONS = [10, 50, 100] as const;
 
@@ -12,6 +15,8 @@ interface UseQueueConfirmationArgs {
   createQueue: ReturnType<typeof useCreateQueueMutation>['mutate'];
   clearSelection: () => void;
   setSelectedRowIds: (selection: Record<string, boolean>) => void;
+  /** Loads every job matching the current filters (all pages). */
+  fetchAllFiltered?: () => Promise<Job[]>;
 }
 
 /**
@@ -26,6 +31,7 @@ export function useQueueConfirmation({
   createQueue,
   clearSelection,
   setSelectedRowIds,
+  fetchAllFiltered,
 }: UseQueueConfirmationArgs) {
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const [queueMode, setQueueMode] = useState<'selected' | 'filtered'>('selected');
@@ -52,13 +58,14 @@ export function useQueueConfirmation({
     setIsConfirmOpen(true);
   };
 
-  const handleConfirmQueue = () => {
+  const handleConfirmQueue = async () => {
     let jobsToQueue: typeof jobs = [];
 
     if (queueMode === 'selected') {
       jobsToQueue = jobs.filter(job => rowSelection[job.id]);
     } else {
-      jobsToQueue = jobs;
+      // The table only holds the current page; "all filtered" means all pages.
+      jobsToQueue = fetchAllFiltered ? await fetchAllFiltered() : jobs;
     }
 
     createQueue(
@@ -73,7 +80,10 @@ export function useQueueConfirmation({
     );
   };
 
-  const queueCount = queueMode === 'selected' ? selectedCount : totalItems;
+  const queueCount =
+    queueMode === 'selected'
+      ? selectedCount
+      : Math.min(totalItems, MAX_FILTERED_QUEUE_JOBS);
 
   return {
     isConfirmOpen,

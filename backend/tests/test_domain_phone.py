@@ -35,3 +35,17 @@ def test_parse_phone_without_plus_uses_default_country_name():
 
 def test_parse_phone_unparseable_returns_none():
     assert parse_phone("not a number", "India") is None
+
+
+def test_country_names_for_dial_uses_parsed_region_first():
+    from app.domain.phone import country_names_for_dial
+
+    assert country_names_for_dial("+1", "CA")[0] == "Canada"
+    assert "United States" in country_names_for_dial("+1", "CA")
+
+
+def test_country_names_for_dial_covers_codes_outside_the_static_table():
+    from app.domain.phone import country_names_for_dial
+
+    assert "Germany" in country_names_for_dial("+49")
+    assert country_names_for_dial("+0000") == ()

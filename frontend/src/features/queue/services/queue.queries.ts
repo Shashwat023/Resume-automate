@@ -4,6 +4,7 @@ import { useQueueStore } from '../../../store/queueStore';
 import { getStoredProfileId } from '@/lib/session';
 import { useSettingsStore } from '../../../store/settingsStore';
 import { toast } from 'sonner';
+import { pickPausedItem } from '../lib/queueSelectors';
 
 export const useQueueStatusQuery = () => {
   const setQueueState = useQueueStore((state) => state.setQueueState);
@@ -99,7 +100,10 @@ export const useResumeQueueMutation = () => {
 
   return useMutation({
     mutationFn: async () => {
-      const applicationId = queueState?.currentJobId;
+      // A paused job maps to the coarse 'waiting' status, so it is never the
+      // "current" job — look it up by its raw backend status instead.
+      const applicationId =
+        pickPausedItem(queueState?.items ?? [])?.id ?? queueState?.currentJobId;
       if (!applicationId) throw new Error('No paused application to resume');
       return queueApi.resumeApply(applicationId);
     },
