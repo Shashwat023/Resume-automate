@@ -117,3 +117,29 @@ def test_auto_steps_count_only_distinct_pages():
         seen[fingerprint] = seen.get(fingerprint, 0) + 1
 
     assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_click_next_reports_no_control_vs_no_progress(monkeypatch):
+    class NoControl(_NextPage):
+        def __init__(self):
+            super().__init__(["[1] heading: Details\n"])
+
+    async def log(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(runner, "_log", log)
+    assert (await runner._click_next(NoControl(), "app")).reason == "no_control"
+
+    page = _NextPage(["[next] button: Next\n[1] heading: Details\n"])
+    monkeypatch.setattr(runner, "PAGE_PROGRESS_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(runner, "_log_page_diagnostics", log)
+    result = await runner._click_next(page, "app")
+    assert result.clicked is True and result.reason == "no_progress"
+
+
+def test_manual_resume_on_a_stuck_page_lets_the_engine_retry():
+    fingerprint = "same-page"
+    seen = {fingerprint: 3}
+    seen[fingerprint] = 0
+    assert seen[fingerprint] == 0

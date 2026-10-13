@@ -218,6 +218,13 @@ class FillCascadeResult:
     tier2: Tier2Result
 
 
+@dataclass
+class NextResult:
+    clicked: bool
+    advanced: bool
+    reason: str
+
+
 SUBMIT_SETTLE_TIMEOUT_SECONDS = 15
 
 
@@ -507,6 +514,7 @@ async def run_application(application_id: str) -> None:
                                 "manual_navigation_required",
                                 "Resumed after manual navigation",
                             )
+                            seen_pages[page_fingerprint] = 0
                             continue
                         if seen_pages[page_fingerprint] == 1:
                             auto_steps += 1
@@ -522,9 +530,8 @@ async def run_application(application_id: str) -> None:
                                 page, application_id, sh
                             )
                             if not advanced:
-                                advanced = await _click_next_if_present(
-                                    page, application_id
-                                )
+                                next_result = await _click_next(page, application_id)
+                                advanced = next_result.advanced
                             if not advanced:
                                 await _log(
                                     application_id,
@@ -608,10 +615,16 @@ async def run_application(application_id: str) -> None:
                                     submit_result = SubmitResult(outcome="skipped")
                                 break
 
-                            advanced = await _click_next_if_present(
-                                page, application_id
-                            )
+                            next_result = await _click_next(page, application_id)
+                            advanced = next_result.advanced
                             if not advanced:
+                                if next_result.reason == "no_progress":
+                                    await _log(
+                                        application_id,
+                                        "Clicked Continue but the page did not advance",
+                                        level="warn",
+                                        tier="navigation",
+                                    )
                                 await _log(
                                     application_id,
                                     "Filled this page, but no Continue or Submit "
@@ -1695,13 +1708,13 @@ async def _llm_click_apply(page, sh, application_id: str) -> bool:
         return False
 
 
-async def _click_next_if_present(page, application_id: str) -> bool:
+async def _click_next(page, application_id: str) -> NextResult:
     snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
     before_url = await _page_location(page)
     before_fingerprint = _page_fingerprint(before_url, snapshot.formatted_tree)
     match = _NEXT_BUTTON.search(snapshot.formatted_tree)
     if not match:
-        return False
+        return NextResult(False, False, "no_control")
     xpath = snapshot.xpath_map.get(match.group(1))
     if not xpath:
         await _log(
@@ -1710,7 +1723,7 @@ async def _click_next_if_present(page, application_id: str) -> bool:
             level="warn",
             tier="navigation",
         )
-        return False
+        return NextResult(False, False, "no_xpath")
     await _log(
         application_id,
         f"Clicking {match.group(2)} on {await _page_location(page)}",
@@ -1730,7 +1743,7 @@ async def _click_next_if_present(page, application_id: str) -> bool:
                 f"Continue reached {after_url}",
                 tier="navigation",
             )
-            return True
+            return NextResult(True, True, "advanced")
         elapsed += PAGE_PROGRESS_POLL_MS
     if _page_fingerprint(after_url, after.formatted_tree) == before_fingerprint:
         await _log(
@@ -1746,8 +1759,13 @@ async def _click_next_if_present(page, application_id: str) -> bool:
             after.formatted_tree,
             f"{match.group(2)} did not advance the page",
         )
-        return False
-    return False
+        return NextResult(True, False, "no_progress")
+    return NextResult(True, False, "no_progress")
+
+
+async def _click_next_if_present(page, application_id: str) -> bool:
+    """Compatibility wrapper for callers and existing focused tests."""
+    return (await _click_next(page, application_id)).advanced
 
 
 async def _click_apply_if_present(
