@@ -34,8 +34,14 @@ _SUGGESTION_SELECTOR = (
 _SUGGESTION_WAIT_MS = 400
 
 
-async def fill_textbox(page, xpath: str, value: str) -> None:
+async def fill_textbox(page, xpath: str, value: str) -> bool:
     locator = page.locator(xpath)
+    try:
+        current = await with_timeout(locator.input_value(), what="locator.input_value")
+        if (current or "").strip() == value.strip():
+            return False
+    except Exception:  # noqa: BLE001 - write path remains the fallback
+        pass
     await with_timeout(locator.fill(""), what="locator.fill(textbox)")
     await with_timeout(locator.type(value, delay=20), what="locator.type(textbox)")
     await page.wait_for_timeout(_SUGGESTION_WAIT_MS)
@@ -43,7 +49,7 @@ async def fill_textbox(page, xpath: str, value: str) -> None:
     suggestion = page.locator(_SUGGESTION_SELECTOR).first()
     try:
         if not await with_timeout(suggestion.is_visible(), what="locator.is_visible"):
-            return
+            return True
         # Real regression this guards against: clicking the first visible
         # [role="option"]-shaped element ANYWHERE on the page is unsafe —
         # if some unrelated dropdown/listbox happens to be open elsewhere
@@ -59,3 +65,4 @@ async def fill_textbox(page, xpath: str, value: str) -> None:
         # whose suggestion selector doesn't match ours, still has the
         # typed value from above; nothing to recover from here.
         pass
+    return True
