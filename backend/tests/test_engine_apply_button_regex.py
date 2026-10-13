@@ -157,7 +157,7 @@ async def test_workday_account_gate_pauses_before_field_filling(monkeypatch):
     async def log(_application_id, _message, **_kwargs):
         pass
 
-    async def pause(_application_id, reason, _message):
+    async def pause(_application_id, reason, _message, **_kwargs):
         pauses.append(reason)
         page.account_open = False
 

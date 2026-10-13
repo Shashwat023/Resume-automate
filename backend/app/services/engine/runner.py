@@ -42,6 +42,7 @@ from app.repositories.answer_library_repository import AnswerLibraryRepository
 from app.repositories.profile_repository import ProfileRepository
 from app.repositories.resume_repository import ResumeRepository
 from app.services.browser.chrome_launcher import close_session, get_or_launch
+from app.services.captcha.detect import detect_captcha
 from app.services.captcha.service import CaptchaOutcome, resolve_captcha
 from app.services.engine.llm_client import openrouter_llm
 from app.services.engine.submit import (
@@ -149,6 +150,9 @@ _NEXT_BUTTON = re.compile(
 _HEADING_LINE = re.compile(r"^\s*\[[\w-]+\]\s+heading:\s*(.+?)\s*$", re.I)
 PAGE_PROGRESS_TIMEOUT_SECONDS = 6
 PAGE_PROGRESS_POLL_MS = 500
+EMPTY_PAGE_RETRIES = 4
+EMPTY_PAGE_RETRY_MS = 1500
+HUMAN_POLL_SECONDS = 5
 _ACCOUNT_TEXT = re.compile(r"\b(?:create account|sign in|log in|log into)\b", re.I)
 _PASSWORD_CONTROL = re.compile(
     r"^\s*\[[\w-]+\]\s+(?:textbox|input(?:,\s*password)?):[^\n]*\bpassword\b",
@@ -170,8 +174,12 @@ async def _account_gate_present(page, tree: str) -> bool:
         return bool(
             await with_timeout(
                 page.evaluate(
-                    "(() => !!document.querySelector('input[type=password]') && "
-                    "/create account|sign in|log in/i.test(document.body?.innerText || ''))()"
+                    "(() => [...document.querySelectorAll('input[type=password]')].some(input => {"
+                    "if (input.type === 'hidden' || input.getAttribute('aria-hidden') === 'true') return false;"
+                    "if (input.offsetParent === null && !input.getClientRects().length) return false;"
+                    "const scope = input.closest('form,[role=dialog]') || document.body;"
+                    "return /create account|sign in|log in/i.test(scope?.innerText || '');"
+                    "}))()"
                 ),
                 what="evaluate(account gate)",
             )
@@ -553,6 +561,10 @@ async def run_application(application_id: str) -> None:
                                 application_id,
                                 "manual_navigation_required",
                                 "Resumed after manual navigation",
+                                page=page,
+                                cleared=lambda: _navigation_pause_cleared(
+                                    page, page_fingerprint
+                                ),
                             )
                             seen_pages[page_fingerprint] = 0
                             continue
@@ -579,6 +591,11 @@ async def run_application(application_id: str) -> None:
                         )
 
                         if not fields and not submit_xpath:
+                            retried = await _retry_empty_page(application_id, page)
+                            if retried is not None:
+                                snapshot, fields, submit_xpath = retried
+                            if fields or submit_xpath:
+                                continue
                             advanced = await _click_apply_if_present(
                                 page, application_id, sh
                             )
@@ -604,6 +621,10 @@ async def run_application(application_id: str) -> None:
                                     application_id,
                                     "manual_navigation_required",
                                     "Resumed after manual navigation",
+                                    page=page,
+                                    cleared=lambda: _navigation_pause_cleared(
+                                        page, page_fingerprint
+                                    ),
                                 )
                                 auto_steps = 0
                                 continue
@@ -633,7 +654,7 @@ async def run_application(application_id: str) -> None:
                                     cascade,
                                 )
                             await _escalate_unhandled_fields_if_any(
-                                application_id, cascade
+                                application_id, cascade, page=page
                             )
                             total_tier0 += len(cascade.tier0.filled)
                             total_tier1 += len(cascade.tier1.filled) + len(
@@ -734,6 +755,12 @@ async def run_application(application_id: str) -> None:
                                     application_id,
                                     "manual_navigation_required",
                                     "Resumed after manual navigation",
+                                    page=page,
+                                    cleared=(
+                                        lambda labels=blocking_labels: (
+                                            _blocking_fields_cleared(page, labels)
+                                        )
+                                    ),
                                 )
                                 auto_steps = 0
                                 continue
@@ -756,6 +783,10 @@ async def run_application(application_id: str) -> None:
                                 application_id,
                                 "manual_navigation_required",
                                 "Resumed after manual navigation",
+                                page=page,
+                                cleared=lambda: _navigation_pause_cleared(
+                                    page, page_fingerprint
+                                ),
                             )
                             auto_steps = 0
                 finally:
@@ -908,6 +939,33 @@ async def run_application(application_id: str) -> None:
             pass
         finally:
             cleanup(application_id)
+
+
+async def _retry_empty_page(application_id: str, page):
+    """A just-clicked SPA step can briefly render nothing. Re-snapshot a few
+    times before treating the page as needing a human. Returns
+    (snapshot, fields, submit_xpath) once something usable appears, else None."""
+    for retry in range(1, EMPTY_PAGE_RETRIES + 1):
+        await page.wait_for_timeout(EMPTY_PAGE_RETRY_MS)
+        candidate = await with_timeout(page.snapshot(), what="page.snapshot")
+        tree = candidate.formatted_tree
+        fields = collect_fields(tree, candidate.xpath_map)
+        submit_xpath = find_submit_button(tree, candidate.xpath_map)
+        if (
+            fields
+            or submit_xpath
+            or _APPLY_BUTTON.search(tree)
+            or _APPLY_LINK.search(tree)
+            or _NEXT_BUTTON.search(tree)
+        ):
+            await _log(
+                application_id,
+                "Page looked empty; waited "
+                f"{retry * EMPTY_PAGE_RETRY_MS / 1000:g} s for it to load",
+                tier="navigation",
+            )
+            return candidate, fields, submit_xpath
+    return None
 
 
 async def _map_fields(
@@ -1617,7 +1675,7 @@ async def _submit_and_verify(
             else set()
         )
         await _escalate_unhandled_fields_if_any(
-            application_id, cascade, also_target=escalate_target
+            application_id, cascade, also_target=escalate_target, page=page
         )
 
     # Defensive only — the loop's `is_last_attempt` branch always returns
@@ -1673,7 +1731,11 @@ async def _resolve_captcha_if_present(application_id: str, page) -> None:
         tier="captcha",
     )
     await _pause_for_human(
-        application_id, "captcha_failed", "Resumed after manual CAPTCHA handling"
+        application_id,
+        "captcha_failed",
+        "Resumed after manual CAPTCHA handling",
+        page=page,
+        cleared=lambda: _captcha_cleared(page),
     )
 
 
@@ -1770,10 +1832,88 @@ async def _check_paused_and_wait(application_id: str) -> None:
     await _log(application_id, "Resumed by user")
 
 
+_EMPTY_FIELD_PLACEHOLDERS = {
+    "",
+    "select",
+    "select...",
+    "select one",
+    "choose",
+    "choose...",
+    "please select",
+    "--",
+}
+
+
+async def _field_has_value(page, field: FormField) -> bool:
+    """Read a field's live state conservatively before asking a human.
+
+    An error is intentionally treated as unresolved: a false positive pause is
+    preferable to claiming an inaccessible control is complete.
+    """
+    if not field.xpath:
+        return False
+    try:
+        locator = page.locator(field.xpath)
+        if field.role == "textbox":
+            value = await with_timeout(
+                locator.input_value(), what="locator.input_value"
+            )
+            return bool((value or "").strip())
+        if field.is_native_select:
+            value = await with_timeout(locator.input_value(), what="select.input_value")
+            return (value or "").strip().casefold() not in _EMPTY_FIELD_PLACEHOLDERS
+        if field.role in {"checkbox", "radio"}:
+            aria_checked = await with_timeout(
+                locator.get_attribute("aria-checked"), what="locator.get_attribute"
+            )
+            if aria_checked is not None:
+                return aria_checked.casefold() == "true"
+            checked = await with_timeout(
+                locator.get_attribute("checked"), what="locator.get_attribute"
+            )
+            return checked is not None and checked.casefold() != "false"
+        text = await with_timeout(locator.inner_text(), what="locator.inner_text")
+        return (text or "").strip().casefold() not in _EMPTY_FIELD_PLACEHOLDERS
+    except Exception:  # noqa: BLE001 - uncertainty remains an escalation
+        return False
+
+
+async def _blocking_fields_cleared(page, labels: list[str]) -> bool:
+    if not labels:
+        return False
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    flagged = set(await blocking_field_labels(page, snapshot.formatted_tree))
+    fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
+    for label in labels:
+        field = _match_field_for_label(label, fields)
+        if label in flagged or field is None or not await _field_has_value(page, field):
+            return False
+    return True
+
+
+async def _navigation_pause_cleared(page, paused_fingerprint: str) -> bool:
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    tree = snapshot.formatted_tree
+    if _page_fingerprint(await _page_location(page), tree) != paused_fingerprint:
+        return True
+    return bool(
+        collect_fields(tree, snapshot.xpath_map)
+        or find_submit_button(tree, snapshot.xpath_map)
+        or _APPLY_BUTTON.search(tree)
+        or _APPLY_LINK.search(tree)
+        or _NEXT_BUTTON.search(tree)
+    )
+
+
+async def _captcha_cleared(page) -> bool:
+    return await detect_captcha(page) is None
+
+
 async def _escalate_unhandled_fields_if_any(
     application_id: str,
     cascade: "FillCascadeResult",
     also_target: set[str] | None = None,
+    page=None,
 ) -> None:
     """
     Real gap reported live, twice over:
@@ -1813,6 +1953,20 @@ async def _escalate_unhandled_fields_if_any(
         f.label for f in cascade.fields if f.required and f.label in unhandled
     }
     escalate_labels = sorted(required_unhandled | (also_target or set()))
+    fields_by_label = {field.label: field for field in cascade.fields}
+    if page is not None:
+        confirmed_empty: list[str] = []
+        for label in escalate_labels:
+            field = fields_by_label.get(label)
+            if field is not None and await _field_has_value(page, field):
+                await _log(
+                    application_id,
+                    f"'{label}' already has a value; not pausing for manual input",
+                    tier="navigation",
+                )
+            else:
+                confirmed_empty.append(label)
+        escalate_labels = confirmed_empty
     if not escalate_labels:
         return
 
@@ -1824,12 +1978,21 @@ async def _escalate_unhandled_fields_if_any(
         level="warn",
     )
     await _pause_for_human(
-        application_id, "manual_fields_required", "Resumed after manual field entry"
+        application_id,
+        "manual_fields_required",
+        "Resumed after manual field entry",
+        page=page,
+        cleared=lambda: _blocking_fields_cleared(page, escalate_labels),
     )
 
 
 async def _pause_for_human(
-    application_id: str, pause_reason: str, resumed_message: str
+    application_id: str,
+    pause_reason: str,
+    resumed_message: str,
+    *,
+    page=None,
+    cleared=None,
 ) -> None:
     """Park the run in NEEDS_INPUT and block until the user resumes (or
     cancels) via Live View. Shared by the CAPTCHA-escalation and
@@ -1838,10 +2001,34 @@ async def _pause_for_human(
     path deliberately does NOT use this: it polls the page as well as the
     events, so it can auto-resume when the challenge clears on its own."""
     await _pause_for_input(application_id, pause_reason)
-    if await wait_for_resume_or_cancel(application_id) == "cancelled":
-        raise ApplicationCancelled
-    await _resume_from_pause(application_id)
-    await _log(application_id, resumed_message)
+    if page is None or cleared is None:
+        if await wait_for_resume_or_cancel(application_id) == "cancelled":
+            raise ApplicationCancelled
+        await _resume_from_pause(application_id)
+        await _log(application_id, resumed_message)
+        return
+
+    while True:
+        outcome = await wait_for_resume_or_cancel(
+            application_id, timeout=HUMAN_POLL_SECONDS
+        )
+        if outcome == "cancelled":
+            raise ApplicationCancelled
+        if outcome == "resumed":
+            await _resume_from_pause(application_id)
+            await _log(application_id, resumed_message)
+            return
+        try:
+            has_cleared = await cleared()
+        except Exception:  # noqa: BLE001 - retain handoff on uncertainty
+            has_cleared = False
+        if has_cleared:
+            await _resume_from_pause(application_id)
+            await _log(
+                application_id,
+                f"{pause_reason} cleared on its own — resuming automatically",
+            )
+            return
 
 
 async def _pause_for_input(
@@ -2205,7 +2392,14 @@ async def _handle_account_gate_if_present(application_id: str, page) -> None:
             application_id,
             "account_required",
             "Resumed after account sign-in or creation",
+            page=page,
+            cleared=lambda: _account_gate_cleared(page),
         )
+
+
+async def _account_gate_cleared(page) -> bool:
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    return not await _account_gate_present(page, snapshot.formatted_tree)
 
 
 async def _log(

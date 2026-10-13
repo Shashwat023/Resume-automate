@@ -641,7 +641,7 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
 
     real_escalate = runner._escalate_unhandled_fields_if_any
 
-    async def _spying_escalate(app_id, cascade, also_target=None):
+    async def _spying_escalate(app_id, cascade, also_target=None, page=None):
         escalation_pauses.append(also_target or set())
         await real_escalate(app_id, cascade, also_target=also_target)
 
@@ -919,7 +919,7 @@ async def test_run_resumes_after_account_creation_and_advances_workday_steps(
     pauses = []
     fill_stages = []
 
-    async def pause(_application_id, reason, _message):
+    async def pause(_application_id, reason, _message, **_kwargs):
         pauses.append(reason)
         assert reason == "account_required"
         page.stage = "info"
@@ -1042,7 +1042,7 @@ async def test_blocking_dropdown_resolved_with_any_option_then_next_advances(
 
     pauses = []
 
-    async def pause(*_args):
+    async def pause(*_args, **_kwargs):
         pauses.append(_args)
         raise AssertionError("repair should advance without a human pause")
 

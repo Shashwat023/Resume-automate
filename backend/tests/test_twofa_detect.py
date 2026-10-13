@@ -16,13 +16,28 @@ def test_detects_otp_abbreviation():
 
 
 def test_detects_authenticator_app_heading():
-    tree = "[1] heading: Open your authenticator app and enter the code\n"
+    tree = (
+        "[1] heading: Open your authenticator app and enter the code\n"
+        "[2] textbox: Code\n"
+    )
     assert detect_2fa(tree) is True
 
 
 def test_detects_two_factor_heading():
-    assert detect_2fa("[1] heading: Two-Factor Authentication Required\n") is True
-    assert detect_2fa("[1] heading: 2FA Required\n") is True
+    with_input = "[2] textbox: Code\n"
+    assert (
+        detect_2fa("[1] heading: Two-Factor Authentication Required\n" + with_input)
+        is True
+    )
+    assert detect_2fa("[1] heading: 2FA Required\n" + with_input) is True
+
+
+def test_2fa_heading_without_input_is_not_a_challenge():
+    assert detect_2fa("[1] heading: Two-Factor Authentication Required\n") is False
+
+
+def test_2fa_textbox_label_still_detected():
+    assert detect_2fa("[1] textbox: Security code\n") is True
 
 
 def test_body_prose_alone_does_not_trigger_a_pause():
