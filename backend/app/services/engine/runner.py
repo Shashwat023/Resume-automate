@@ -24,6 +24,7 @@ engine cannot resolve safely. The same browser session resumes afterward.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -111,9 +112,13 @@ _ACTION_CONTROL = re.compile(
 _CONTROL = re.compile(r"^\s*\[[\w-]+\]\s+(button|link):", re.I | re.M)
 _NEXT_BUTTON = re.compile(
     r"^\s*\[([\w-]+)\]\s+button:\s*"
-    r"(Save and Continue|Continue|Next|Next Step)\s*$",
+    r"((?:Save\s*(?:and|&)\s*)?(?:Continue|Next)(?:\s+(?:Step|Page|Section))?|"
+    r"Continue to .+|Review and Continue|Proceed)\s*$",
     re.I | re.M,
 )
+_HEADING_LINE = re.compile(r"^\s*\[[\w-]+\]\s+heading:\s*(.+?)\s*$", re.I)
+PAGE_PROGRESS_TIMEOUT_SECONDS = 6
+PAGE_PROGRESS_POLL_MS = 500
 _ACCOUNT_TEXT = re.compile(r"\b(?:create account|sign in|log in|log into)\b", re.I)
 _PASSWORD_CONTROL = re.compile(
     r"^\s*\[[\w-]+\]\s+(?:textbox|input(?:,\s*password)?):[^\n]*\bpassword\b",
@@ -153,6 +158,21 @@ def _safe_url(url: str) -> str:
         if parsed.scheme in {"http", "https"} and parsed.hostname
         else "<unavailable>"
     )
+
+
+def _page_fingerprint(page_url: str, formatted_tree: str) -> str:
+    """Hash stable page structure, deliberately excluding validation copy."""
+    path = urlsplit(page_url).path or "/"
+    headings = [
+        match.group(1).strip().lower()
+        for match in _HEADING_LINE.finditer(formatted_tree)
+    ][:5]
+    fields = sorted(
+        f"{field.role}:{field.label.strip().lower()}"
+        for field in collect_fields(formatted_tree, {})
+    )
+    stable = "\n".join([path, *headings, *fields])
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 
 async def _page_location(page) -> str:
@@ -459,6 +479,7 @@ async def run_application(application_id: str) -> None:
                     # account/verification gates before EACH page, fill one page,
                     # then advance until the actual Submit control is visible.
                     auto_steps = 0
+                    seen_pages: dict[str, int] = {}
                     total_tier0 = total_tier1 = total_tier2 = 0
                     while True:
                         await _check_paused_and_wait(application_id)
@@ -468,6 +489,27 @@ async def run_application(application_id: str) -> None:
                         snapshot = await with_timeout(
                             page.snapshot(), what="page.snapshot"
                         )
+                        page_fingerprint = _page_fingerprint(
+                            await _page_location(page), snapshot.formatted_tree
+                        )
+                        seen_pages[page_fingerprint] = (
+                            seen_pages.get(page_fingerprint, 0) + 1
+                        )
+                        if seen_pages[page_fingerprint] >= 3:
+                            await _log_page_diagnostics(
+                                application_id,
+                                page,
+                                snapshot.formatted_tree,
+                                "manual_navigation_required: stuck on the same page",
+                            )
+                            await _pause_for_human(
+                                application_id,
+                                "manual_navigation_required",
+                                "Resumed after manual navigation",
+                            )
+                            continue
+                        if seen_pages[page_fingerprint] == 1:
+                            auto_steps += 1
                         fields = collect_fields(
                             snapshot.formatted_tree, snapshot.xpath_map
                         )
@@ -592,11 +634,10 @@ async def run_application(application_id: str) -> None:
                                 auto_steps = 0
                                 continue
 
-                        auto_steps += 1
-                        if auto_steps >= 10:
+                        if auto_steps >= 25:
                             await _log(
                                 application_id,
-                                "Ten automatic application steps reached; "
+                                "Twenty-five distinct application pages reached; "
                                 "pausing for a manual check in Live View",
                                 level="warn",
                                 tier="navigation",
@@ -1657,6 +1698,7 @@ async def _llm_click_apply(page, sh, application_id: str) -> bool:
 async def _click_next_if_present(page, application_id: str) -> bool:
     snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
     before_url = await _page_location(page)
+    before_fingerprint = _page_fingerprint(before_url, snapshot.formatted_tree)
     match = _NEXT_BUTTON.search(snapshot.formatted_tree)
     if not match:
         return False
@@ -1675,10 +1717,22 @@ async def _click_next_if_present(page, application_id: str) -> bool:
         tier="navigation",
     )
     await with_timeout(page.locator(xpath).click(), what="click(Continue)")
-    await page.wait_for_timeout(1500)
-    after = await with_timeout(page.snapshot(), what="page.snapshot")
-    after_url = await _page_location(page)
-    if after_url == before_url and after.formatted_tree == snapshot.formatted_tree:
+    elapsed = 0
+    after = snapshot
+    after_url = before_url
+    while elapsed <= PAGE_PROGRESS_TIMEOUT_SECONDS * 1000:
+        await page.wait_for_timeout(PAGE_PROGRESS_POLL_MS)
+        after = await with_timeout(page.snapshot(), what="page.snapshot")
+        after_url = await _page_location(page)
+        if _page_fingerprint(after_url, after.formatted_tree) != before_fingerprint:
+            await _log(
+                application_id,
+                f"Continue reached {after_url}",
+                tier="navigation",
+            )
+            return True
+        elapsed += PAGE_PROGRESS_POLL_MS
+    if _page_fingerprint(after_url, after.formatted_tree) == before_fingerprint:
         await _log(
             application_id,
             f"{match.group(2)} did not advance the page on {before_url}; "
@@ -1693,12 +1747,7 @@ async def _click_next_if_present(page, application_id: str) -> bool:
             f"{match.group(2)} did not advance the page",
         )
         return False
-    await _log(
-        application_id,
-        f"Continue reached {after_url}",
-        tier="navigation",
-    )
-    return True
+    return False
 
 
 async def _click_apply_if_present(
