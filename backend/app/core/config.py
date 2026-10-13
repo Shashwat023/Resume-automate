@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     captcha_solve_timeout_seconds: int = 180
     captcha_polling_interval_seconds: int = 5
 
+    application_stall_timeout_seconds: int = 600
+    watchdog_interval_seconds: int = 30
+
     # Root cause of the live "Please complete the reCAPTCHA" rejection
     # despite a genuinely 2captcha-solved token: with no proxy configured,
     # 2captcha's worker solves the challenge from ITS OWN datacenter IP —

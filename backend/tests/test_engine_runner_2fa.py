@@ -200,6 +200,33 @@ _SUBMIT_TREE_2 = "[3] button: Submit Application\n"
 _CONFIRMATION_TREE = "[4] StaticText: Thank you for applying\n"
 
 
+async def test_submit_settle_polls_submitting_without_a_button_until_confirmation(
+    monkeypatch,
+):
+    page = FakeSubmitPage(
+        [
+            ("[1] StaticText: Submitting…\n", {}),
+            (_CONFIRMATION_TREE, {}),
+        ]
+    )
+    monkeypatch.setattr(runner, "SUBMIT_SETTLE_TIMEOUT_SECONDS", 2)
+
+    snapshot = await runner._wait_for_submit_settle(page)
+
+    assert "Thank you" in snapshot.formatted_tree
+    assert page._index == 2
+
+
+async def test_submit_settle_stops_immediately_on_confirmation(monkeypatch):
+    page = FakeSubmitPage([(_CONFIRMATION_TREE, {})])
+    monkeypatch.setattr(runner, "SUBMIT_SETTLE_TIMEOUT_SECONDS", 2)
+
+    snapshot = await runner._wait_for_submit_settle(page)
+
+    assert "Thank you" in snapshot.formatted_tree
+    assert page._index == 1
+
+
 async def _seed_with_job_and_cascade(async_session, monkeypatch):
     from app.services.engine.tier0_harvest import HarvestResult
     from app.services.engine.tier1_map import Tier1Result
@@ -238,13 +265,14 @@ async def test_submit_clicks_again_after_2fa_resolves_before_reading_outcome(
     page = FakeSubmitPage(
         [
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit-1']"}),  # find submit (1st)
+            (_OTP_TREE, {}),  # settle detects the delayed challenge
             (_OTP_TREE, {}),  # _handle_2fa_if_present's own detect snapshot
             (_SUBMIT_TREE_2, {"3": "//button[@id='submit-2']"}),  # post-2FA re-check
             (_CONFIRMATION_TREE, {}),  # final read_outcome
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -272,6 +300,162 @@ async def test_submit_clicks_again_after_2fa_resolves_before_reading_outcome(
     assert page.click_calls == ["//button[@id='submit-1']", "//button[@id='submit-2']"]
 
 
+async def test_delayed_2fa_after_submit_uses_the_2fa_path(async_session, monkeypatch):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage(
+        [
+            (_SUBMIT_TREE_1, {"1": "//submit-1"}),
+            ("[9] textbox: First Name\n", {}),
+            (_OTP_TREE, {}),
+            (_SUBMIT_TREE_2, {"3": "//submit-2"}),
+            (_CONFIRMATION_TREE, {}),
+        ]
+    )
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    handled = []
+
+    async def handle(*_args):
+        handled.append(True)
+        return True
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    monkeypatch.setattr(runner, "is_paused", lambda _id: False)
+    monkeypatch.setattr(runner, "_handle_2fa_if_present", handle)
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert handled == [True]
+    assert result.outcome == "completed"
+    assert len(page.click_calls) == 2
+
+
+async def test_diagnostics_event_has_labels_and_url_but_no_field_values(
+    async_session, monkeypatch
+):
+    application = await _seed(async_session, monkeypatch)
+
+    class Page:
+        async def url(self):
+            return "https://example.com/apply/form?token=SECRET"
+
+        async def evaluate(self, _expression):
+            return 0
+
+    tree = (
+        "[1] textbox: First Name\n[2] button: Next\n"
+        "[3] StaticText: SENTINEL-PAGE-TEXT-123\n"
+    )
+    await runner._log_page_diagnostics(application.id, Page(), tree, "test")
+    from sqlalchemy import select
+    from app.models.db_models import RunEvent
+
+    events = (await async_session.scalars(select(RunEvent))).all()
+    diagnostics = [event for event in events if event.tier == "diagnostics"]
+    assert len(diagnostics) == 1
+    message = diagnostics[0].message
+    assert "textbox:First Name" in message and "example.com/apply/form" in message
+    assert "SENTINEL-PAGE-TEXT-123" not in message and "token=SECRET" not in message
+
+
+async def test_queued_application_stays_queued_until_lock_acquired(
+    async_session, monkeypatch
+):
+    from app.worker import queue_runner
+
+    application = await _seed(async_session, monkeypatch)
+    application.status = st.QUEUED
+    await async_session.commit()
+    lock = queue_runner.get_profile_lock(str(application.profile_id))
+    await lock.acquire()
+    launched = []
+
+    async def launch(_key):
+        launched.append(True)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(runner, "get_or_launch", launch)
+    task = __import__("asyncio").create_task(runner.run_application(application.id))
+    await __import__("asyncio").sleep(0.05)
+    await async_session.refresh(application)
+    assert (
+        application.status == st.QUEUED
+        and application.started_at is None
+        and not launched
+    )
+    lock.release()
+    await task
+    await async_session.refresh(application)
+    assert launched and application.started_at is not None
+    queue_runner._profile_locks.pop(str(application.profile_id), None)
+
+
+async def test_profile_or_job_missing_inside_lock_fails_application(
+    async_session, monkeypatch
+):
+    from app.worker import queue_runner
+
+    application = await _seed(async_session, monkeypatch)
+    application.status = st.QUEUED
+    await async_session.commit()
+    lock = queue_runner.get_profile_lock(str(application.profile_id))
+    await lock.acquire()
+    task = __import__("asyncio").create_task(runner.run_application(application.id))
+    await __import__("asyncio").sleep(0.05)
+    job = await async_session.get(Job, application.job_id)
+    await async_session.delete(job)
+    await async_session.commit()
+    lock.release()
+    await task
+    await async_session.refresh(application)
+    assert application.status == st.FAILED
+    assert (
+        application.error == "Profile or job not found"
+        and application.finished_at is not None
+    )
+    queue_runner._profile_locks.pop(str(application.profile_id), None)
+
+
+@pytest.mark.parametrize("status", [st.QUEUED, st.RUNNING, st.PAUSED, st.NEEDS_INPUT])
+async def test_runner_safety_net_fails_row_when_run_returns_unexpectedly(
+    async_session, monkeypatch, status
+):
+    from app.worker import queue_runner
+
+    application = await _seed(async_session, monkeypatch)
+    application.status = status
+    await async_session.commit()
+
+    async def cancelled(_id):
+        raise runner.ApplicationCancelled
+
+    monkeypatch.setattr(runner, "_check_paused_and_wait", cancelled)
+    queue_runner._cancel_events[application.id] = __import__("asyncio").Event()
+    await runner.run_application(application.id)
+    await async_session.refresh(application)
+    assert (
+        application.status == st.FAILED
+        and application.error == "Run ended unexpectedly"
+    )
+    assert application.id not in queue_runner._cancel_events
+
+
+async def test_runner_safety_net_leaves_completed_row_unchanged(
+    async_session, monkeypatch
+):
+    application = await _seed(async_session, monkeypatch)
+    application.status = st.COMPLETED
+    await async_session.commit()
+    await runner.run_application(application.id)
+    await async_session.refresh(application)
+    assert application.status == st.COMPLETED
+
+
 async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
     async_session, monkeypatch
 ):
@@ -286,7 +470,7 @@ async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -306,6 +490,78 @@ async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
 
     assert result.outcome == "completed"
     assert page.click_calls == ["//button[@id='submit-1']"]
+
+
+async def test_submit_unknown_after_click_is_unconfirmed_with_single_click(
+    async_session, monkeypatch
+):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage(
+        [(_SUBMIT_TREE_1, {"1": "//submit"}), ("[2] heading: Form\n", {})]
+    )
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    monkeypatch.setattr(runner, "is_paused", lambda _id: False)
+
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert result.outcome == "unconfirmed"
+    assert page.click_calls == ["//submit"]
+
+
+@pytest.mark.parametrize(
+    "exception", [RuntimeError("Session with given id not found"), TimeoutError()]
+)
+async def test_submit_failure_after_click_is_unconfirmed(
+    async_session, monkeypatch, exception
+):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage([(_SUBMIT_TREE_1, {"1": "//submit"})])
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    async def fails(*_args, **_kwargs):
+        raise exception
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    monkeypatch.setattr(runner, "is_paused", lambda _id: False)
+    monkeypatch.setattr(runner, "click_submit", fails)
+
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert result.outcome == "unconfirmed"
+
+
+async def test_submit_missing_button_first_attempt_is_no_button_found(
+    async_session, monkeypatch
+):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage([("[1] heading: Form\n", {})])
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert result.outcome == "no_button_found"
+    assert page.click_calls == []
 
 
 # ---- submit escalation: never give up without a human-assisted final try ----
@@ -360,18 +616,15 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
     page = FakeSubmitPage(
         [
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),  # attempt 0: find submit
-            (_VALIDATION_TREE, {}),  # attempt 0: 2fa-detect (none)
-            (_VALIDATION_TREE, {}),  # attempt 0: read_outcome -> validation_error
+            (_VALIDATION_TREE, {}),  # attempt 0: settle -> validation_error
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),  # attempt 1: find submit
-            (_VALIDATION_TREE, {}),  # attempt 1: 2fa-detect (none)
-            (_VALIDATION_TREE, {}),  # attempt 1: read_outcome -> validation_error again
+            (_VALIDATION_TREE, {}),  # attempt 1: settle -> validation_error again
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),  # attempt 2: find submit
-            (_CONFIRMATION_TREE, {}),  # attempt 2: 2fa-detect (none)
-            (_CONFIRMATION_TREE, {}),  # attempt 2: read_outcome -> completed
+            (_CONFIRMATION_TREE, {}),  # attempt 2: settle -> completed
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -388,7 +641,7 @@ async def test_final_submit_attempt_is_human_assisted_before_giving_up(
 
     real_escalate = runner._escalate_unhandled_fields_if_any
 
-    async def _spying_escalate(app_id, cascade, also_target=None):
+    async def _spying_escalate(app_id, cascade, also_target=None, page=None):
         escalation_pauses.append(also_target or set())
         await real_escalate(app_id, cascade, also_target=also_target)
 
@@ -427,17 +680,14 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
         [
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),
             (_VALIDATION_TREE, {}),
-            (_VALIDATION_TREE, {}),
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),
             (_VALIDATION_TREE, {}),
-            (_VALIDATION_TREE, {}),
             (_SUBMIT_TREE_1, {"1": "//button[@id='submit']"}),
-            (_VALIDATION_TREE, {}),
             (_VALIDATION_TREE, {}),  # STILL validation_error on the final attempt
         ]
     )
 
-    async def _fake_resolve_captcha(page):
+    async def _fake_resolve_captcha(page, on_solving=None):
         from app.services.captcha.service import CaptchaOutcome
 
         return CaptchaOutcome(status="not_present")
@@ -466,8 +716,8 @@ async def test_final_attempt_still_failing_after_human_help_truly_gives_up(
     )
 
     assert result.outcome == "validation_error"
-    # Exactly 3 attempts (9 snapshots) — no infinite retrying.
-    assert page._index == 9
+    # Exactly 3 attempts (6 snapshots) — no infinite retrying.
+    assert page._index == 6
 
 
 # ---- every run closes its browser session, unconditionally ----
@@ -574,6 +824,254 @@ async def test_completed_run_also_closes_the_browser_session(
     await async_session.refresh(application)
     assert application.status == "completed"
     assert close_calls == [str(application.profile_id)]
+
+
+async def test_run_resumes_after_account_creation_and_advances_workday_steps(
+    async_session, monkeypatch
+):
+    from types import SimpleNamespace
+
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    workday_url = "https://workday.example/job/apply"
+
+    class Page:
+        stage = "landing"
+        current_url = "https://example.com/apply"
+
+        async def goto(self, url):
+            self.current_url = url
+            self.stage = "choice" if url == workday_url else "landing"
+
+        async def url(self):
+            return self.current_url
+
+        async def wait_for_load_state(self, _state):
+            pass
+
+        async def wait_for_timeout(self, _milliseconds):
+            pass
+
+        async def evaluate(self, expression):
+            if "document.evaluate" in expression:
+                return workday_url
+            return False
+
+        async def snapshot(self):
+            trees = {
+                "landing": ("[1] link: Apply\n", {"1": "//a[@id='apply']"}),
+                "choice": (
+                    "[2] button: Apply Manually\n",
+                    {"2": "//button[@id='manual']"},
+                ),
+                "account": (
+                    "[3] heading: Create Account\n[4] textbox: Password\n",
+                    {"4": "//input[@type='password']"},
+                ),
+                "info": (
+                    "[5] textbox: First Name\n[6] button: Save and Continue\n",
+                    {"5": "//input[@id='first']", "6": "//button[@id='next']"},
+                ),
+                "review": (
+                    "[7] heading: Review\n[8] button: Submit Application\n",
+                    {"8": "//button[@id='submit']"},
+                ),
+            }
+            tree, xpaths = trees[self.stage]
+            return SimpleNamespace(formatted_tree=tree, xpath_map=xpaths)
+
+        def locator(self, xpath):
+            page = self
+
+            class Locator:
+                async def click(self):
+                    if xpath == "//button[@id='manual']":
+                        page.stage = "account"
+                    elif xpath == "//button[@id='next']":
+                        page.stage = "review"
+                    else:
+                        raise AssertionError(xpath)
+
+            return Locator()
+
+    page = Page()
+
+    class Stagehand:
+        browser = SimpleNamespace(
+            context=SimpleNamespace(active_page=lambda: _active_page())
+        )
+
+        @staticmethod
+        async def create(**_kwargs):
+            return Stagehand()
+
+        async def close(self):
+            pass
+
+    async def _active_page():
+        return page
+
+    async def launch(_profile_id):
+        return SimpleNamespace(browser=object())
+
+    async def no_op(*_args, **_kwargs):
+        return False
+
+    pauses = []
+    fill_stages = []
+
+    async def pause(_application_id, reason, _message, **_kwargs):
+        pauses.append(reason)
+        assert reason == "account_required"
+        page.stage = "info"
+
+    async def fill(_application_id, _sh, _page, *_args):
+        fill_stages.append(page.stage)
+        return cascade
+
+    async def submit(*_args):
+        return runner.SubmitResult(outcome="completed")
+
+    monkeypatch.setattr(runner, "Stagehand", Stagehand)
+    monkeypatch.setattr(runner, "get_or_launch", launch)
+    monkeypatch.setattr(runner, "close_session", no_op)
+    monkeypatch.setattr(runner, "_resolve_captcha_if_present", no_op)
+    monkeypatch.setattr(runner, "_handle_2fa_if_present", no_op)
+    monkeypatch.setattr(runner, "_pause_for_human", pause)
+    monkeypatch.setattr(runner, "_run_fill_cascade", fill)
+    monkeypatch.setattr(runner, "_submit_and_verify", submit)
+    monkeypatch.setattr(
+        runner, "get_settings", lambda: SimpleNamespace(submit_enabled=True)
+    )
+
+    await runner.run_application(application.id)
+    await async_session.refresh(application)
+    assert application.status == st.COMPLETED
+    assert pauses == ["account_required"]
+    assert fill_stages == ["info", "review"]
+
+
+async def test_blocking_dropdown_resolved_with_any_option_then_next_advances(
+    async_session, monkeypatch
+):
+    """A Next validation error repairs only its blocking select before retrying."""
+    from types import SimpleNamespace
+
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+
+    class Page:
+        stage = "info"
+        selected = False
+        current_url = "https://example.com/apply"
+        select_calls = []
+        textbox_types = []
+
+        async def goto(self, url):
+            self.current_url = url
+
+        async def url(self):
+            return self.current_url
+
+        async def wait_for_load_state(self, _state):
+            pass
+
+        async def wait_for_timeout(self, _milliseconds):
+            pass
+
+        async def evaluate(self, _expression):
+            return []
+
+        async def snapshot(self):
+            if self.stage == "review":
+                tree = "[9] heading: Review\n[10] button: Submit Application\n"
+                return SimpleNamespace(
+                    formatted_tree=tree, xpath_map={"10": "//submit"}
+                )
+            error = (
+                "[8] text: The field Phone Device Type is required and must have a value\n"
+                if not self.selected
+                else ""
+            )
+            tree = (
+                "[1] textbox: First Name\n[2] combobox: Phone Device Type\n"
+                "  [3] option: Select One\n  [4] option: Option A\n"
+                + error
+                + "[5] button: Save and Continue\n"
+            )
+            return SimpleNamespace(
+                formatted_tree=tree,
+                xpath_map={"1": "//first", "2": "//device", "5": "//next"},
+            )
+
+        def locator(self, xpath):
+            page = self
+
+            class Locator:
+                async def click(self):
+                    if xpath == "//next" and page.selected:
+                        page.stage = "review"
+
+                async def select_option(self, option):
+                    page.select_calls.append(option)
+                    assert option == "Option A"
+                    page.selected = True
+
+            return Locator()
+
+    page = Page()
+
+    class Stagehand:
+        browser = SimpleNamespace(
+            context=SimpleNamespace(active_page=lambda: _active_page())
+        )
+
+        @staticmethod
+        async def create(**_kwargs):
+            return Stagehand()
+
+        async def close(self):
+            pass
+
+    async def _active_page():
+        return page
+
+    async def launch(_profile_id):
+        return SimpleNamespace(browser=object())
+
+    async def no_op(*_args, **_kwargs):
+        return False
+
+    pauses = []
+
+    async def pause(*_args, **_kwargs):
+        pauses.append(_args)
+        raise AssertionError("repair should advance without a human pause")
+
+    async def fill(*_args):
+        return cascade
+
+    async def submit(*_args):
+        return runner.SubmitResult(outcome="completed")
+
+    monkeypatch.setattr(runner, "Stagehand", Stagehand)
+    monkeypatch.setattr(runner, "get_or_launch", launch)
+    monkeypatch.setattr(runner, "close_session", no_op)
+    monkeypatch.setattr(runner, "_resolve_captcha_if_present", no_op)
+    monkeypatch.setattr(runner, "_handle_2fa_if_present", no_op)
+    monkeypatch.setattr(runner, "_pause_for_human", pause)
+    monkeypatch.setattr(runner, "_run_fill_cascade", fill)
+    monkeypatch.setattr(runner, "_submit_and_verify", submit)
+    monkeypatch.setattr(
+        runner, "get_settings", lambda: SimpleNamespace(submit_enabled=True)
+    )
+
+    await runner.run_application(application.id)
+
+    await async_session.refresh(application)
+    assert page.select_calls == ["Option A"]
+    assert page.textbox_types == []
+    assert page.stage == "review"
+    assert pauses == []
+    assert application.status == st.COMPLETED
 
 
 async def test_session_is_closed_before_the_profile_lock_releases(

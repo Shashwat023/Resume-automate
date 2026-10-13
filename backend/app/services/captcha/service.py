@@ -8,12 +8,14 @@ plus the one policy decision — what to do when solving fails twice).
 
 import json
 from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 from stagehand import Page
 
 from app.core.config import get_settings
 from app.services.captcha.detect import CaptchaChallenge, detect_captcha
 from app.services.captcha.solver import CaptchaError, solve
+from app.services.engine.timeouts import with_timeout
 
 settings = get_settings()
 
@@ -37,7 +39,9 @@ class CaptchaOutcome:
     detail: str = ""
 
 
-async def resolve_captcha(page: Page) -> CaptchaOutcome:
+async def resolve_captcha(
+    page: Page, on_solving: Callable[[int], Awaitable[None]] | None = None
+) -> CaptchaOutcome:
     challenge = await detect_captcha(page)
     if challenge is None:
         return CaptchaOutcome(status="not_present")
@@ -49,6 +53,8 @@ async def resolve_captcha(page: Page) -> CaptchaOutcome:
         )
 
     last_error: Exception | None = None
+    if on_solving is not None:
+        await on_solving(settings.captcha_solve_timeout_seconds)
     for _attempt in range(2):
         try:
             # Page.url is an ASYNC METHOD on Stagehand's Page, not a plain
@@ -57,7 +63,9 @@ async def resolve_captcha(page: Page) -> CaptchaOutcome:
             # itself, not a string, which 2captcha's API correctly rejected
             # as an invalid page URL (ApiException: ERROR_PAGEURL), caught
             # live during Day 5 verification.
-            token = await solve(challenge, await page.url())
+            token = await solve(
+                challenge, await with_timeout(page.url(), what="page.url(captcha)")
+            )
             await _inject_token(page, challenge, token)
             return CaptchaOutcome(status="solved", detail=challenge.kind)
         except CaptchaError as exc:
@@ -93,8 +101,9 @@ async def _inject_token(page: Page, challenge: CaptchaChallenge, token: str) -> 
     widget may still only need the field.
     """
     field_name = _RESPONSE_FIELD[challenge.kind]
-    await page.evaluate(
-        f"""(() => {{
+    await with_timeout(
+        page.evaluate(
+            f"""(() => {{
             const token = {json.dumps(token)};
             let fields = document.querySelectorAll('[name="{field_name}"]');
             if (fields.length === 0) {{
@@ -152,4 +161,6 @@ async def _inject_token(page: Page, challenge: CaptchaChallenge, token: str) -> 
 
             return {{ fieldsFilled: fields.length, callbacksInvoked }};
         }})()"""
+        ),
+        what="evaluate(inject captcha token)",
     )

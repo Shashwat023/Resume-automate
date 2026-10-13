@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 from stagehand import Page
 
+from app.services.engine.timeouts import with_timeout
+
 # Both google.com/recaptcha and the recaptcha.net mirror are seen in
 # practice (recaptcha.net exists specifically for regions where
 # google.com is blocked). /api2/ is the classic form, /enterprise/ is the
@@ -46,16 +48,22 @@ _ACTION_IN_JS = re.compile(
 
 
 async def _extract_action(page: Page) -> str | None:
-    scripts = await page.evaluate(
-        "Array.from(document.scripts).map(s => s.textContent || '').join('\\n')"
+    scripts = await with_timeout(
+        page.evaluate(
+            "Array.from(document.scripts).map(s => s.textContent || '').join('\\n')"
+        ),
+        what="evaluate(captcha scripts)",
     )
     m = _ACTION_IN_JS.search(scripts or "")
     return m.group(1) if m else None
 
 
 async def detect_captcha(page: Page) -> CaptchaChallenge | None:
-    iframe_srcs = await page.evaluate(
-        "Array.from(document.querySelectorAll('iframe')).map(f => f.src)"
+    iframe_srcs = await with_timeout(
+        page.evaluate(
+            "Array.from(document.querySelectorAll('iframe')).map(f => f.src)"
+        ),
+        what="evaluate(captcha iframes)",
     )
     for src in iframe_srcs or []:
         m = _RECAPTCHA_IFRAME.search(src)

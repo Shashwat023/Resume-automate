@@ -117,3 +117,28 @@ def test_first_name_pattern_wins_over_generic_name_pattern():
     # "first name" must not fall through to the generic "name" pattern
     match = match_field("First Name")
     assert match.transform == "first_name"
+
+
+def test_semantic_country_phone_code_beats_phone_and_country_patterns():
+    match = match_field("Phone Country Code")
+
+    assert match is not None
+    assert match.profile_attr == "phone_country_code"
+    assert resolve_value({"phone": "+918303545027", "country": "India"}, match) == "+91"
+
+
+def test_semantic_phone_extension_and_device_type():
+    extension = match_field("Phone Extension")
+    device_type = match_field("Phone Device Type")
+
+    assert extension is not None and extension.profile_attr == "phone_extension"
+    assert device_type is not None and device_type.profile_attr == "phone_type"
+    assert resolve_value({}, extension) is None
+    assert resolve_value({}, device_type) == "Mobile"
+
+
+def test_semantic_plain_phone_mobile_cell_unchanged():
+    for label in ("Phone", "Mobile", "Cell"):
+        match = match_field(label)
+        assert match is not None
+        assert match.profile_attr == "phone"

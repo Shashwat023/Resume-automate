@@ -126,7 +126,7 @@ class Application(Base):
     """
     status vocabulary: queued, pending, checking_url, rescraped_retry_queued,
     link_expired_rescraping, running, needs_input, completed, success, failed,
-    error, link_expired_rescraped_still_unavailable, cancelled
+    error, link_expired_rescraped_still_unavailable, cancelled, needs_review
     (see frontend/src/api/queue.ts mapBackendStatusToJobStatus)
     """
 
@@ -143,6 +143,8 @@ class Application(Base):
     status: Mapped[str] = mapped_column(Text, default="queued")
     pause_reason: Mapped[str | None] = mapped_column(Text, default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
+    current_step: Mapped[str | None] = mapped_column(Text, default=None)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)

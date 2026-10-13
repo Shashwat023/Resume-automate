@@ -7,6 +7,7 @@ from app.models.schemas import (
     ApplyStartIn,
     ApplyStartOut,
     ApplyStatusOut,
+    ClearApplicationHistoryOut,
 )
 from app.services.apply_service import ApplyService
 
@@ -33,6 +34,13 @@ async def get_apply_history(
     profile_id: int, service: ApplyService = Depends(get_apply_service)
 ) -> list[ApplyHistoryItemOut]:
     return await service.get_history(profile_id)
+
+
+@router.delete("/history/{profile_id}", response_model=ClearApplicationHistoryOut)
+async def clear_apply_history(
+    profile_id: int, service: ApplyService = Depends(get_apply_service)
+) -> ClearApplicationHistoryOut:
+    return await service.clear_history(profile_id)
 
 
 @router.get("/details/{application_id}", response_model=ApplyDetailsOut)

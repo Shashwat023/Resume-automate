@@ -43,7 +43,9 @@ def _add_missing_columns(sync_conn) -> None:
                 continue
             col_type = column.type.compile(dialect=sync_conn.dialect)
             sync_conn.execute(
-                text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}')
+                text(
+                    f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}'
+                )
             )
 
 

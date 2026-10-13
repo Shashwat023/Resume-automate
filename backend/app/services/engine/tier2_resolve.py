@@ -17,7 +17,7 @@ installed package source, see PLAN.md Part C).
 
 import re
 from dataclasses import dataclass
-from typing import Any, Coroutine
+from typing import Any, Awaitable, Callable, Coroutine
 
 from stagehand import Stagehand
 
@@ -260,12 +260,20 @@ class Tier2Result:
 
 
 async def resolve_and_execute(
-    sh: Stagehand, page, fields: list[tuple[FormField, str]]
+    sh: Stagehand,
+    page,
+    fields: list[tuple[FormField, str]],
+    checkpoint: Callable[[], Awaitable[None]] | None = None,
+    on_field: Callable[[FormField], Awaitable[None]] | None = None,
 ) -> Tier2Result:
     resolved: list[tuple[str, str]] = []
     errored: list[tuple[str, str]] = []
 
     for field, value in fields:
+        if checkpoint is not None:
+            await checkpoint()
+        if on_field is not None:
+            await on_field(field)
         if field.role == "combobox":
             outcome = await _resolve_combobox(sh, page, field, value)
         else:
@@ -351,6 +359,40 @@ async def _type_then_reobserve_select(
         )
     except Exception:  # noqa: BLE001
         return None
+
+
+async def resolve_any_option(
+    sh: Stagehand, page, field: FormField, prefer_decline: bool = False
+) -> str:
+    """Pick a real dropdown option only when the caller deemed that safe."""
+    try:
+        opened = await _resolve_single_step(
+            sh, page, f"Open the '{field.label}' dropdown"
+        )
+        if opened.startswith("ERROR:"):
+            return opened
+        await _wait_for_options_to_render(page)
+        preference = (
+            " Prefer decline, prefer not to say, or I don't wish to answer."
+            if prefer_decline
+            else ""
+        )
+        instruction = (
+            f"In the open '{field.label}' dropdown, click ANY one real option; "
+            "never the placeholder ('Select…', 'Select One', 'Choose…', '--')."
+            + preference
+        )
+        observed = await _with_timeout(sh.observe(instruction, page=page))
+        if not observed.data:
+            return "ERROR:observe() found no real option"
+        result = await _act_with_retry(sh, page, observed.data[0])
+        if not result.data.success:
+            return f"ERROR:{result.data.message}"
+        description = result.data.action_description
+        failure = _check_description_for_failure(field, description)
+        return f"ERROR:{failure}" if failure else description
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR:{_describe(exc)}"
 
 
 async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -> str:

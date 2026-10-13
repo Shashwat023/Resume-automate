@@ -40,12 +40,13 @@ def describe(exc: BaseException) -> str:
 
 async def with_timeout(
     coro: Coroutine[Any, Any, Any],
-    seconds: float = PAGE_CALL_TIMEOUT_SECONDS,
+    seconds: float | None = None,
     what: str = "browser call",
 ) -> Any:
     """Raises TimeoutError with a message naming WHICH call timed out — a
     bare `TimeoutError()` from deep in the cascade is nearly unactionable
     when there are a dozen candidate await points."""
+    seconds = PAGE_CALL_TIMEOUT_SECONDS if seconds is None else seconds
     try:
         return await asyncio.wait_for(coro, timeout=seconds)
     except TimeoutError as exc:

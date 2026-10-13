@@ -3,6 +3,7 @@ import { jobsApi } from '../../../api/jobs';
 import { queueApi } from '../../../api/queue';
 import { toast } from 'sonner';
 import type { SearchFilters } from '../store/searchStore';
+import type { Job } from '@/types';
 
 const TIMELINE_TO_HOURS: Record<string, number> = {
   '24h': 24,
@@ -10,16 +11,15 @@ const TIMELINE_TO_HOURS: Record<string, number> = {
   month: 24 * 30,
 };
 
-export const useSearchJobsQuery = (params: {
+export function buildSearchParams(params: {
   keyword?: string;
   filters: SearchFilters;
   page?: number;
   limit?: number;
-}) => {
+}) {
   const { keyword, filters, page, limit } = params;
-
   // Map frontend filter names → backend parameter names
-  const apiParams = {
+  return {
     keyword: keyword || undefined,
     company_name: filters.company || undefined,
     location: filters.location || undefined,
@@ -31,6 +31,44 @@ export const useSearchJobsQuery = (params: {
     page,
     limit,
   };
+}
+
+/** Hard ceiling so "Auto Apply All Filtered" can never enqueue an unbounded set. */
+export const MAX_FILTERED_QUEUE_JOBS = 500;
+
+/**
+ * Every job matching the current search, across ALL pages (the table only
+ * holds one page, so queueing `jobs` alone silently dropped the rest).
+ */
+export async function fetchAllFilteredJobs(params: {
+  keyword?: string;
+  filters: SearchFilters;
+}) {
+  const pageSize = 100;
+  const collected: Job[] = [];
+  let page = 1;
+  for (;;) {
+    const response = await jobsApi.getSearchJobs(
+      buildSearchParams({ ...params, page, limit: pageSize })
+    );
+    collected.push(...response.data);
+    const done =
+      page >= response.meta.totalPages ||
+      response.data.length === 0 ||
+      collected.length >= MAX_FILTERED_QUEUE_JOBS;
+    if (done) break;
+    page += 1;
+  }
+  return collected.slice(0, MAX_FILTERED_QUEUE_JOBS);
+}
+
+export const useSearchJobsQuery = (params: {
+  keyword?: string;
+  filters: SearchFilters;
+  page?: number;
+  limit?: number;
+}) => {
+  const apiParams = buildSearchParams(params);
 
   return useQuery({
     queryKey: ['jobs', 'search', apiParams],
@@ -46,9 +84,15 @@ export const useCreateQueueMutation = () => {
     mutationFn: (payload: { jobs: { id: string; title: string; company_name: string; apply_url: string }[] }) => {
       return queueApi.createQueue(payload);
     },
-    onSuccess: () => {
-      toast.success('Successfully added to queue');
+    onSuccess: (succeeded, variables) => {
+      const added = succeeded.length;
+      toast.success(`Added ${added} job${added === 1 ? '' : 's'} to the queue`);
+      const skipped = variables.jobs.length - added;
+      if (skipped > 0) {
+        toast.warning(`${skipped} job${skipped === 1 ? '' : 's'} skipped (already queued, applied, or awaiting review)`);
+      }
       queryClient.invalidateQueries({ queryKey: ['queue'] });
+      queryClient.invalidateQueries({ queryKey: ['queue-status'] });
     },
     onError: (error: any) => {
       toast.error(error.message || 'Failed to create queue');

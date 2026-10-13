@@ -25,22 +25,34 @@ way to tell from the accessibility tree alone; both render as a plain
 `textbox` role).
 """
 
+from app.services.engine.timeouts import with_timeout
+
+
 _SUGGESTION_SELECTOR = (
     '[role="option"], li[role="option"], .pac-item, [data-testid*="option" i]'
 )
 _SUGGESTION_WAIT_MS = 400
 
 
-async def fill_textbox(page, xpath: str, value: str) -> None:
+async def fill_textbox(page, xpath: str, value: str, *, force: bool = False) -> bool:
     locator = page.locator(xpath)
-    await locator.fill("")
-    await locator.type(value, delay=20)
+    if not force:
+        try:
+            current = await with_timeout(
+                locator.input_value(), what="locator.input_value"
+            )
+            if (current or "").strip() == value.strip():
+                return False
+        except Exception:  # noqa: BLE001 - write path remains the fallback
+            pass
+    await with_timeout(locator.fill(""), what="locator.fill(textbox)")
+    await with_timeout(locator.type(value, delay=20), what="locator.type(textbox)")
     await page.wait_for_timeout(_SUGGESTION_WAIT_MS)
 
     suggestion = page.locator(_SUGGESTION_SELECTOR).first()
     try:
-        if not await suggestion.is_visible():
-            return
+        if not await with_timeout(suggestion.is_visible(), what="locator.is_visible"):
+            return True
         # Real regression this guards against: clicking the first visible
         # [role="option"]-shaped element ANYWHERE on the page is unsafe —
         # if some unrelated dropdown/listbox happens to be open elsewhere
@@ -48,11 +60,12 @@ async def fill_textbox(page, xpath: str, value: str) -> None:
         # closed yet), this could mis-click it instead of the actual
         # autocomplete suggestion THIS textbox opened. Only click if the
         # suggestion's own text plausibly matches what was just typed.
-        text = await suggestion.inner_text()
+        text = await with_timeout(suggestion.inner_text(), what="locator.inner_text")
         if value.strip().lower() in (text or "").lower():
-            await suggestion.click()
+            await with_timeout(suggestion.click(), what="locator.click(suggestion)")
     except Exception:  # noqa: BLE001
         # Best-effort only — a plain textbox with no such widget, or one
         # whose suggestion selector doesn't match ours, still has the
         # typed value from above; nothing to recover from here.
         pass
+    return True

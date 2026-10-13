@@ -37,6 +37,10 @@ class LiveViewProxy:
         self._pending: dict[int, asyncio.Future] = {}
         self._frame_queue: asyncio.Queue[str] = asyncio.Queue()
         self._reader_task: asyncio.Task | None = None
+        # Latest screencast metadata (CSS-pixel deviceWidth/deviceHeight), so
+        # the browser can map clicks to real page coordinates rather than to
+        # the scaled JPEG's pixels.
+        self.last_metadata: dict[str, Any] = {}
 
     async def connect(self) -> None:
         import urllib.request
@@ -79,6 +83,7 @@ class LiveViewProxy:
                 and data.get("sessionId") == self._page_session_id
             ):
                 params = data["params"]
+                self.last_metadata = params.get("metadata") or {}
                 await self._frame_queue.put(params["data"])
                 await self._send_no_wait(
                     "Page.screencastFrameAck",
@@ -145,14 +150,44 @@ class LiveViewProxy:
             {"type": event_type, "x": x, "y": y, "button": button, "clickCount": 1},
         )
 
+    async def dispatch_wheel(
+        self, x: float, y: float, delta_x: float, delta_y: float
+    ) -> None:
+        await self.send(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseWheel",
+                "x": x,
+                "y": y,
+                "deltaX": delta_x,
+                "deltaY": delta_y,
+            },
+        )
+
     async def dispatch_key(
-        self, event_type: str, text: str | None, key: str | None
+        self,
+        event_type: str,
+        text: str | None,
+        key: str | None,
+        *,
+        code: str | None = None,
+        key_code: int | None = None,
+        modifiers: int | None = None,
     ) -> None:
         params: dict[str, Any] = {"type": event_type}
         if text is not None:
             params["text"] = text
         if key is not None:
             params["key"] = key
+        # Without windowsVirtualKeyCode Chrome ignores editing/navigation keys
+        # (Backspace, Enter, Tab, arrows): only printable text goes through.
+        if code is not None:
+            params["code"] = code
+        if key_code is not None:
+            params["windowsVirtualKeyCode"] = key_code
+            params["nativeVirtualKeyCode"] = key_code
+        if modifiers:
+            params["modifiers"] = modifiers
         await self.send("Input.dispatchKeyEvent", params)
 
     async def close(self) -> None:

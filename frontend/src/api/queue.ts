@@ -1,6 +1,7 @@
-import api from './axios';
-import { getStoredProfileId } from '@/lib/session';
+import api, { isNotFound } from './axios';
+import { clearStoredProfileId, getStoredProfileId } from '@/lib/session';
 import type { QueueStateResponse, QueueItem, JobStatus, QueueStatus } from '../types';
+import { pickCurrentItem } from '@/features/queue/lib/queueSelectors';
 
 // Shape returned by GET /api/apply/history/{profile_id}
 interface BackendApplyHistoryItem {
@@ -14,6 +15,8 @@ interface BackendApplyHistoryItem {
   apply_url?: string | null;
   company_url?: string | null;
   ats?: string | null;
+  current_step?: string | null;
+  last_activity_at?: string | null;
 }
 
 function mapBackendStatusToJobStatus(status: string): JobStatus {
@@ -38,6 +41,7 @@ function mapBackendStatusToJobStatus(status: string): JobStatus {
     case 'success':
       return 'completed';
     case 'failed':
+    case 'needs_review':
     case 'error':
     case 'link_expired_rescraped_still_unavailable':
       return 'failed';
@@ -71,6 +75,8 @@ function describeBackendStatus(status: string): string {
       return 'Completed';
     case 'failed':
       return 'Failed';
+    case 'needs_review':
+      return 'Submission unconfirmed — verify before retrying';
     default:
       return status;
   }
@@ -98,12 +104,16 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
       ats: h.ats ?? undefined,
       status,
       rawStatus: h.status,
-      statusLabel: describeBackendStatus(h.status),
+      statusLabel: h.status === 'running' && h.current_step
+        ? `Applying — ${h.current_step}`
+        : describeBackendStatus(h.status),
       attempts: 1,
       addedAt: h.started_at ?? new Date().toISOString(),
       startedAt: h.started_at ?? undefined,
       processedAt: h.finished_at ?? undefined,
       duration: durationSec,
+      currentStep: h.current_step ?? undefined,
+      lastActivityAt: h.last_activity_at ?? undefined,
     };
   });
 
@@ -119,7 +129,7 @@ function mapHistoryToQueueState(history: BackendApplyHistoryItem[]): QueueStateR
   // the job actively being worked, just blocked on the user. Excluding it
   // here would hide CurrentJobCard (and the live-view entry point) at
   // exactly the moment the user most needs to see it.
-  const running = items.find((i) => i.status === 'running' || i.status === 'waiting_for_user');
+  const running = pickCurrentItem(items);
   // A job blocked on 2FA/manual input is still the job the queue is working
   // on — it just can't progress without a human. Counting only 'running' here
   // made the header report "Idle / No active jobs" while the panel directly
@@ -188,6 +198,10 @@ export interface BackendApplyDetails {
   events: BackendRunEvent[];
 }
 
+export interface ClearQueueHistoryResponse {
+  deleted_count: number;
+}
+
 export const queueApi = {
   startApply: (profileId: number, jobId: number) =>
     api.post('/api/apply/start', { profile_id: profileId, job_id: jobId }),
@@ -207,27 +221,59 @@ export const queueApi = {
   cancelApply: (applicationId: string) =>
     api.post(`/api/apply/${applicationId}/cancel`),
 
+  clearApplyHistory: (profileId: number): Promise<ClearQueueHistoryResponse> =>
+    api.delete(`/api/apply/history/${profileId}`),
+
   createQueue: async (payload: {
     jobs: { id: string; title: string; company_name: string; apply_url: string }[];
   }) => {
     const profileId = getStoredProfileId();
     if (!profileId) throw new Error('Please save your profile first.');
 
-    const results = await Promise.allSettled(
-      payload.jobs.map((job) =>
-        api.post('/api/apply/start', {
-          profile_id: profileId,
-          job_id: Number(job.id),
-        })
-      )
-    );
+    // Validate the profile once before starting N identical requests. The
+    // id is persisted in localStorage, so it can outlive a recreated backend
+    // database and otherwise makes every selected job fail with the same 404.
+    try {
+      await api.get(`/api/profile/${profileId}`);
+    } catch (error) {
+      if (isNotFound(error)) {
+        clearStoredProfileId();
+        throw new Error('Your saved profile is no longer available. Open Profile and save it again.');
+      }
+      throw error;
+    }
+
+    // Small batches rather than one burst: each accepted job spawns a
+    // backend task, and hundreds at once contend on the SQLite file.
+    const results: PromiseSettledResult<unknown>[] = [];
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < payload.jobs.length; i += BATCH_SIZE) {
+      const batch = payload.jobs.slice(i, i + BATCH_SIZE);
+      results.push(
+        ...(await Promise.allSettled(
+          batch.map((job) =>
+            api.post('/api/apply/start', {
+              profile_id: profileId,
+              job_id: Number(job.id),
+            })
+          )
+        ))
+      );
+    }
 
     const succeeded = results
       .filter((r) => r.status === 'fulfilled')
       .map((r) => (r as PromiseFulfilledResult<any>).value);
 
-    const failed = results.filter((r) => r.status === 'rejected').length;
+    const failedResults = results.filter((r) => r.status === 'rejected');
+    const failed = failedResults.length;
     if (failed > 0) console.warn(`${failed} job(s) failed to queue`);
+    if (succeeded.length === 0 && failedResults.length > 0) {
+      const firstFailure = failedResults[0] as PromiseRejectedResult;
+      throw firstFailure.reason instanceof Error
+        ? firstFailure.reason
+        : new Error('No jobs could be added to the queue.');
+    }
 
     return succeeded;
   },

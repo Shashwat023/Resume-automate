@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Play, XCircle } from 'lucide-react';
 import { wsUrl } from '@/lib/wsUrl';
+import { buildKeyMessage, mapPointToViewport } from '../lib/liveViewInput';
 import { useResumeJobMutation, useCancelJobMutation } from '../services/queue.queries';
 
 interface LiveViewProps {
@@ -10,8 +11,8 @@ interface LiveViewProps {
 
 /**
  * Canvas + input capture over WS /ws/apply/{id}/live-view — the one
- * remaining human-in-the-loop surface (Day 4 scope correction: 2FA only,
- * plus a CAPTCHA-solve-failed escalation). Backend sends JPEG screencast
+ * human-in-the-loop surface for account creation, verification, and manual
+ * navigation. Backend sends JPEG screencast
  * frames and forwards raw CDP Input.dispatch{Mouse,Key}Event params, so
  * this component only needs to scale click coordinates from the rendered
  * <img> size to the frame's natural (real viewport) size and pass key
@@ -21,6 +22,9 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
   const imgRef = useRef<HTMLImageElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  // Real page size (CSS px) reported with each frame; the JPEG may be scaled.
+  const viewportRef = useRef<{ width?: number; height?: number }>({});
   const [connected, setConnected] = useState(false);
   const resumeMutation = useResumeJobMutation();
   const cancelMutation = useCancelJobMutation();
@@ -56,34 +60,48 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'frame') {
+        viewportRef.current = { width: msg.width, height: msg.height };
         setFrameSrc(`data:image/jpeg;base64,${msg.data}`);
+      } else if (msg.type === 'error') {
+        setConnectionError(msg.message);
       }
     };
     return () => ws.close();
   }, [applicationId]);
 
-  const sendMouse = (eventType: string, e: React.MouseEvent<HTMLImageElement>) => {
+  const pointFor = (e: { clientX: number; clientY: number }) => {
     const img = imgRef.current;
+    if (!img || !img.naturalWidth) return null;
+    return mapPointToViewport(
+      e.clientX,
+      e.clientY,
+      img.getBoundingClientRect(),
+      { width: img.naturalWidth, height: img.naturalHeight },
+      viewportRef.current
+    );
+  };
+
+  const sendMouse = (eventType: string, e: React.MouseEvent<HTMLImageElement>) => {
     const ws = wsRef.current;
-    if (!img || !img.naturalWidth || !ws || ws.readyState !== WebSocket.OPEN) return;
-    const rect = img.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * img.naturalWidth;
-    const y = ((e.clientY - rect.top) / rect.height) * img.naturalHeight;
-    ws.send(JSON.stringify({ type: 'mouse', event: eventType, x, y, button: 'left' }));
+    const point = pointFor(e);
+    if (!point || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'mouse', event: eventType, ...point, button: 'left' }));
+  };
+
+  const sendWheel = (e: React.WheelEvent<HTMLImageElement>) => {
+    const ws = wsRef.current;
+    const point = pointFor(e);
+    if (!point || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({ type: 'wheel', ...point, deltaX: e.deltaX, deltaY: e.deltaY })
+    );
   };
 
   const sendKey = (eventType: 'keyDown' | 'keyUp', e: React.KeyboardEvent) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     e.preventDefault();
-    ws.send(
-      JSON.stringify({
-        type: 'key',
-        event: eventType,
-        key: e.key,
-        text: eventType === 'keyDown' && e.key.length === 1 ? e.key : undefined,
-      })
-    );
+    ws.send(JSON.stringify(buildKeyMessage(eventType, e)));
   };
 
   return (
@@ -123,7 +141,10 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
               onMouseDown={(e) => sendMouse('mousePressed', e)}
               onMouseUp={(e) => sendMouse('mouseReleased', e)}
               onMouseMove={(e) => sendMouse('mouseMoved', e)}
+              onWheel={sendWheel}
             />
+          ) : connectionError ? (
+            <p className="text-red-300 text-sm">{connectionError}</p>
           ) : (
             <p className="text-gray-400 text-sm">Waiting for the browser feed...</p>
           )}
@@ -131,9 +152,9 @@ export const LiveView = ({ applicationId, onClose }: LiveViewProps) => {
 
         <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 shrink-0 flex items-center justify-between gap-3">
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Click into the browser above and enter your verification code, then press Resume — or
-            Cancel to give up on this application. The agent will also continue automatically if
-            the challenge clears on its own.
+            Complete the requested step in the browser above, including account creation or
+            sign-in if needed, then press Resume. The application will continue from this page.
+            Verification challenges may also resume automatically when they clear.
           </p>
           <div className="flex items-center gap-2 shrink-0">
             <button

@@ -54,6 +54,18 @@ async def test_wait_for_resume_or_cancel_returns_resumed():
     assert result == "resumed"
 
 
+async def test_wait_for_resume_or_cancel_consumes_a_resume_signalled_before_waiting():
+    await _seed("app-early-resume")
+    await qr.signal_resume("app-early-resume")
+
+    result = await asyncio.wait_for(
+        qr.wait_for_resume_or_cancel("app-early-resume"), timeout=0.1
+    )
+
+    assert result == "resumed"
+    assert qr._resume_events["app-early-resume"].is_set() is False
+
+
 async def test_wait_for_resume_or_cancel_returns_cancelled():
     await _seed("app-1")
 
@@ -153,6 +165,28 @@ def test_cleanup_removes_all_three_events():
     assert "app-3" not in qr._pause_events
 
 
+async def test_enqueue_keeps_task_reference_until_completion_then_removes_it():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_run(_app_id):
+        started.set()
+        await release.wait()
+
+    qr.set_run_fn(_fake_run)
+    try:
+        await qr.enqueue_application("supervised")
+        await started.wait()
+        assert "supervised" in qr._tasks
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert "supervised" not in qr._tasks
+    finally:
+        qr.set_run_fn(None)
+        qr._tasks.pop("supervised", None)
+
+
 async def test_get_profile_lock_returns_same_lock_for_same_profile():
     lock1 = qr.get_profile_lock("profile-1")
     lock2 = qr.get_profile_lock("profile-1")
@@ -220,3 +254,29 @@ async def test_profile_session_times_out_instead_of_waiting_forever(monkeypatch)
     finally:
         held_lock.release()
         qr._profile_locks.pop("profile-session-timeout", None)
+
+
+async def test_paused_waiting_application_releases_lock_for_others():
+    key = "paused-waiting"
+    lock = qr.get_profile_lock(key)
+    await lock.acquire()
+    await _seed("A")
+    order = []
+
+    async def first():
+        async with qr.profile_session(key, "A"):
+            order.append("A-in")
+
+    first_task = asyncio.create_task(first())
+    await asyncio.sleep(0)
+    await qr.signal_pause("A")
+    lock.release()
+
+    async with qr.profile_session(key):
+        order.append("B-in")
+    assert order == ["B-in"]
+
+    await qr.signal_resume("A")
+    await first_task
+    assert order == ["B-in", "A-in"]
+    qr._profile_locks.pop(key, None)

@@ -42,8 +42,17 @@ _CHALLENGE_LINE = re.compile(
 
 
 def detect_2fa(formatted_tree: str) -> bool:
+    heading_or_dialog_match = False
+    has_input = False
     for line in formatted_tree.splitlines():
         m = _CHALLENGE_LINE.match(line)
-        if m and _LABEL_PATTERN.search(m.group("label")):
-            return True
-    return False
+        if not m:
+            continue
+        role = m.group("role").casefold()
+        if role in {"textbox", "input"}:
+            has_input = True
+            if _LABEL_PATTERN.search(m.group("label")):
+                return True
+        elif _LABEL_PATTERN.search(m.group("label")):
+            heading_or_dialog_match = True
+    return heading_or_dialog_match and has_input

@@ -16,10 +16,11 @@ from dataclasses import dataclass
 from stagehand import Page
 
 from app.services.engine.tier0_harvest import _FIELD_LINE, _GROUP_ROLE, TARGET_ROLES
+from app.services.engine.timeouts import with_timeout
 
 _SUBMIT_BUTTON = re.compile(
     r"^\s*\[([\w-]+)\]\s+button:\s*"
-    r"(Submit(?:\s+Application)?|Send Application|Apply Now)\s*$",
+    r"(Submit(?:\s+Application)?|Submit your application|Send Application)\s*$",
     # re.M is the actual fix here: without it, ^/$ only anchor to the whole
     # STRING's start/end, not each line — meaning this could basically
     # never match a real (multi-line) accessibility tree except in the
@@ -52,7 +53,7 @@ _VALIDATION_ERROR_PATTERN = re.compile(
 
 @dataclass
 class SubmitResult:
-    outcome: str  # "no_button_found" | "completed" | "validation_error" | "unknown"
+    outcome: str  # "completed" | "skipped" | "validation_error" | "no_button_found" | "unconfirmed"
     detail: str = ""
 
 
@@ -77,7 +78,7 @@ def read_outcome(formatted_tree: str) -> SubmitResult:
 
 
 async def click_submit(page: Page, xpath: str) -> None:
-    await page.locator(xpath).click()
+    await with_timeout(page.locator(xpath).click(), what="click(Submit)")
 
 
 def find_invalid_field_labels(formatted_tree: str) -> list[str]:

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -38,6 +39,16 @@ async def lifespan(app: FastAPI):
 
     set_run_fn(run_application)
 
+    from app.services.apply_recovery import recover_orphaned_applications
+    from app.worker.watchdog import watchdog_loop
+
+    try:
+        await recover_orphaned_applications()
+    except Exception:  # noqa: BLE001 - a failed recovery must not prevent startup
+        _app_logger.exception("Application startup recovery failed")
+    watchdog_stop = asyncio.Event()
+    watchdog_task = asyncio.create_task(watchdog_loop(watchdog_stop))
+
     # A "sync all tracked companies" pass found still marked "running" here
     # is necessarily a crash artifact — no background task survives a
     # server restart — so it's reset to "paused" rather than left claiming
@@ -52,7 +63,11 @@ async def lifespan(app: FastAPI):
 
     await recover_stale_running_state_on_startup()
 
-    yield
+    try:
+        yield
+    finally:
+        watchdog_stop.set()
+        await watchdog_task
 
 
 app = FastAPI(title="Career-Ops Automation Backend", lifespan=lifespan)

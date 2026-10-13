@@ -2,7 +2,7 @@ from app.domain import status as st
 
 
 def test_terminal_set_contains_exactly_the_finished_statuses():
-    assert st.TERMINAL == {st.COMPLETED, st.FAILED, st.CANCELLED}
+    assert st.TERMINAL == {st.COMPLETED, st.FAILED, st.CANCELLED, st.NEEDS_REVIEW}
 
 
 def test_active_statuses_are_not_terminal():

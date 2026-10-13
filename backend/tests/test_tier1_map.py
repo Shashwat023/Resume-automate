@@ -632,3 +632,110 @@ async def test_empty_answer_never_gets_cached(async_session, monkeypatch):
 
     cached = await repo.get(profile.id, tier1_map.question_hash("Why Anthropic?"))
     assert cached is None
+
+
+async def test_tier1_selects_native_country_code_option_by_dial_token(
+    async_session, monkeypatch
+):
+    async def no_llm(*args, **kwargs):
+        raise AssertionError("deterministic country-code field must not call the LLM")
+
+    monkeypatch.setattr(tier1_map, "chat_json", no_llm)
+    profile = await _seed_profile(async_session)
+    repo = AnswerLibraryRepository(async_session)
+    field = FormField(
+        "1",
+        "combobox",
+        "Phone Country Code",
+        "//select[1]",
+        options=["United Kingdom (+44)", "India (+91)"],
+    )
+    page = FakePage()
+
+    result = await tier1_map.map_fields(
+        page, [field], {"phone": "+918303545027", "country": "India"}, profile.id, repo
+    )
+
+    assert result.filled == [("Phone Country Code", "India (+91)")]
+    assert page.calls == [("select_option", "//select[1]", "India (+91)")]
+
+
+async def test_tier1_country_code_custom_dropdown_goes_to_tier2_with_country_and_dial(
+    async_session, monkeypatch
+):
+    async def no_llm(*args, **kwargs):
+        raise AssertionError("deterministic country-code field must not call the LLM")
+
+    monkeypatch.setattr(tier1_map, "chat_json", no_llm)
+    profile = await _seed_profile(async_session)
+    repo = AnswerLibraryRepository(async_session)
+    field = FormField("1", "combobox", "Phone Country Code", "//button[1]")
+
+    result = await tier1_map.map_fields(
+        FakePage(),
+        [field],
+        {"phone": "+918303545027", "country": "India"},
+        profile.id,
+        repo,
+    )
+
+    assert result.for_tier2 == [(field, "India (+91)")]
+
+
+async def test_tier1_phone_device_type_picks_mobile(async_session, monkeypatch):
+    async def no_llm(*args, **kwargs):
+        raise AssertionError("phone type must not call the LLM")
+
+    monkeypatch.setattr(tier1_map, "chat_json", no_llm)
+    profile = await _seed_profile(async_session)
+    repo = AnswerLibraryRepository(async_session)
+    field = FormField(
+        "1", "combobox", "Phone Device Type", "//select[1]", options=["Home", "Cell"]
+    )
+    page = FakePage()
+
+    result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
+
+    assert result.filled == [("Phone Device Type", "Cell")]
+
+
+async def test_phone_extension_is_never_filled_or_sent_to_llm(
+    async_session, monkeypatch
+):
+    async def no_llm(*args, **kwargs):
+        raise AssertionError("extension must not be sent to the LLM")
+
+    monkeypatch.setattr(tier1_map, "chat_json", no_llm)
+    profile = await _seed_profile(async_session)
+    repo = AnswerLibraryRepository(async_session)
+    field = FormField("1", "textbox", "Phone Extension", "//input[1]")
+    page = FakePage()
+
+    result = await tier1_map.map_fields(page, [field], {}, profile.id, repo)
+
+    assert result.filled == []
+    assert result.for_tier2 == []
+    assert result.unanswered == []
+    assert page.calls == []
+
+
+async def test_unparseable_phone_falls_back_to_llm_path(async_session, monkeypatch):
+    monkeypatch.setattr(
+        tier1_map,
+        "chat_json",
+        _fake_chat_json(
+            {"answers": [{"field_id": "1", "value": "India (+91)", "confidence": 0.9}]}
+        ),
+    )
+    profile = await _seed_profile(async_session)
+    repo = AnswerLibraryRepository(async_session)
+    field = FormField(
+        "1", "combobox", "Phone Country Code", "//select[1]", options=["India (+91)"]
+    )
+    page = FakePage()
+
+    result = await tier1_map.map_fields(
+        page, [field], {"phone": "not-a-phone", "country": "India"}, profile.id, repo
+    )
+
+    assert result.filled == [("Phone Country Code", "India (+91)")]

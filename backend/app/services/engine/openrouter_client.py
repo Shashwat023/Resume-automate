@@ -59,8 +59,16 @@ async def chat_json(
         except httpx.HTTPError as exc:
             raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
 
-    data = resp.json()
-    text = data["choices"][0]["message"]["content"] or ""
+    # A 200 can still carry an error body or a malformed envelope; every such
+    # shape must surface as OpenRouterError so callers' repair/degrade paths
+    # run instead of a bare KeyError/ValueError killing the application.
+    try:
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"] or ""
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise OpenRouterError(
+            f"OpenRouter returned an unusable response: {exc!r}"
+        ) from exc
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:

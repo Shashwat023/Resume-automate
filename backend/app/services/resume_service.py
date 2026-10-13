@@ -6,6 +6,8 @@ instead of the route touching the filesystem directly.
 
 import json
 
+from pydantic import ValidationError
+
 from app.core.exceptions import NotFoundError
 from app.models.db_models import Resume
 from app.ports import ResumeStoragePort
@@ -61,7 +63,7 @@ class ResumeService:
 
         try:
             facts = await parse_resume_facts(resume.extracted_text)
-        except OpenRouterError:
+        except (OpenRouterError, ValidationError):
             return ResumeFacts()
 
         await self._resume_repo.set_parsed_facts(profile_id, facts.model_dump_json())

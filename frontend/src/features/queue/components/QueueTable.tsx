@@ -5,18 +5,21 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { useState } from 'react';
-import { PlayCircle, PauseCircle, SkipForward, ExternalLink, History, MonitorPlay } from 'lucide-react';
+import { PlayCircle, PauseCircle, SkipForward, ExternalLink, History, MonitorPlay, XCircle } from 'lucide-react';
 import { QueueStatusBadge } from './QueueStatusBadge';
 import { JobTimelineModal } from './JobTimelineModal';
 import { LiveView } from './LiveView';
 import { useQueueStore } from '../../../store/queueStore';
 import { type QueueItem } from '../../../types';
+import { activityHint } from '../lib/activityHint';
 import {
   useSkipJobMutation,
   useRetryJobMutation,
   usePauseJobMutation,
   useResumeJobMutation,
+  useCancelJobMutation,
 } from '../services/queue.queries';
+import { isCancellable } from '../lib/queueSelectors';
 
 const columnHelper = createColumnHelper<QueueItem>();
 
@@ -31,6 +34,7 @@ export const QueueTable = () => {
   const retryMutation = useRetryJobMutation();
   const pauseMutation = usePauseJobMutation();
   const resumeMutation = useResumeJobMutation();
+  const cancelMutation = useCancelJobMutation();
 
   const columns = [
     columnHelper.accessor((_, index) => index + 1, {
@@ -80,14 +84,18 @@ export const QueueTable = () => {
     }),
     columnHelper.accessor('status', {
       header: 'Status',
-      cell: info => (
+      cell: info => {
+        const activity = activityHint(info.row.original);
+        return (
         // title carries the finer-grained backend label (e.g. distinguishing
         // "Paused" from an ordinary "Queued", both of which render the same
         // badge) without a visual redesign — hover to see it.
-        <span title={info.row.original.statusLabel}>
+        <span title={activity.title} className="inline-flex items-center gap-1">
           <QueueStatusBadge status={info.getValue()} />
+          {activity.warning && <span className="text-amber-600 text-xs">{activity.warning}</span>}
         </span>
-      ),
+        );
+      },
     }),
     columnHelper.accessor('duration', {
       header: 'Duration',
@@ -139,12 +147,26 @@ export const QueueTable = () => {
                 <PauseCircle className="w-4 h-4" />
               </button>
             )}
-            {item.status === 'failed' && (
+            {isCancellable(item) && (
+              <button
+                onClick={() => {
+                  if (window.confirm('Cancel this application?')) {
+                    cancelMutation.mutate(item.id);
+                  }
+                }}
+                disabled={cancelMutation.isPending}
+                className="p-1.5 text-gray-400 hover:text-red-600 transition-colors disabled:opacity-50"
+                title="Cancel this application"
+              >
+                <XCircle className="w-4 h-4" />
+              </button>
+            )}
+            {item.status === 'failed' && item.rawStatus !== 'needs_review' && (
               <button onClick={() => retryMutation.mutate(item.jobId)} className="p-1.5 text-gray-400 hover:text-indigo-600 transition-colors" title="Retry">
                 <PlayCircle className="w-4 h-4" />
               </button>
             )}
-            {(item.status === 'waiting' || item.status === 'failed') && (
+            {(item.status === 'waiting' || item.status === 'failed') && item.rawStatus !== 'needs_review' && (
               <button onClick={() => skipMutation.mutate(item.jobId)} className="p-1.5 text-gray-400 hover:text-amber-600 transition-colors" title="Skip">
                 <SkipForward className="w-4 h-4" />
               </button>

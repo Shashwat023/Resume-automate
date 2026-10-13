@@ -330,3 +330,28 @@ async def test_phone_country_code_correct_for_a_3_digit_calling_code():
     )
 
     assert result.filled == [("Phone", "501234567")]
+
+
+async def test_tier0_strips_country_code_when_code_selector_is_a_button_dropdown():
+    phone_field = FormField("1", "textbox", "Phone", "//input[@id='phone']")
+    code_button = FormField(
+        "2", "combobox", "Phone Country Code", "//button[1]", from_button=True
+    )
+    page = FakePage()
+
+    result = await fill_deterministic(
+        page, [phone_field, code_button], {"phone": "+918303545027", "country": "India"}
+    )
+
+    assert result.filled == [("Phone", "8303545027")]
+
+
+async def test_tier0_fills_full_number_when_no_code_selector_exists():
+    phone_field = FormField("1", "textbox", "Phone", "//input[@id='phone']")
+    page = FakePage()
+
+    result = await fill_deterministic(
+        page, [phone_field], {"phone": "+918303545027", "country": "India"}
+    )
+
+    assert result.filled == [("Phone", "+918303545027")]
