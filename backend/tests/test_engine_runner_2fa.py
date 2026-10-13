@@ -950,6 +950,130 @@ async def test_run_resumes_after_account_creation_and_advances_workday_steps(
     assert fill_stages == ["info", "review"]
 
 
+async def test_blocking_dropdown_resolved_with_any_option_then_next_advances(
+    async_session, monkeypatch
+):
+    """A Next validation error repairs only its blocking select before retrying."""
+    from types import SimpleNamespace
+
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+
+    class Page:
+        stage = "info"
+        selected = False
+        current_url = "https://example.com/apply"
+        select_calls = []
+        textbox_types = []
+
+        async def goto(self, url):
+            self.current_url = url
+
+        async def url(self):
+            return self.current_url
+
+        async def wait_for_load_state(self, _state):
+            pass
+
+        async def wait_for_timeout(self, _milliseconds):
+            pass
+
+        async def evaluate(self, _expression):
+            return []
+
+        async def snapshot(self):
+            if self.stage == "review":
+                tree = "[9] heading: Review\n[10] button: Submit Application\n"
+                return SimpleNamespace(
+                    formatted_tree=tree, xpath_map={"10": "//submit"}
+                )
+            error = (
+                "[8] text: The field Phone Device Type is required and must have a value\n"
+                if not self.selected
+                else ""
+            )
+            tree = (
+                "[1] textbox: First Name\n[2] combobox: Phone Device Type\n"
+                "  [3] option: Select One\n  [4] option: Option A\n"
+                + error
+                + "[5] button: Save and Continue\n"
+            )
+            return SimpleNamespace(
+                formatted_tree=tree,
+                xpath_map={"1": "//first", "2": "//device", "5": "//next"},
+            )
+
+        def locator(self, xpath):
+            page = self
+
+            class Locator:
+                async def click(self):
+                    if xpath == "//next" and page.selected:
+                        page.stage = "review"
+
+                async def select_option(self, option):
+                    page.select_calls.append(option)
+                    assert option == "Option A"
+                    page.selected = True
+
+            return Locator()
+
+    page = Page()
+
+    class Stagehand:
+        browser = SimpleNamespace(
+            context=SimpleNamespace(active_page=lambda: _active_page())
+        )
+
+        @staticmethod
+        async def create(**_kwargs):
+            return Stagehand()
+
+        async def close(self):
+            pass
+
+    async def _active_page():
+        return page
+
+    async def launch(_profile_id):
+        return SimpleNamespace(browser=object())
+
+    async def no_op(*_args, **_kwargs):
+        return False
+
+    pauses = []
+
+    async def pause(*_args):
+        pauses.append(_args)
+        raise AssertionError("repair should advance without a human pause")
+
+    async def fill(*_args):
+        return cascade
+
+    async def submit(*_args):
+        return runner.SubmitResult(outcome="completed")
+
+    monkeypatch.setattr(runner, "Stagehand", Stagehand)
+    monkeypatch.setattr(runner, "get_or_launch", launch)
+    monkeypatch.setattr(runner, "close_session", no_op)
+    monkeypatch.setattr(runner, "_resolve_captcha_if_present", no_op)
+    monkeypatch.setattr(runner, "_handle_2fa_if_present", no_op)
+    monkeypatch.setattr(runner, "_pause_for_human", pause)
+    monkeypatch.setattr(runner, "_run_fill_cascade", fill)
+    monkeypatch.setattr(runner, "_submit_and_verify", submit)
+    monkeypatch.setattr(
+        runner, "get_settings", lambda: SimpleNamespace(submit_enabled=True)
+    )
+
+    await runner.run_application(application.id)
+
+    await async_session.refresh(application)
+    assert page.select_calls == ["Option A"]
+    assert page.textbox_types == []
+    assert page.stage == "review"
+    assert pauses == []
+    assert application.status == st.COMPLETED
+
+
 async def test_session_is_closed_before_the_profile_lock_releases(
     async_session, monkeypatch
 ):

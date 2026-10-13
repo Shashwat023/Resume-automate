@@ -361,6 +361,40 @@ async def _type_then_reobserve_select(
         return None
 
 
+async def resolve_any_option(
+    sh: Stagehand, page, field: FormField, prefer_decline: bool = False
+) -> str:
+    """Pick a real dropdown option only when the caller deemed that safe."""
+    try:
+        opened = await _resolve_single_step(
+            sh, page, f"Open the '{field.label}' dropdown"
+        )
+        if opened.startswith("ERROR:"):
+            return opened
+        await _wait_for_options_to_render(page)
+        preference = (
+            " Prefer decline, prefer not to say, or I don't wish to answer."
+            if prefer_decline
+            else ""
+        )
+        instruction = (
+            f"In the open '{field.label}' dropdown, click ANY one real option; "
+            "never the placeholder ('Select…', 'Select One', 'Choose…', '--')."
+            + preference
+        )
+        observed = await _with_timeout(sh.observe(instruction, page=page))
+        if not observed.data:
+            return "ERROR:observe() found no real option"
+        result = await _act_with_retry(sh, page, observed.data[0])
+        if not result.data.success:
+            return f"ERROR:{result.data.message}"
+        description = result.data.action_description
+        failure = _check_description_for_failure(field, description)
+        return f"ERROR:{failure}" if failure else description
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR:{_describe(exc)}"
+
+
 async def _resolve_combobox(sh: Stagehand, page, field: FormField, value: str) -> str:
     """
     Custom comboboxes are genuinely two DOM states, not one: the option

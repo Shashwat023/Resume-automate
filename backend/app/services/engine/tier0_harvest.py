@@ -47,6 +47,11 @@ _FIELD_LINE = re.compile(
 )
 
 TARGET_ROLES = {"textbox", "combobox", "checkbox", "radio", "file"}
+COLLECT_BUTTON_DROPDOWNS = True
+_BUTTON_DROPDOWN = re.compile(r"select one|select\.\.\.|choose one|please select", re.I)
+_BUTTON_EXCLUDED = re.compile(
+    r"\b(?:file|document|resume|attachment|upload|date|calendar|photo)s?\b", re.I
+)
 
 # The only grouping construct confirmed to carry a required-field marker on
 # a real form: `[id] group: Resume/CV*` — the enclosing group's OWN label
@@ -99,6 +104,7 @@ class FormField:
         default_factory=list
     )  # only populated if the tree exposes option: children
     required: bool = False
+    from_button: bool = False
 
     @property
     def is_native_select(self) -> bool:
@@ -177,6 +183,32 @@ def collect_fields(formatted_tree: str, xpath_map: dict[str, str]) -> list[FormF
                 required=required,
             )
         )
+
+    if COLLECT_BUTTON_DROPDOWNS:
+        for index, (_indent, node_id, role, label) in enumerate(nodes):
+            if (
+                role != "button"
+                or not _BUTTON_DROPDOWN.search(label)
+                or _BUTTON_EXCLUDED.search(label)
+            ):
+                continue
+            cleaned = (
+                _BUTTON_DROPDOWN.sub("", label)
+                .replace("Required", "")
+                .replace("*", "")
+                .strip(" :-")
+            )
+            group_label, group_required = _enclosing_group(nodes, index, _indent)
+            fields.append(
+                FormField(
+                    node_id,
+                    "combobox",
+                    cleaned or group_label or label,
+                    xpath_map.get(node_id),
+                    required=group_required or "Required" in label or "*" in label,
+                    from_button=True,
+                )
+            )
 
     return fields
 

@@ -57,7 +57,12 @@ from app.services.engine.tier0_harvest import (
     fill_deterministic,
 )
 from app.services.engine.tier1_map import Tier1Result, map_fields
-from app.services.engine.tier2_resolve import Tier2Result, resolve_and_execute
+from app.services.engine.tier2_resolve import (
+    Tier2Result,
+    resolve_and_execute,
+    resolve_any_option,
+)
+from app.services.engine.validation import blocking_field_labels
 from app.services.engine.timeouts import (
     LLM_CALL_TIMEOUT_SECONDS,
     describe,
@@ -96,6 +101,22 @@ _APPLY_LINK = re.compile(
 _ACCOUNT_HEADING = re.compile(
     r"^\s*\[[\w-]+\]\s+heading:\s*(?:Create Account|Sign In)\s*$",
     re.I | re.M,
+)
+_SENSITIVE_LABEL = re.compile(
+    r"sponsor|authori[sz]ed to work|work authori|citizenship|visa|criminal|"
+    r"convict|felony|consent|agree|acknowledg|certif|terms|privacy|attest|affirm",
+    re.I,
+)
+_EEO_LABEL = re.compile(
+    r"gender|race|ethnic|veteran|disabilit|sexual|orientation|pronoun", re.I
+)
+_CREDENTIAL_LABEL = re.compile(
+    r"password|passcode|passphrase|\bpin\b|security (code|answer|question)|"
+    r"verify (new )?password|otp|one[- ]time",
+    re.I,
+)
+_DECLINE_OPTION = re.compile(
+    r"decline|prefer not|do not wish|don't wish|not to (?:say|disclose)", re.I
 )
 _PASSWORD_FIELD = re.compile(
     r"^\s*\[[\w-]+\]\s+(?:textbox|input):\s*"
@@ -224,6 +245,13 @@ class NextResult:
     advanced: bool
     reason: str
     label: str | None = None
+
+
+@dataclass
+class BlockingResolution:
+    acted: bool
+    escalated: list[str]
+    picks: list[tuple[str, str]]
 
 
 SUBMIT_SETTLE_TIMEOUT_SECONDS = 15
@@ -488,6 +516,8 @@ async def run_application(application_id: str) -> None:
                     # then advance until the actual Submit control is visible.
                     auto_steps = 0
                     seen_pages: dict[str, int] = {}
+                    blocking_rounds: dict[str, int] = {}
+                    logged_button_dropdown_pages: set[str] = set()
                     total_tier0 = total_tier1 = total_tier2 = 0
                     while True:
                         await _check_paused_and_wait(application_id)
@@ -522,6 +552,19 @@ async def run_application(application_id: str) -> None:
                         fields = collect_fields(
                             snapshot.formatted_tree, snapshot.xpath_map
                         )
+                        button_dropdown_count = sum(
+                            field.from_button for field in fields
+                        )
+                        if (
+                            button_dropdown_count
+                            and page_fingerprint not in logged_button_dropdown_pages
+                        ):
+                            await _log(
+                                application_id,
+                                f"dropdown-like buttons collected: {button_dropdown_count}",
+                                tier="tier0",
+                            )
+                            logged_button_dropdown_pages.add(page_fingerprint)
                         submit_xpath = find_submit_button(
                             snapshot.formatted_tree, snapshot.xpath_map
                         )
@@ -620,9 +663,46 @@ async def run_application(application_id: str) -> None:
                             advanced = next_result.advanced
                             if not advanced:
                                 if next_result.reason == "no_progress":
+                                    blocking_labels: list[str] = []
+                                    escalated: list[str] = []
+                                    while (
+                                        not advanced
+                                        and blocking_rounds.get(page_fingerprint, 0) < 2
+                                    ):
+                                        current = await with_timeout(
+                                            page.snapshot(), what="page.snapshot"
+                                        )
+                                        labels = await blocking_field_labels(
+                                            page, current.formatted_tree
+                                        )
+                                        blocking_labels.extend(labels)
+                                        resolution = await _resolve_blocking_fields(
+                                            application_id,
+                                            sh,
+                                            page,
+                                            profile_dict,
+                                            profile_id,
+                                            cascade,
+                                        )
+                                        escalated.extend(resolution.escalated)
+                                        if not resolution.acted:
+                                            break
+                                        blocking_rounds[page_fingerprint] = (
+                                            blocking_rounds.get(page_fingerprint, 0) + 1
+                                        )
+                                        next_result = await _click_next(
+                                            page, application_id
+                                        )
+                                        advanced = next_result.advanced
+                                    if advanced:
+                                        continue
                                     await _log(
                                         application_id,
-                                        f"Clicked {next_result.label or 'Continue'} but the page did not advance",
+                                        "Blocking fields: ["
+                                        + ", ".join(dict.fromkeys(blocking_labels))
+                                        + "]; needs you: ["
+                                        + ", ".join(dict.fromkeys(escalated))
+                                        + "]",
                                         level="warn",
                                         tier="navigation",
                                     )
@@ -848,6 +928,104 @@ async def _map_fields(
             resume_facts,
             force_refill,
         )
+
+
+async def _resolve_blocking_fields(
+    application_id: str, sh, page, profile_dict: dict, profile_id: int, cascade
+) -> BlockingResolution:
+    snapshot = await with_timeout(page.snapshot(), what="page.snapshot")
+    labels = await blocking_field_labels(page, snapshot.formatted_tree)
+    fields = collect_fields(snapshot.formatted_tree, snapshot.xpath_map)
+    acted = False
+    escalated: list[str] = []
+    picks: list[tuple[str, str]] = []
+    for label in labels:
+        field = next(
+            (
+                f
+                for f in fields
+                if f.label.lower() == label.lower()
+                or f.label.lower() in label.lower()
+                or label.lower() in f.label.lower()
+            ),
+            None,
+        )
+        if field is None:
+            escalated.append(label)
+            continue
+        if _CREDENTIAL_LABEL.search(field.label):
+            escalated.append(field.label)
+            continue
+        if _SENSITIVE_LABEL.search(field.label):
+            escalated.append(field.label)
+            continue
+        if field.role in {"checkbox", "radio", "file"}:
+            escalated.append(field.label)
+            continue
+        if field.role == "textbox":
+            mapped = await _map_fields(
+                page, [field], profile_dict, profile_id, force_refill=True
+            )
+            if mapped.filled or mapped.for_tier2:
+                acted = True
+            else:
+                escalated.append(field.label)
+            continue
+        if field.is_native_select and field.xpath:
+            options = [
+                o
+                for o in field.options
+                if o.strip().lower()
+                not in {
+                    "select",
+                    "select...",
+                    "select one",
+                    "choose",
+                    "choose...",
+                    "please select",
+                    "--",
+                }
+            ]
+            if _EEO_LABEL.search(field.label):
+                options.sort(
+                    key=lambda option: not bool(_DECLINE_OPTION.search(option))
+                )
+            if options:
+                chosen = options[0]
+                await with_timeout(
+                    page.locator(field.xpath).select_option(chosen),
+                    what="select_option",
+                )
+                await _log(
+                    application_id,
+                    f"Any option selected for '{field.label}': {chosen}",
+                    level="warn",
+                    tier="tier2",
+                )
+                acted = True
+                picks.append((field.label, chosen))
+            else:
+                escalated.append(field.label)
+            continue
+        result = await resolve_any_option(
+            sh, page, field, bool(_EEO_LABEL.search(field.label))
+        )
+        if not result.startswith("ERROR:"):
+            await _log(
+                application_id,
+                f"Any option selected for '{field.label}': {result}",
+                level="warn",
+                tier="tier2",
+            )
+            acted = True
+            picks.append((field.label, result))
+        else:
+            escalated.append(field.label)
+    return BlockingResolution(
+        acted=acted,
+        escalated=list(dict.fromkeys(escalated)),
+        picks=picks,
+    )
 
 
 async def _run_fill_cascade(
@@ -1762,11 +1940,12 @@ async def _click_next(page, application_id: str) -> NextResult:
             )
             return NextResult(True, True, "advanced", match.group(2))
         elapsed += PAGE_PROGRESS_POLL_MS
+    blocking = await blocking_field_labels(page, after.formatted_tree)
     await _log_page_diagnostics(
         application_id,
         page,
         after.formatted_tree,
-        f"{match.group(2)} did not advance the page",
+        f"{match.group(2)} did not advance the page; blocking=[{', '.join(blocking)}]",
     )
     return NextResult(True, False, "no_progress", match.group(2))
 
