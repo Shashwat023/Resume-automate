@@ -300,6 +300,162 @@ async def test_submit_clicks_again_after_2fa_resolves_before_reading_outcome(
     assert page.click_calls == ["//button[@id='submit-1']", "//button[@id='submit-2']"]
 
 
+async def test_delayed_2fa_after_submit_uses_the_2fa_path(async_session, monkeypatch):
+    application, cascade = await _seed_with_job_and_cascade(async_session, monkeypatch)
+    page = FakeSubmitPage(
+        [
+            (_SUBMIT_TREE_1, {"1": "//submit-1"}),
+            ("[9] textbox: First Name\n", {}),
+            (_OTP_TREE, {}),
+            (_SUBMIT_TREE_2, {"3": "//submit-2"}),
+            (_CONFIRMATION_TREE, {}),
+        ]
+    )
+
+    async def no_captcha(*_args, **_kwargs):
+        from app.services.captcha.service import CaptchaOutcome
+
+        return CaptchaOutcome(status="not_present")
+
+    handled = []
+
+    async def handle(*_args):
+        handled.append(True)
+        return True
+
+    monkeypatch.setattr(runner, "resolve_captcha", no_captcha)
+    monkeypatch.setattr(runner, "is_paused", lambda _id: False)
+    monkeypatch.setattr(runner, "_handle_2fa_if_present", handle)
+    result = await runner._submit_and_verify(
+        application.id, None, page, {}, application.profile_id, None, cascade
+    )
+
+    assert handled == [True]
+    assert result.outcome == "completed"
+    assert len(page.click_calls) == 2
+
+
+async def test_diagnostics_event_has_labels_and_url_but_no_field_values(
+    async_session, monkeypatch
+):
+    application = await _seed(async_session, monkeypatch)
+
+    class Page:
+        async def url(self):
+            return "https://example.com/apply/form?token=SECRET"
+
+        async def evaluate(self, _expression):
+            return 0
+
+    tree = (
+        "[1] textbox: First Name\n[2] button: Next\n"
+        "[3] StaticText: SENTINEL-PAGE-TEXT-123\n"
+    )
+    await runner._log_page_diagnostics(application.id, Page(), tree, "test")
+    from sqlalchemy import select
+    from app.models.db_models import RunEvent
+
+    events = (await async_session.scalars(select(RunEvent))).all()
+    diagnostics = [event for event in events if event.tier == "diagnostics"]
+    assert len(diagnostics) == 1
+    message = diagnostics[0].message
+    assert "textbox:First Name" in message and "example.com/apply/form" in message
+    assert "SENTINEL-PAGE-TEXT-123" not in message and "token=SECRET" not in message
+
+
+async def test_queued_application_stays_queued_until_lock_acquired(
+    async_session, monkeypatch
+):
+    from app.worker import queue_runner
+
+    application = await _seed(async_session, monkeypatch)
+    application.status = st.QUEUED
+    await async_session.commit()
+    lock = queue_runner.get_profile_lock(str(application.profile_id))
+    await lock.acquire()
+    launched = []
+
+    async def launch(_key):
+        launched.append(True)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(runner, "get_or_launch", launch)
+    task = __import__("asyncio").create_task(runner.run_application(application.id))
+    await __import__("asyncio").sleep(0.05)
+    await async_session.refresh(application)
+    assert (
+        application.status == st.QUEUED
+        and application.started_at is None
+        and not launched
+    )
+    lock.release()
+    await task
+    await async_session.refresh(application)
+    assert launched and application.started_at is not None
+    queue_runner._profile_locks.pop(str(application.profile_id), None)
+
+
+async def test_profile_or_job_missing_inside_lock_fails_application(
+    async_session, monkeypatch
+):
+    from app.worker import queue_runner
+
+    application = await _seed(async_session, monkeypatch)
+    application.status = st.QUEUED
+    await async_session.commit()
+    lock = queue_runner.get_profile_lock(str(application.profile_id))
+    await lock.acquire()
+    task = __import__("asyncio").create_task(runner.run_application(application.id))
+    await __import__("asyncio").sleep(0.05)
+    job = await async_session.get(Job, application.job_id)
+    await async_session.delete(job)
+    await async_session.commit()
+    lock.release()
+    await task
+    await async_session.refresh(application)
+    assert application.status == st.FAILED
+    assert (
+        application.error == "Profile or job not found"
+        and application.finished_at is not None
+    )
+    queue_runner._profile_locks.pop(str(application.profile_id), None)
+
+
+@pytest.mark.parametrize("status", [st.QUEUED, st.RUNNING, st.PAUSED, st.NEEDS_INPUT])
+async def test_runner_safety_net_fails_row_when_run_returns_unexpectedly(
+    async_session, monkeypatch, status
+):
+    from app.worker import queue_runner
+
+    application = await _seed(async_session, monkeypatch)
+    application.status = status
+    await async_session.commit()
+
+    async def cancelled(_id):
+        raise runner.ApplicationCancelled
+
+    monkeypatch.setattr(runner, "_check_paused_and_wait", cancelled)
+    queue_runner._cancel_events[application.id] = __import__("asyncio").Event()
+    await runner.run_application(application.id)
+    await async_session.refresh(application)
+    assert (
+        application.status == st.FAILED
+        and application.error == "Run ended unexpectedly"
+    )
+    assert application.id not in queue_runner._cancel_events
+
+
+async def test_runner_safety_net_leaves_completed_row_unchanged(
+    async_session, monkeypatch
+):
+    application = await _seed(async_session, monkeypatch)
+    application.status = st.COMPLETED
+    await async_session.commit()
+    await runner.run_application(application.id)
+    await async_session.refresh(application)
+    assert application.status == st.COMPLETED
+
+
 async def test_submit_does_not_reclick_when_no_2fa_challenge_appears(
     async_session, monkeypatch
 ):

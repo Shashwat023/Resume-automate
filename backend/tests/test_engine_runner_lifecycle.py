@@ -2,7 +2,6 @@ import asyncio
 
 import pytest
 
-from app.domain import status as st
 from app.services.engine import runner
 from app.services.engine.tier0_harvest import FormField, HarvestResult
 from app.services.engine.tier1_map import Tier1Result
@@ -35,7 +34,7 @@ def _clear_queue_events():
     queue_runner._pause_events.clear()
 
 
-async def test_cancel_mid_run_stops_at_next_checkpoint_and_keeps_cancelled():
+async def test_check_paused_and_wait_raises_when_cancelled():
     application_id = "cancel-at-checkpoint"
     queue_runner._cancel_events[application_id] = asyncio.Event()
     queue_runner._cancel_events[application_id].set()
@@ -91,18 +90,30 @@ def test_required_file_field_remains_escalatable():
     assert runner._repairable_unhandled_labels(cascade) == set()
 
 
-@pytest.mark.parametrize(
-    "raw, expected",
-    [
-        (st.QUEUED, True),
-        (st.RUNNING, True),
-        (st.PAUSED, False),
-        (st.NEEDS_INPUT, False),
-        (st.COMPLETED, False),
-        (st.FAILED, False),
-        (st.CANCELLED, False),
-        (st.NEEDS_REVIEW, False),
-    ],
-)
-def test_terminal_and_active_status_expectations(raw, expected):
-    assert (raw in (st.QUEUED, st.RUNNING)) is expected
+async def test_tier2_checkpoint_runs_before_each_field_and_can_abort():
+    from app.services.engine import tier2_resolve
+
+    fields = [
+        (FormField("1", "checkbox", "First", "//first"), "yes"),
+        (FormField("2", "checkbox", "Second", "//second"), "yes"),
+    ]
+    calls = 0
+    observed = []
+
+    async def checkpoint():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise runner.ApplicationCancelled
+
+    class Stagehand:
+        async def observe(self, instruction, page=None):
+            observed.append(instruction)
+            return type("Result", (), {"data": []})()
+
+    with pytest.raises(runner.ApplicationCancelled):
+        await tier2_resolve.resolve_and_execute(
+            Stagehand(), object(), fields, checkpoint
+        )
+
+    assert len(observed) == 1

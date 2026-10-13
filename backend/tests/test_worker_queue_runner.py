@@ -254,3 +254,29 @@ async def test_profile_session_times_out_instead_of_waiting_forever(monkeypatch)
     finally:
         held_lock.release()
         qr._profile_locks.pop("profile-session-timeout", None)
+
+
+async def test_paused_waiting_application_releases_lock_for_others():
+    key = "paused-waiting"
+    lock = qr.get_profile_lock(key)
+    await lock.acquire()
+    await _seed("A")
+    order = []
+
+    async def first():
+        async with qr.profile_session(key, "A"):
+            order.append("A-in")
+
+    first_task = asyncio.create_task(first())
+    await asyncio.sleep(0)
+    await qr.signal_pause("A")
+    lock.release()
+
+    async with qr.profile_session(key):
+        order.append("B-in")
+    assert order == ["B-in"]
+
+    await qr.signal_resume("A")
+    await first_task
+    assert order == ["B-in", "A-in"]
+    qr._profile_locks.pop(key, None)

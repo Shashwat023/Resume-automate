@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 
@@ -97,3 +98,34 @@ def test_get_session_never_launches_and_rejects_closed_sessions(monkeypatch):
     closed = type("Session", (), {"browser": type("Browser", (), {"closed": True})()})()
     chrome_launcher._sessions["closed"] = closed
     assert chrome_launcher.get_session("closed") is None
+
+
+async def test_get_or_launch_serializes_concurrent_callers(monkeypatch, tmp_path):
+    key = "concurrent-profile"
+    launches = []
+
+    class Browser:
+        closed = False
+
+    async def launch(**_kwargs):
+        launches.append(True)
+        await asyncio.sleep(0.05)
+        return Browser()
+
+    async def extension(*_args):
+        return "ext"
+
+    monkeypatch.setattr(chrome_launcher.local_browser, "launch", launch)
+    monkeypatch.setattr(chrome_launcher, "_discover_extension_id", extension)
+    monkeypatch.setattr(chrome_launcher, "_kill_profile_chrome", lambda *_args: None)
+    monkeypatch.setattr(chrome_launcher, "_prepare_profile_dir", lambda *_args: None)
+    monkeypatch.setattr(chrome_launcher, "_free_port", lambda: 9999)
+    monkeypatch.setattr(chrome_launcher.settings, "use_real_chrome", False)
+    monkeypatch.setattr(chrome_launcher.settings, "chrome_profiles_dir", tmp_path)
+    try:
+        first, second = await asyncio.gather(
+            chrome_launcher.get_or_launch(key), chrome_launcher.get_or_launch(key)
+        )
+        assert len(launches) == 1 and first is second
+    finally:
+        chrome_launcher._sessions.pop(key, None)
